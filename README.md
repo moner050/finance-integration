@@ -1,94 +1,315 @@
-# 단타 알림 시스템 (토스증권 Open API · 알림 전용)
+# 단타 알림·자동매매 시스템 (토스증권 Open API)
 
-토스증권 읽기 전용 API 로 1분봉·현재가·보유를 30초마다 폴링하고, VWAP·RVOL·선행 바스켓
-조건으로 매수/손절/익절 신호를 만들어 **텔레그램**으로 보낸다. 주문은 내지 않는다.
-감시 종목은 **백오피스 화면**에서 지정하고, 엔진은 재시작 없이 다음 사이클에 반영한다.
+토스증권 Open API 로 1분봉·현재가·보유를 30초마다 읽어 VWAP·RVOL·선행 바스켓 조건으로
+**매수 / 손절 / 익절 신호**를 만들고 텔레그램으로 보낸다. 감시 종목은 백오피스 화면에서 지정한다.
+자동매매는 구현되어 있지만 **기본은 꺼져 있고**, 세 가지 게이트를 모두 켜야 실제 주문이 나간다.
+
+| 구성 요소 | 실행 | 역할 |
+|---|---|---|
+| 엔진 워커 | `python run_engine.py` | 30초 폴링 → 지표 → 상태기계 → 텔레그램 알림 → (자동매매) |
+| 백오피스 | `python run_backoffice.py` | http://127.0.0.1:8000 — 종목·상태·신호 이력·채널·자동매매 |
+| MySQL | 이미 쓰는 서버 | `alert_*` 테이블 5개. 두 프로세스가 공유하는 유일한 통로 |
+
+---
+
+## 1. 동작 원리
+
+### 1.1 신호 흐름
+
+```
+토스 API ──(1분봉·현재가·보유)──▶ 엔진 ──▶ 지표 ──▶ 상태기계 ──▶ Signal ──▶ Dispatcher ──▶ 텔레그램
+                                          │                                       └──▶ MySQL alert_signal_log
+                                          └──▶ (AUTOTRADE_MODE≠off) 실행기 ──▶ 정책 ──▶ 브로커 ──▶ alert_orders
+```
+
+- **지표**는 완성된 봉만 쓴다. 진행 중인 마지막 봉은 거래량이 부분값이라 뺀다.
+- **RVOL(상대 거래량)**: 같은 현지 시각의 과거 8세션 중앙값 대비 배수. 표본이 없으면 직전 정규장 20봉 평균 대비.
+- **VWAP·세션 정점 RVOL**: 당일 정규장 봉을 누적해서 계산한다(120봉 창이 아니다).
+- **매수 신호(🔵)**: 선행 바스켓 방향 OK + RVOL 2.0 돌파 + 신호봉 종가가 VWAP 밴드 위 + 강봉(종가가 봉 상단 절반). 정규장 봉에서만.
+- **보유 중**: 손절(-5%) > 신호봉 저점/밴드 이탈 매도 > 거래량 소진 익절 > 불타기 > 일부 익절 검토 > 판단 애매 > 마감 30분 전.
+
+### 1.2 종목별 상태기계
+
+`관망 → 진입대기(매수 알림) → 보유(실제 보유 확인) → 청산대기(매도 알림) → 관망(보유 소멸)`.
+상태 전이는 시간이 아니라 **실제 보유 변화**로 일어난다. 알림대로 안 움직이면 같은 알림이 쿨다운 간격으로 반복된다.
+상태·손절선·타이머는 MySQL 에 저장되어 재시작해도 이어진다.
+
+### 1.3 알림 등급과 쿨다운
+
+| 등급 | 알림 | 쿨다운 |
+|---|---|---|
+| action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 | 15분 (주문 관련은 없음) |
+| review | 🟡 절반/1/3 익절 검토 · ⚪ 매수 취소 · 🎉✅ 청산 완료 | 45분 / 15분 |
+| info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 오늘 성적 · ⚪ 시스템 | 없음 |
+
+쿨다운 키는 (신호 종류, 종목)이다. `TELEGRAM_MIN_SEVERITY` 로 받을 최소 등급을 정한다.
+
+---
+
+## 2. 디렉터리
 
 ```
 alertbot/
-  config.py        .env 로드, 임계값 상수, 초기 종목(SEED_WATCHLIST)
-  timeutil.py      거래소 현지시각 변환
-  toss_client.py   토스증권 읽기 전용 클라이언트 (토큰·캔들·현재가·보유·캘린더)
-  market_hours.py  개장/휴장/조기폐장 판정 (캘린더 API, 실패 시 고정 시간)
-  indicators.py    RVOL·VWAP(세션 누적)·EMA·RSI(Wilder)·ATR(True Range) 순수 함수
-  engine.py        신호 엔진: 스냅샷 → 상태기계 → 알림, 시황 요약, 워치리스트 핫리로드, 상태 영속
-  tracking.py      신호 추적·거래 기록 CSV
-  models.py        Signal (종류·등급·쿨다운)
-  notify/          Dispatcher(쿨다운·라우팅·이력) + telegram 채널
-  db.py            MySQL 저장소 (alert_watchlist / alert_engine_status / alert_signal_log)
-  backoffice/      FastAPI + Jinja2 + HTMX 화면 (상태 · 종목 · 신호 이력 · 채널)
-run_engine.py      엔진 워커 진입점
-run_backoffice.py  백오피스 진입점 (기본 http://127.0.0.1:8000)
-tests/             pytest (지표 골든값, 엔진 시나리오, 알림, DB, 백오피스)
+  config.py          .env 로드, 임계값 상수, 초기 종목(SEED_WATCHLIST)
+  timeutil.py        거래소 현지시각 변환 (KR/US, 서머타임)
+  toss_client.py     토스 읽기 전용 클라이언트 (토큰·캔들·현재가·보유·캘린더) — GET 만
+  market_hours.py    개장/휴장/조기폐장 판정 (캘린더 API, 실패 시 고정 시간)
+  indicators.py      RVOL·VWAP(세션 누적)·EMA·RSI(Wilder)·ATR(True Range)
+  engine.py          신호 엔진 (상태기계, 시황 요약, 워치리스트 핫리로드, 상태 저장·복원, 자동매매 훅)
+  tracking.py        signal_tracking.csv(신호 뒤 15/30/60분 가격), trade_log.csv(청산 기록)
+  models.py          Signal (종류·등급·쿨다운)
+  notify/            Dispatcher(쿨다운·이력) + telegram 채널
+  db.py              MySQL 저장소 (alert_watchlist / alert_engine_status / alert_signal_log / alert_settings / alert_orders)
+  trading/           자동매매: broker(TossOrderClient·DryRunBroker) · policy(리스크 정책) · executor(실행기) · models
+  backoffice/        FastAPI + Jinja2 + HTMX 화면
+run_engine.py        엔진 진입점          run_backoffice.py   백오피스 진입점
+Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest 67개
 ```
 
-## 실행
+---
 
-```bash
+## 3. 설정값
+
+### 3.1 `.env` (프로젝트 루트, 따옴표·등호 앞뒤 공백 없이)
+
+| 키 | 필수 | 의미 | 기본 |
+|---|---|---|---|
+| `TOSS_CLIENT_ID` / `TOSS_CLIENT_SECRET` | ✔ | 토스 WTS > 설정 > Open API 에서 발급. **허용 IP 관리에 실행 PC 의 공인 IP 등록** (미등록 IP 는 403) | |
+| `TELEGRAM_BOT_TOKEN` | ✔ | BotFather 가 주는 `1234567890:AA...` 전체 | |
+| `TELEGRAM_CHAT_ID` | ✔ | **받는 사람** 채팅의 숫자 ID (봇 ID 아님). 여러 명은 쉼표. 각 수신자는 봇에게 먼저 `/start` | |
+| `TELEGRAM_MIN_SEVERITY` | | 받을 최소 등급 `info` / `review` / `action` | info |
+| `MYSQL_HOST` `MYSQL_PORT` `MYSQL_DATABASE` `MYSQL_USER` `MYSQL_PASSWORD` | ✔ | 기존 MySQL. 테이블은 `alert_` 접두어로 자동 생성 | |
+| `ALERT_BACKOFFICE_HOST` / `ALERT_BACKOFFICE_PORT` | | 백오피스 바인드 주소·포트. 인증이 없으므로 로컬 전용 권장 | 127.0.0.1 / 8000 |
+| `ALERT_DATA_DIR` | | 로그·CSV 저장 폴더. Docker 는 `/data` | 프로젝트 루트 |
+| `AUTOTRADE_MODE` | | 자동매매 모드 `off` / `dry` / `live` (4절) | off |
+| `AUTOTRADE_BUY_BUFFER_PCT` | | 매수 지정가 = 신호가 × (1 + 이 %) | 0.3 |
+| `AUTOTRADE_BUY_TTL_MIN` | | 매수 지정가가 이 분 안에 안 체결되면 취소 | 3 |
+| `AUTOTRADE_HARD_MAX_AMOUNT_KRW` / `_USD` | | 1회 매수 금액 하드캡. DB 한도보다 우선 | 2,000,000 / 2,000 |
+
+같은 `.env` 를 다른 프로젝트와 공유해도 된다. 이 프로젝트가 읽는 접두어는 `TOSS_ TELEGRAM_ MYSQL_ ALERT_ AUTOTRADE_` 뿐이다.
+환경변수로도 같은 키를 줄 수 있다(Docker `env_file`). `.env` 값이 우선한다.
+
+### 3.2 임계값 (`alertbot/config.py`, 코드 상수)
+
+| 상수 | 기본 | 의미 |
+|---|---|---|
+| `POLL_INTERVAL_SEC` | 30 | 폴링 주기. 매수 판단은 완성봉 기준이라 봉당 1회 |
+| `RVOL_TRIGGER` | 2.0 | 매수 신호 거래량 배수 (직전봉 < 2.0 ≤ 현재봉 돌파) |
+| `VWAP_BAND_PCT` / `ATR_BAND_MULT` | 0.15 / 0.5 | 기준선 밴드 하한 % / 변동성(ATR%) 배수 중 큰 쪽 |
+| `STRONG_BAR_MIN` | 0.5 | 신호봉 종가가 봉 범위의 이 비율 이상 위치 |
+| `LEADER_GAP_PCT` | 1.0 | 선행 바스켓 평균 등락률 트리거 (%) |
+| `LEADER_MOMENTUM_MIN` / `LEADER_MOMENTUM_GATE` | 5 / False | 선행 최근 5분 변화율 기록(추적 CSV `leader_mom`) / True 면 방향 판정에도 사용 |
+| `STOP_LOSS_PCT` | -5.0 | 평단 대비 고정 손절 한도 |
+| `FADE_STRONG_RATIO` / `FADE_WEAK_RATIO` / `FADE_MIN_PEAK` | 0.4 / 0.6 / 2.5 | 세션 정점 대비 거래량 소진 비율(전량 익절 / 절반 검토), 정점 최소 배수 |
+| `OPEN_EXCLUDE_MIN` | 10 | 개장 후 이 분 동안의 봉은 정점 계산에서 제외 |
+| `ALERT_COOLDOWN_MIN` / `WEAK_COOLDOWN_MIN` | 15 / 45 | 강한/약한 알림 재발송 간격 |
+| `REENTRY_BLOCK_MIN` / `EXIT_GRACE_MIN` | 60 / 20 | 매도 알림 뒤 매수 차단 / 매수 뒤 익절 알림 유예 |
+| `ENTRY_MIN_PEAK_RATIO` | 0.6 | 매수 신호 RVOL 이 그날 정점의 이 비율 이상이어야 함 |
+| `CLOSE_WARN_MIN` / `SUMMARY_INTERVAL_MIN` | 30 / 30 | 마감 전 정리 알림 / 시황 요약 주기 |
+| `ENABLE_ADD_ON` `ADDON_MIN_PROFIT_PCT` `ADDON_MAX_COUNT` | True / 2.0 / 1 | 불타기 알림 |
+| `PROFILE_PAGES` / `MIN_PROFILE_SESSIONS` | 16 / 3 | 거래량 프로파일 이력(200봉×16) / 시각당 최소 표본 |
+| `WATCH_HOLDINGS` | True | 보유 조회. False 면 매수 알림만 |
+
+### 3.3 워치리스트 항목 (백오피스 '종목')
+
+| 필드 | 의미 |
+|---|---|
+| 심볼 / 시장 | KR 은 6자리 코드(005930), US 는 티커(SOXX). 시장은 장 시간·타임존을 정한다 |
+| 표시명 | 알림에 보이는 이름 (없으면 심볼) |
+| 선행 바스켓 | 방향 조건에 쓸 종목들(쉼표). 비우면 방향 조건 생략(개별주) |
+| 인버스 | 선행 방향을 뒤집는다 (KODEX 인버스 등) |
+| 페어 | 동시 진입을 막을 반대 종목 (SOXL↔SOXS). 양쪽이 서로를 가리켜야 하며 아니면 `!` 경고 |
+| 보유 중에만 감시 | 3배 상품처럼 매수 신호는 내지 않고 보유 중 손절·익절만 감시 |
+| 활성 | 끄면 감시에서 빠진다(이력 보존). 삭제보다 권장 |
+| 자동매매 대상 / 1회 매수 금액 | 자동매매 게이트(4절). 금액 통화는 시장을 따른다(KRW / USD) |
+
+저장하면 엔진이 다음 사이클(30초 안)에 반영한다. 재시작 불필요.
+
+### 3.4 자동매매 한도 (백오피스 '자동매매', MySQL `alert_settings`)
+
+| 키 | 기본 | 의미 |
+|---|---|---|
+| `autotrade_enabled` | 0 | 킬 스위치. 1 이어야 주문 |
+| `max_positions` | 3 | 동시 보유 종목 수 상한 (열린 매수 의도 포함) |
+| `max_orders_per_day` | 20 | 하루 주문 횟수 상한. **손절 매도는 면제** |
+| `daily_loss_limit_krw` / `_usd` | 300,000 / 200 | 오늘 실현손실이 이 아래면 **매수 중단** (매도는 계속) |
+| `max_order_amount_krw` / `_usd` | 1,000,000 / 1,000 | 1회 매수 금액 상한. `.env` 하드캡이 더 작으면 그쪽 |
+
+---
+
+## 4. `AUTOTRADE_MODE` 상세
+
+`.env` 의 `AUTOTRADE_MODE` 는 엔진이 **실행기(Executor)를 만들지, 어떤 브로커를 붙일지**를 정한다.
+키가 없으면 `off` 다. 코드 배포·업데이트만으로는 절대 live 가 되지 않는다.
+
+| 모드 | 실행기 | 브로커 | 정책 검사 | `alert_orders` 기록 | 텔레그램 |
+|---|---|---|---|---|---|
+| `off` | 만들지 않음 | — | — | 없음 | 신호 알림만 |
+| `dry` | 만듦 | `DryRunBroker` (API 호출 없음, 지정가/참조가로 즉시 가상 체결) | 실제와 동일 | 의도·거절 사유·가상 체결 | `[DRY]` 접두어로 주문 접수/체결 알림 |
+| `live` | 만듦 | `TossOrderClient` (실제 `POST /api/v1/orders`) | 실제와 동일 | 실제 주문번호·체결·실현손익 | 주문 접수/체결/실패/차단 알림 |
+
+### 4.1 실제 주문이 나가는 조건 (3중 게이트)
+
+1. `AUTOTRADE_MODE=live` (`.env`, 엔진 재시작 필요)
+2. 백오피스 '자동매매' 화면의 **킬 스위치 ON** (`alert_settings.autotrade_enabled=1`, 재시작 불필요, 엔진이 매 사이클 읽음)
+3. 해당 종목의 **자동매매 대상 체크 + 1회 매수 금액 > 0** ('종목' 화면)
+
+하나라도 아니면 의도는 `rejected` 로 기록되고 사유(`disabled`, `symbol-not-auto` …)가 남는다. 알림은 그대로 나간다.
+
+### 4.2 dry 모드가 하는 일
+
+- 매수 신호 → 지정가·수량을 계산하고 정책을 통과하면 `alert_orders` 에 `dry` 의도로 기록, 다음 사이클에 지정가로 가상 체결.
+- 매도 신호 → 보유 수량 전량 시장가 의도, 참조가(신호 시점 현재가)로 가상 체결, 평단 대비 실현손익 계산.
+- 잔고는 무한대로 본다. dry 의 목적은 "무엇을 얼마나 주문했을지" 를 보는 것이지 잔고 시뮬레이션이 아니다.
+- **live 로 가기 전 최소 1주 dry 로 운영**하고 백오피스 '자동매매' 표에서 의도·사유·가상 손익을 검토한다.
+
+### 4.3 live 에서 주문이 만들어지는 방식
+
+- 매수: 신호가 × (1 + `AUTOTRADE_BUY_BUFFER_PCT`%) 지정가(호가 단위 보정), 수량 = 1회 매수 금액 ÷ 지정가 (내림, 1주 미만이면 거절).
+  `AUTOTRADE_BUY_TTL_MIN` 안에 미체결이면 취소. 같은 신호봉으로는 한 번만.
+- 매도: 🔴 손절/매도 · 🟢 전량 익절 · 🟠 마감 정리 신호에 매도가능수량 전량 **시장가**. 미체결 매수가 있으면 먼저 취소.
+  불타기(추가매수)·일부 익절(절반·1/3)은 **알림만** 낸다.
+- `clientOrderId` 멱등키(의도 ID)를 보내 재시도·재시작으로 같은 주문이 두 번 나가지 않는다.
+- 자동 차단: 주문 실패 3회 연속, 또는 `prerequisite-required`(약관·교육 미완료) → 킬 스위치를 끄고 ⛔ 알림.
+- 정규장 봉·정규장 시간에만 주문한다. 한국 NXT 시간외, 미국 프리·애프터마켓은 제외.
+
+### 4.4 사전 조건과 전환 순서
+
+1. 토스 WTS 에서 **약관 동의·교육 이수·위험 고지** 완료. 백오피스 '자동매매' 의 **주문 권한 확인** 버튼(매수가능금액 조회)이 성공해야 한다.
+2. `.env` 에 `AUTOTRADE_MODE=dry` → 엔진 재시작 → 킬 스위치 ON → 종목별 자동매매·금액 지정 → 1주 이상 운영·검토.
+3. 납득되면 `AUTOTRADE_MODE=live` → 엔진 재시작. 한도(3.4)를 먼저 작게 잡고 시작한다.
+4. 문제가 생기면 킬 스위치를 끈다(즉시, 재시작 불필요). 미결 주문은 표에서 수동 취소할 수 있다.
+
+주문 코드는 `alertbot/trading/broker.py` 에만 있다. `toss_client.py` 는 GET 만 한다.
+
+---
+
+## 5. 배포 — Windows (생 파이썬)
+
+요구사항: Python 3.12 이상(개발은 3.14), 인터넷, MySQL 접근.
+
+```powershell
+cd C:\workspace\personal\finance-integration
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-프로젝트 루트 `.env` (따옴표·공백 없이):
+1. `.env` 작성(3.1). 토스 허용 IP 에 이 PC 의 공인 IP 를 등록한다.
+2. 테이블 생성과 초기 종목 시딩 (엔진이 첫 실행 때 자동으로도 한다):
 
+```powershell
+python -m alertbot.db init
+python -m alertbot.db seed
 ```
-TOSS_CLIENT_ID=...            TOSS_CLIENT_SECRET=...          # WTS > 설정 > Open API, 허용 IP 등록 필요
-TELEGRAM_BOT_TOKEN=...        TELEGRAM_CHAT_ID=111,222        # 수신자는 봇에게 먼저 /start
-TELEGRAM_MIN_SEVERITY=info                                    # info | review | action
-MYSQL_HOST=... MYSQL_PORT=3306 MYSQL_DATABASE=... MYSQL_USER=... MYSQL_PASSWORD=...
-ALERT_BACKOFFICE_HOST=127.0.0.1  ALERT_BACKOFFICE_PORT=8000
+
+3. 콘솔 두 개로 실행:
+
+```powershell
+python run_engine.py
 ```
+```powershell
+python run_backoffice.py
+```
+
+4. 텔레그램에 `⚪ 시스템 | 감시 시작` 이 오면 정상. 백오피스 http://127.0.0.1:8000 의 '상태' 에 heartbeat 가 보인다.
+
+백그라운드 실행은 **작업 스케줄러**로 두 항목("로그온 시 시작", 프로그램 `...\.venv\Scripts\python.exe`, 인수 `run_engine.py`, 시작 위치 프로젝트 폴더; 백오피스도 같은 방식)을 만들면 된다. 콘솔 인코딩 문제로 이모지가 `?` 로 보여도 파일 로그와 텔레그램은 정상이다.
+
+산출물: `scalping_signals.log`, `signal_tracking.csv`, `trade_log.csv` (프로젝트 루트 또는 `ALERT_DATA_DIR`).
+업데이트: `git pull` → `pip install -r requirements.txt` → 두 프로세스 재시작. 스키마 변경은 기동 시 자동 반영된다.
+
+---
+
+## 6. 배포 — Ubuntu (Docker)
+
+요구사항: Docker Engine + Compose 플러그인, MySQL 접근. 이미지는 `python:3.12-slim` 기반이며 엔진과 백오피스가 같은 이미지를 쓴다.
 
 ```bash
-python -m alertbot.db init      # MySQL 에 alert_* 테이블 생성 (엔진·백오피스가 자동으로도 만든다)
-python -m alertbot.db seed      # 기존 9종목 시딩 (엔진도 목록이 비어 있으면 자동 시딩)
-python run_engine.py            # 콘솔 1
-python run_backoffice.py        # 콘솔 2 → http://127.0.0.1:8000
-python -m pytest                # 테스트
+git clone <repo> alertbot && cd alertbot
+cp /path/to/.env .env                 # 3.1 의 키. 파일 권한: chmod 600 .env
+mkdir -p data                         # 로그·CSV 볼륨
+docker compose up -d --build
+docker compose logs -f engine         # "감시 시작" 과 "장 운영 KR/US ... (캘린더)" 확인
 ```
 
-## 알림 등급과 채널
+- 토스 허용 IP 에 **서버의 공인 IP** 를 등록해야 한다. 등록 전엔 403 으로 엔진이 종료된다.
+- 백오피스는 `127.0.0.1:8000` 에만 공개된다(인증 없음). 밖에서 보려면 `ssh -L 8000:127.0.0.1:8000 user@server` 로 터널을 열고 http://localhost:8000 에 접속한다.
+- MySQL 이 같은 서버에 있으면 `.env` 의 `MYSQL_HOST` 를 호스트 IP(예: `172.17.0.1`)로 두거나 compose 에 `extra_hosts: ["host.docker.internal:host-gateway"]` 를 추가하고 `host.docker.internal` 을 쓴다.
+- 데이터: `./data/` 에 로그와 CSV 가 남는다. `.env` 는 이미지에 들어가지 않고 `env_file` 로 주입된다.
+- 운영 명령:
 
-| 등급 | 알림 | 쿨다운 | 기본 수신 |
-|---|---|---|---|
-| action | 🔵 매수 · 🔴 손절/매도 · 🟢 익절 · 🔵 추가매수 · 🟠 마감 정리 | 15분 | 항상 |
-| review | 🟡 일부 익절 검토(45분) · ⚪ 매수 취소 · 청산 완료 | 45분/15분 | 항상 |
-| info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 성적 · 시스템 | 없음 | TELEGRAM_MIN_SEVERITY=info 일 때 |
+```bash
+docker compose restart engine        # .env 변경 반영 (예: AUTOTRADE_MODE)
+docker compose up -d --build         # 코드 업데이트 후 재빌드
+docker compose down                  # 중지
+```
 
-쿨다운 키는 (신호 종류, 종목)이다. 채널은 추가할 수 있게 분리되어 있고(`notify/base.py`), 결과는
-`alert_signal_log` 에 남고 백오피스 '신호 이력'에서 본다.
+`restart: unless-stopped` 라 서버 재부팅 후 자동으로 올라온다. Docker 는 이 문서를 만든 개발 PC 에 설치되어 있지 않아 실제 빌드 검증은 하지 않았다.
 
-## 백오피스
+---
 
-- **상태**: 엔진 heartbeat(90초 넘으면 경고), 종목별 상태·현재가·VWAP·RVOL·정점·선행·손절선. 30초 자동 갱신.
-- **종목**: 추가/편집/중지/삭제, 토스 현재가 API 로 심볼 검증, 페어 정합성 경고. 저장 즉시 엔진이 다음 사이클에 반영.
-- **신호 이력**: 종목·등급 필터, 채널별 전송 결과.
-- **채널**: 텔레그램 설정 상태와 테스트 발송.
-- **자동매매**: 모드·킬 스위치·한도·주문 의도·수동 취소·주문 권한 확인.
+## 7. 백오피스 사용법
 
-## 자동매매 (구현됨, 기본 비활성)
-
-토스 주문 API 로 자동매매를 구현해 두었지만 **기본은 꺼져 있다**. 실제 주문은 세 가지가 모두 켜져야 나간다.
-
-| 게이트 | 위치 | 기본 |
+| 화면 | 경로 | 기능 |
 |---|---|---|
-| `AUTOTRADE_MODE=off / dry / live` | `.env` | off (없으면 off) |
-| 킬 스위치 `autotrade_enabled` | 백오피스 '자동매매' 화면 (MySQL alert_settings) | 0 |
-| 종목별 `자동매매` 체크 + `1회 매수 금액` | 백오피스 '종목' 화면 | 꺼짐 / 0 |
+| 상태 | `/` | 마지막 사이클 시각(90초 넘으면 "멈췄을 수 있다" 경고), 감시 중·프리마켓 종목, 종목별 상태·현재가·종가·VWAP(밴드)·위치(현재가/종가)·RVOL(직전→현재, 방식)·정점·선행·손절선. 30초 자동 갱신 |
+| 종목 | `/watchlist` | 추가/편집/중지/재개/삭제. **심볼 검증** 버튼은 토스 현재가 API 로 심볼·선행 종목을 실제 조회한다. 페어 정합성 `!` 경고 |
+| 신호 이력 | `/signals` | `alert_signal_log` 최근 200건. 종목·등급 필터, 채널별 전송 결과(ok / error / skip) |
+| 채널 | `/channels` | 텔레그램 설정 상태와 **테스트 발송**(쿨다운·등급 무시, 이력에 남음) |
+| 자동매매 | `/trading` | 모드 표시, 킬 스위치, 한도 편집, 주문 의도 200건(상태·사유·주문번호·체결·손익), 미결 수동 취소, **주문 권한 확인** |
 
-- `dry`: 정책 검사와 주문 의도 기록은 실제와 같고 브로커만 가짜(참조가 가상 체결). live 전환 전 1주 이상 운영해 `alert_orders` 를 검토한다.
-- 자동 범위: 🔵 매수(신호가 +0.3% 지정가, 3분 미체결 취소) · 🔴🟢🟠 전량 매도(시장가). 불타기·일부 익절은 알림만.
-- 한도(백오피스에서 편집): 동시 보유 종목 수, 하루 주문 횟수(손절 제외), 일일 실현손실, 1회 매수 상한. `.env` 하드캡
-  `AUTOTRADE_HARD_MAX_AMOUNT_KRW/USD` 가 최종 상한.
-- 자동 차단: 연속 주문 실패 3회, 권한 오류(`prerequisite-required`) → 킬 스위치가 꺼지고 텔레그램 ⛔ 알림.
-- 사전 조건: 토스 WTS 에서 약관 동의·교육 이수·위험 고지. '주문 권한 확인' 버튼으로 상태를 본다.
-- 주문 코드는 `alertbot/trading/broker.py` 에만 있고 읽기 전용 클라이언트와 분리되어 있다.
+주문 의도 상태: `proposed`(검사 전) → `rejected`(정책 거절, 사유 기록) / `sent`·`open`(접수·대기) → `filled` / `partial` / `canceled`(TTL·수동·매도 전 취소) / `failed`(브로커 오류).
 
-## 감지기 변경 요약 (원본 대비)
+---
 
-- 세션 VWAP·정점 RVOL 을 120봉 창이 아니라 **정규장 봉 누적**으로 (개장 2시간 뒤 기준선 표류 제거).
-- 이동평균 RVOL 기준선에서 프리마켓·시간외 봉 제외. 전일 종가는 날짜로 선택.
-- 매수 판정은 신호봉 **종가** 기준, 손절·이탈은 현재가 기준.
-- 캘린더 API 로 휴장·조기폐장 반영. RSI 는 Wilder, ATR 은 True Range.
-- 재시작해도 손절선·타이머·세션 누적값이 MySQL 에서 복원된다.
-- 선행 바스켓의 최근 5분 변화율을 `signal_tracking.csv` 의 `leader_mom` 에 기록한다
-  (`LEADER_MOMENTUM_GATE=True` 로 켜면 방향 판정에 반영).
+## 8. 텔레그램 설정
+
+1. BotFather 에서 봇을 만들고 토큰(`1234567890:AA...`)을 `TELEGRAM_BOT_TOKEN` 에 넣는다.
+2. 받는 사람이 봇 대화방을 열고 **시작(/start)** 을 누른다. 봇은 먼저 말을 건 상대에게만 보낼 수 있다.
+3. 채팅 ID 조회 후 `TELEGRAM_CHAT_ID` 에 넣는다 (봇 자신의 ID 를 넣으면 `can't send messages to the bot` 오류):
+
+```bash
+python -c "import requests, alertbot.config as c; print(requests.get(f'https://api.telegram.org/bot{c.TG_TOKEN}/getUpdates', timeout=10).json())"
+```
+
+4. 백오피스 '채널' 의 테스트 발송으로 확인한다.
+
+---
+
+## 9. 문제 해결
+
+| 증상 | 원인 · 조치 |
+|---|---|
+| 기동 직후 `403 — 허용 IP 미등록` 종료 | 토스 WTS > Open API > 허용 IP 관리에 실행 PC/서버 공인 IP 등록 |
+| `텔레그램 전송 실패: chat not found` | `TELEGRAM_CHAT_ID` 가 채팅 ID 가 아니거나 수신자가 `/start` 를 안 눌렀다 |
+| `텔레그램 전송 실패: Not Found` | 봇 토큰이 불완전하다 (`숫자:35자` 전체를 넣을 것) |
+| `the bot can't send messages to the bot` | 채팅 ID 자리에 봇 ID 를 넣었다 |
+| 백오피스 heartbeat 경고 | 엔진이 꺼졌거나 MySQL 연결 실패. 엔진 로그 확인 |
+| `MySQL 연결 재수립 후 재시도` 경고 | 서버가 놀던 연결을 끊은 것. 자동 복구되며 정상 |
+| `캘린더 ... 고정 시간으로 판단한다` | 캘린더 API 실패. 고정 시간(KR 09:00~15:30, US 09:30~16:00)으로 동작 |
+| 주문 권한 확인 → `사전 자격 미충족` | 토스 WTS 에서 약관 동의·교육 이수·위험 고지 완료 후 재확인 |
+| ⛔ 자동매매 차단 알림 | 연속 실패 또는 권한 오류. '자동매매' 표의 사유를 확인하고 킬 스위치를 다시 켠다 |
+| 레이트리밋 경고(429) | 자동 대기·재시도. 반복되면 `MIN_CALL_GAP_SEC` 을 늘린다 |
+
+---
+
+## 10. 테스트
+
+```bash
+python -m pytest
+```
+
+지표 골든값(원본 스크립트 기준), 세션 누적, 캘린더 파싱, 엔진 상태 전이·복원, 알림 쿨다운·채널 격리, DB, 백오피스,
+브로커(요청 페이로드·멱등키·호가 보정·오류 매핑), 정책 경계값, 실행기 시나리오(dry 체결·중복 방지·자동 차단)를 덮는다.
+실제 토스·텔레그램·MySQL 은 호출하지 않는다(DB 는 메모리 SQLite).
+
+---
+
+## 11. 원본 대비 감지기 변경 요약
+
+- 세션 VWAP·정점 RVOL 을 120봉 창이 아니라 **정규장 봉 누적**으로 계산 (개장 2시간 뒤 기준선 표류·익절 신호 소실 제거).
+- 이동평균 RVOL 기준선에서 프리마켓·시간외 봉 제외. 매수 판정은 신호봉 **종가** 기준, 정규장 봉에서만.
+- 전일 종가를 날짜로 선택. 캘린더 API 로 휴장·조기폐장 반영. RSI 는 Wilder, ATR 은 True Range.
+- 재시작해도 손절선·타이머·세션 누적값을 MySQL 에서 복원.
+- 선행 바스켓 최근 5분 변화율을 `signal_tracking.csv` 의 `leader_mom` 에 기록 (`LEADER_MOMENTUM_GATE=True` 로 판정에 반영).
