@@ -31,17 +31,22 @@ WATCHLIST = {"AAA": {"market": "KR", "leaders": None, "inverse": False, "pair": 
 
 
 class FakeClient:
-    def __init__(self, candles):
+    def __init__(self, candles, daily=None, history=None):
         self.candles = candles
+        self.daily = daily or []          # 일봉 (전일 종가용)
+        self.history = history or []      # 프로파일용 긴 이력
         self.account_seq = "1"
 
     def get_candles(self, symbol, interval="1m", count=120):
         if interval == "1d":
-            return []
+            return self.daily
         return self.candles[-count:]
 
     def get_candles_paged(self, symbol, pages):
-        return []
+        return self.history
+
+    def get_market_calendar(self, market):
+        return None
 
     def get_prices(self, symbols):
         return {}

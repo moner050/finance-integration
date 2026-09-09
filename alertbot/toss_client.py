@@ -175,18 +175,7 @@ class TossReadOnlyClient:
                 continue
         return out
 
-    def us_regular_close(self):
-        """미국 정규장 마감 시각(aware datetime). 실패 시 None."""
-        data = self._get("/api/v1/market-calendar/US")
-        for d in self._items(data, "days", "marketDays"):
-            sess = d.get("regularMarketSession") or {}
-            end = sess.get("endDateTime") or sess.get("end")
-            if end:
-                try:
-                    dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
-                    # 타임존 없는 문자열이면 UTC 로 간주. naive 를 astimezone 하면
-                    # 시스템 로컬(한국) 기준으로 해석돼 9시간 어긋난다.
-                    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-        return None
+    def get_market_calendar(self, market: str):
+        """장 운영 캘린더 원본(result 벗긴 것). 해석은 market_hours.parse_calendar 가 한다. 실패 시 None."""
+        data = self._get(f"/api/v1/market-calendar/{market}")
+        return self._unwrap(data) if data is not None else None

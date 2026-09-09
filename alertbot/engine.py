@@ -9,18 +9,20 @@
 
 import logging
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, BASE_DIR, CLOSE_WARN_MIN,
                      ENABLE_ADD_ON, ENABLE_AMBIGUOUS, ENABLE_EXIT_SIGNAL, ENABLE_TRACKING,
                      ENTRY_MIN_PEAK_RATIO, EXIT_GRACE_MIN, EXIT_PORTION_HALF, EXIT_PORTION_STRONG,
                      EXIT_PORTION_THIRD, FADE_MIN_PEAK, FADE_STRONG_RATIO, FADE_WEAK_RATIO,
-                     LEADER_GAP_PCT, POLL_INTERVAL_SEC, PROFILE_PAGES, REENTRY_BLOCK_MIN,
+                     LEADER_GAP_PCT, LEADER_MOMENTUM_GATE, LEADER_MOMENTUM_MIN, POLL_INTERVAL_SEC,
+                     PROFILE_PAGES, REENTRY_BLOCK_MIN,
                      RVOL_TRIGGER, RVOL_WINDOW, STATS_REPORT_MIN, STOP_LOSS_PCT,
                      SUMMARY_INTERVAL_MIN, TRACK_FILE, TRADE_FILE, VWAP_BAND_PCT)
-from .indicators import (build_volume_profile, compute_rsi, compute_rvol, compute_vwap,
-                         effective_band, ema_alignment, session_peak_rvol, strong_bar,
-                         vwap_position)
+from .indicators import (SessionState, build_volume_profile, compute_rsi, compute_rvol,
+                         effective_band, ema_alignment, strong_bar, vwap_position)
+from .market_hours import MarketHours
 from .notify.dispatcher import Notifier
 from .timeutil import now_local, parse_ts, to_local
 from .toss_client import TossReadOnlyClient
@@ -38,11 +40,12 @@ class SignalEngine:
         self.watchlist = watchlist      # symbol -> 설정 dict (market/leaders/inverse/pair/hold_only/name/note)
         self.last_bar = {}              # ticker -> 마지막으로 평가한 완성봉 timestamp
         self.prev_close = {}
-        self.prev_close_date = None
+        self.prev_close_date = {}       # symbol -> 전일 종가를 받은 현지 세션 날짜
         self.volume_profile = {}        # ticker -> {HH:MM: [거래량...]}
         self.profile_date = {}          # ticker -> 구축한 세션 날짜. 시장별로 세션이 달라 종목별로 관리
-        self.us_close = None
-        self.us_close_date = None
+        self.hours = MarketHours(client)    # 개장/휴장/마감 시각 (캘린더 캐시)
+        self.sessions = {}              # ticker -> SessionState (당일 VWAP·정점 RVOL 누적)
+        self.price_hist = {}            # symbol -> deque[(utc, price)] 선행 모멘텀용
         self.stats = {}
         self.last_report = datetime.now(timezone.utc)
         self.tracker = (SignalTracker(BASE_DIR / TRACK_FILE)
@@ -105,22 +108,36 @@ class SignalEngine:
                     self.volume_profile[t] = build_volume_profile(candles, market, session)
                     log.info("프로파일 %s: %d봉 / %d개 시간대", t, len(candles),
                              len(self.volume_profile[t]))
+                    # 같은 이력으로 오늘 세션(VWAP·정점)을 백필한다. 추가 호출 없이 끝난다.
+                    ss = self._session(t)
+                    added = ss.update(self._completed(candles, market), self.volume_profile[t])
+                    log.info("세션 백필 %s: %d봉 (VWAP %s, 정점 %s배)", t, added, ss.vwap, ss.peak)
             except Exception as e:
                 log.warning("프로파일 %s 실패(이동평균 대체): %s", t, e)
             self.profile_date[t] = session
 
-    def refresh_prev_closes(self, symbols: list):
-        today = datetime.now(timezone.utc).date()
-        if self.prev_close_date == today and all(s in self.prev_close for s in symbols):
-            return
-        for s in symbols:
-            daily = self.client.get_candles(s, interval="1d", count=2)
-            if len(daily) >= 2:
+    def refresh_prev_closes(self, symbols: dict):
+        """symbols: symbol -> market. 시장별 현지 세션 날짜가 바뀌면 다시 받는다.
+
+        전일 종가는 '오늘 세션보다 앞선 날짜의 마지막 일봉'으로 고른다. daily[-2] 처럼
+        위치로 고르면 오늘 일봉이 아직 없는 프리마켓에 그저께 종가가 잡힌다.
+        """
+        for s, market in symbols.items():
+            session = now_local(market).strftime("%Y-%m-%d")
+            if self.prev_close_date.get(s) == session and s in self.prev_close:
+                continue
+            prev = None
+            for c in self.client.get_candles(s, interval="1d", count=5):
+                dt = parse_ts(c.get("timestamp"), market)
+                if dt is None or dt.strftime("%Y-%m-%d") >= session:
+                    continue
                 try:
-                    self.prev_close[s] = float(daily[-2]["closePrice"])
+                    prev = float(c["closePrice"])
                 except (KeyError, TypeError, ValueError):
-                    pass
-        self.prev_close_date = today
+                    continue
+            if prev is not None:
+                self.prev_close[s] = prev
+            self.prev_close_date[s] = session
 
     def leader_strength(self, leaders: list, prices: dict) -> float:
         ch = []
@@ -130,46 +147,47 @@ class SignalEngine:
                 ch.append((cur - prev) / prev * 100)
         return round(sum(ch) / len(ch), 2) if ch else 0.0
 
-    # -- 시장 시간 -------------------------------------------------------------
-    def market_open(self, market: str) -> bool:
-        """현지시각 기준. 앞뒤 여유를 둬 개장 직후 봉도 잡는다."""
-        t = now_local(market)
-        if t.weekday() >= 5:
-            return False
-        hm = t.hour * 60 + t.minute
-        if market == "KR":
-            return 8 * 60 + 50 <= hm <= 15 * 60 + 40
-        return 9 * 60 + 20 <= hm <= 16 * 60 + 10
+    def _record_prices(self, prices: dict):
+        """현재가 이력. 선행 모멘텀(LEADER_MOMENTUM_MIN 분 전 대비)을 구하는 데 쓴다."""
+        now = datetime.now(timezone.utc)
+        keep = timedelta(minutes=LEADER_MOMENTUM_MIN + 5)
+        for s, p in prices.items():
+            hist = self.price_hist.setdefault(s, deque())
+            hist.append((now, p))
+            while hist and now - hist[0][0] > keep:
+                hist.popleft()
 
-    def market_premarket(self, market: str) -> bool:
-        """프리마켓 시간대인지.
+    def leader_momentum(self, leaders: list, prices: dict):
+        """선행 바스켓의 최근 LEADER_MOMENTUM_MIN 분 평균 변화율(%). 이력이 모자라면 None."""
+        if LEADER_MOMENTUM_MIN <= 0:
+            return None
+        now = datetime.now(timezone.utc)
+        horizon = timedelta(minutes=LEADER_MOMENTUM_MIN)
+        ch = []
+        for s in leaders:
+            cur = prices.get(s)
+            past = [p for t, p in self.price_hist.get(s, ()) if now - t >= horizon]
+            if cur and past and past[-1] > 0:
+                ch.append((cur - past[-1]) / past[-1] * 100)
+        return round(sum(ch) / len(ch), 2) if ch else None
 
-        프리마켓은 유동성이 정규장의 수십 분의 일이라 거래 몇 건으로 RVOL 이
-        크게 튄다. 그래서 알림 판단에는 쓰지 않고 시황 표시에만 쓴다.
-        한국장 장전 동시호가는 체결 구조가 달라 아예 제외한다.
-        """
-        if market != "US":
-            return False
-        t = now_local(market)
-        if t.weekday() >= 5:
-            return False
-        hm = t.hour * 60 + t.minute
-        return 8 * 60 <= hm < 9 * 60 + 20      # 08:00~09:20 ET
+    @staticmethod
+    def _completed(candles: list, market: str) -> list:
+        """진행 중인 마지막 봉을 뺀다. 거래량이 부분값이라 RVOL 이 낮게 나오고,
+        같은 봉이 폴링마다 다른 값으로 재평가된다."""
+        if not candles:
+            return candles
+        last_dt = parse_ts(candles[-1].get("timestamp"), market)
+        cur_min = now_local(market).replace(second=0, microsecond=0)
+        if last_dt is not None and last_dt >= cur_min:
+            return candles[:-1]
+        return candles
 
-    def near_close(self, market: str) -> bool:
-        """마감 30분 전 여부. 한국은 15:30 고정(서머타임 없음), 미국은 캘린더 API."""
-        t = now_local(market)
-        if market == "KR":
-            close = t.replace(hour=15, minute=30, second=0, microsecond=0)
-        else:
-            today = datetime.now(timezone.utc).date()
-            if self.us_close_date != today:
-                self.us_close = self.client.us_regular_close()
-                self.us_close_date = today
-            close = (to_local(self.us_close, "US") if self.us_close
-                     else t.replace(hour=16, minute=0, second=0, microsecond=0))
-        left = close - t
-        return timedelta(0) < left <= timedelta(minutes=CLOSE_WARN_MIN)
+    def _session(self, ticker: str) -> SessionState:
+        ss = self.sessions.get(ticker)
+        if ss is None:
+            ss = self.sessions[ticker] = SessionState(self.watchlist[ticker]["market"])
+        return ss
 
     # -- 종목별 판단 -----------------------------------------------------------
     def _snapshot(self, ticker, prices):
@@ -180,25 +198,24 @@ class SignalEngine:
         if not candles:
             return None
 
-        # 진행 중인 마지막 봉은 제외한다. 거래량이 부분값이라 RVOL 이 낮게 나오고,
-        # 같은 봉이 폴링마다 다른 값으로 재평가된다.
-        last_dt = parse_ts(candles[-1].get("timestamp"), market)
-        cur_min = now_local(market).replace(second=0, microsecond=0)
-        if last_dt is not None and last_dt >= cur_min:
-            candles = candles[:-1]
+        candles = self._completed(candles, market)
         if len(candles) < RVOL_WINDOW + 2:
             return None
 
+        try:
+            close = float(candles[-1]["closePrice"])
+        except (KeyError, TypeError, ValueError):
+            return None
         price = prices.get(ticker)
         if price is None or price <= 0:
-            try:
-                price = float(candles[-1]["closePrice"])
-            except (KeyError, TypeError, ValueError):
-                return None
+            price = close
 
         prof = self.volume_profile.get(ticker)
         prev_rvol, rvol, rvol_method = compute_rvol(candles, market, prof)
-        vwap = compute_vwap(candles, market)
+        # 세션 누적값: 새 완성봉만 더해진다. VWAP 과 정점은 120봉 창이 아니라 세션 전체다.
+        ss = self._session(ticker)
+        ss.update(candles, prof)
+        vwap = ss.vwap
         band = effective_band(candles)
 
         leaders = cfg.get("leaders") or []
@@ -206,19 +223,26 @@ class SignalEngine:
             strength = self.leader_strength(leaders, prices)
             direction_ok = (strength <= -LEADER_GAP_PCT if cfg["inverse"]
                             else strength >= LEADER_GAP_PCT)
+            momentum = self.leader_momentum(leaders, prices)
+            if LEADER_MOMENTUM_GATE and direction_ok and momentum is not None:
+                # 전일 대비로는 올랐어도 최근 몇 분 흘러내리는 중이면 방향을 인정하지 않는다
+                direction_ok = momentum <= 0 if cfg["inverse"] else momentum >= 0
         else:
-            strength, direction_ok = None, True
+            strength, direction_ok, momentum = None, True, None
 
         return {
             "cfg": cfg, "market": market, "label": cfg.get("name") or ticker,
             "candles": candles, "bar_key": candles[-1].get("timestamp"),
-            "price": price, "vwap": vwap, "band": band,
+            "price": price, "close": close, "vwap": vwap, "band": band,
             "pos": vwap_position(price, vwap, band),
+            # 매수 판정은 신호봉 종가로 한다. 현재가는 봉 중간값이라 종가가 기준선 아래인
+            # 봉에서도 순간 위로 튈 수 있고, 같은 봉은 다시 판정하지 않아 되돌릴 수 없다.
+            "pos_close": vwap_position(close, vwap, band),
             "last_low": float(candles[-1].get("lowPrice") or 0),
             "strong": strong_bar(candles[-1]),
             "prev_rvol": prev_rvol, "rvol": rvol, "rvol_method": rvol_method,
-            "peak": session_peak_rvol(candles, market, prof),
-            "strength": strength, "direction_ok": direction_ok,
+            "peak": ss.peak,
+            "strength": strength, "direction_ok": direction_ok, "momentum": momentum,
         }
 
     def _sync_state(self, ticker: str, has_pos: bool) -> str:
@@ -257,7 +281,7 @@ class SignalEngine:
         st = self._sync_state(ticker, has_pos)
 
         label, market = snap["label"], snap["market"]
-        price, vwap, pos = snap["price"], snap["vwap"], snap["pos"]
+        price, vwap, pos, pos_close = snap["price"], snap["vwap"], snap["pos"], snap["pos_close"]
         rvol, prev_rvol, peak = snap["rvol"], snap["prev_rvol"], snap["peak"]
 
         # ---- 보유 중 / 청산 대기 ----
@@ -317,7 +341,7 @@ class SignalEngine:
             self.bump(ticker, "direction")
         if rvol_breakout:
             self.bump(ticker, "rvol")
-        if pos == "above":
+        if pos_close == "above":
             self.bump(ticker, "vwap")
 
         # 거래량이 터져도 긴 윗꼬리에 종가가 아래면 매수세가 밀린 봉이다
@@ -325,7 +349,7 @@ class SignalEngine:
             log.debug("%s 돌파했으나 신호봉이 약함(윗꼬리) — 보류", ticker)
             rvol_breakout = False
 
-        if direction_ok and rvol_breakout and pos == "above":
+        if direction_ok and rvol_breakout and pos_close == "above":
             self.bump(ticker, "all")
             self.stop_ref[ticker] = snap["last_low"]
             align = ema_alignment(snap["candles"])
@@ -345,6 +369,7 @@ class SignalEngine:
                     "rvol_method": snap["rvol_method"],
                     "leader_pct": strength if strength is not None else "",
                     "ema": align, "rsi": rsi_now,
+                    "leader_mom": snap["momentum"] if snap["momentum"] is not None else "",
                 })
 
 
@@ -550,7 +575,7 @@ class SignalEngine:
                              f"보유 {qty:g}주 → {part:g}주 정리, {qty - part:g}주 유지\n"
                              f"흐려진 근거: {self._ambiguous_reason(pos_now, ctx)}\n"
                              f"급하지 않음. 조금 덜어내고 지켜봐도 되는 구간")
-        elif self.near_close(market):
+        elif self.hours.near_close(market):
             self.notify.send("🟠 마감 전 정리", label,
                              f"손익 {pnl}%  ({held['qty']:g}주 보유)\n"
                              f"마감 {CLOSE_WARN_MIN}분 전 — 3배 상품은 오버나잇 시 가치 감소")
@@ -667,7 +692,7 @@ class SignalEngine:
         # '조용한 이유'를 사람이 알 수 있게 한다.
         prev_open = set()
         while True:
-            open_now = [t for t in self.tickers if self.market_open(self.watchlist[t]["market"])]
+            open_now = [t for t in self.tickers if self.hours.market_open(self.watchlist[t]["market"])]
             # hold_only 종목(3배 레버리지)은 보유 중일 때만 감시한다.
             # 안 들고 있으면 조회할 이유가 없다 — 매수 신호는 SOXX 가 낸다.
             held_syms = set(self._last_holdings.keys())
@@ -675,7 +700,7 @@ class SignalEngine:
                       if not self.watchlist[t].get("hold_only") or t in held_syms]
             # 프리마켓 종목은 시황에만 쓴다. 알림 판단에는 넣지 않는다.
             pre = [t for t in self.tickers
-                   if t not in active and self.market_premarket(self.watchlist[t]["market"])]
+                   if t not in active and self.hours.market_premarket(self.watchlist[t]["market"])]
             now_open = {self.watchlist[t]["market"] for t in active}
 
             for m in now_open - prev_open:
@@ -700,8 +725,13 @@ class SignalEngine:
             leaders = sorted({s for t in watch for s in (self.watchlist[t].get("leaders") or [])})
             try:
                 self.refresh_volume_profile(watch)
-                # 프리마켓 등락률 계산에 종목 자신의 전일 종가도 필요하다
-                self.refresh_prev_closes(leaders + pre)
+                # 프리마켓 등락률 계산에 종목 자신의 전일 종가도 필요하다.
+                # 선행 종목은 감시 종목과 같은 시장으로 본다.
+                need = {t: self.watchlist[t]["market"] for t in pre}
+                for t in watch:
+                    for s in (self.watchlist[t].get("leaders") or []):
+                        need.setdefault(s, self.watchlist[t]["market"])
+                self.refresh_prev_closes(need)
                 prices = self.client.get_prices(watch + leaders)
                 holdings = self.client.get_holdings() if self.watch_holdings else {}
             except Exception as e:
@@ -721,6 +751,7 @@ class SignalEngine:
                 time.sleep(POLL_INTERVAL_SEC)
                 continue
             self._last_holdings = {k: v for k, v in holdings.items() if v.get("qty", 0) > 0}
+            self._record_prices(prices)
 
             self.report_stats()
             if self.tracker:

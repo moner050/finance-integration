@@ -1,6 +1,7 @@
 """지표 — 순수 함수. 캔들 리스트(시간순, 완성봉)를 받아 값을 돌려준다.
 
 지표는 '완성된 봉'으로만 계산한다. 마지막 봉은 진행 중이라 거래량이 부분값이다.
+세션 누적값(VWAP, 정점 RVOL)은 SessionState 가 봉을 하나씩 더해 유지한다.
 """
 
 from .config import (ATR_BAND_MULT, MIN_PROFILE_SESSIONS, OPEN_EXCLUDE_MIN,
@@ -73,104 +74,133 @@ def _median(nums: list) -> float:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-def compute_rvol(candles: list, market: str, profile: dict = None) -> tuple:
-    """(직전봉 RVOL, 현재봉 RVOL, 계산방식).
+def rvol_at(candles: list, i: int, market: str, profile: dict = None) -> tuple:
+    """i번째 봉의 (RVOL, 계산방식). 방식은 '프로파일' | '이동평균' | '부족'.
 
-    프로파일이 있으면 같은 현지 시각의 과거 중앙값과 비교, 없으면 직전 20봉 평균.
-    두 기준선은 스케일이 달라 방식을 함께 돌려준다. 직전봉과 현재봉의 방식이
-    다르면 '혼합'으로 표시하고, 호출부는 그 경우 돌파 판정을 보류한다.
+    프로파일이 있으면 같은 현지 시각의 과거 중앙값과 비교한다. 없으면 직전 정규장
+    봉 RVOL_WINDOW 개의 평균이다. 프리마켓·시간외 봉은 기준선에서 뺀다 — 얇은
+    거래량이 평균을 끌어내려 개장 직후 RVOL 이 과대평가되고 가짜 돌파가 나온다.
+    정규장 봉이 RVOL_WINDOW 개에 못 미치면 '부족'으로 돌려 판단을 보류하게 한다.
     """
-    if len(candles) < RVOL_WINDOW + 2:
-        return 0.0, 0.0, "부족"
-    vols = [float(c["volume"]) for c in candles]
-    methods = []
-
-    def at(i: int) -> float:
-        if profile:
-            b = _bucket(candles[i], market)
-            hist = profile.get(b[1], []) if b else []
-            if len(hist) >= MIN_PROFILE_SESSIONS:
-                base = _median(hist)
-                if base > 0:
-                    methods.append("프로파일")
-                    return round(vols[i] / base, 2)
-        methods.append("이동평균")
-        past = vols[i - RVOL_WINDOW:i]
-        avg = sum(past) / len(past) if past else 0
-        return round(vols[i] / avg, 2) if avg > 0 else 0.0
-
-    prev, cur = at(len(vols) - 2), at(len(vols) - 1)
-    method = methods[-1] if len(set(methods)) == 1 else "혼합"
-    return prev, cur, method
-
-
-def rvol_at(candles: list, i: int, market: str, profile: dict = None) -> float:
-    """i번째 봉의 RVOL. 프로파일이 있으면 같은 시각 과거 중앙값, 없으면 직전 20봉 평균."""
-    if i < RVOL_WINDOW:
-        return 0.0
     try:
         cur = float(candles[i]["volume"])
-    except (KeyError, TypeError, ValueError):
-        return 0.0
-    if profile:
-        b = _bucket(candles[i], market)
-        hist = profile.get(b[1], []) if b else []
+    except (KeyError, TypeError, ValueError, IndexError):
+        return 0.0, "부족"
+    b = _bucket(candles[i], market)
+    if profile and b:
+        hist = profile.get(b[1], [])
         if len(hist) >= MIN_PROFILE_SESSIONS:
             base = _median(hist)
             if base > 0:
-                return round(cur / base, 2)
-    past = [float(c["volume"]) for c in candles[i - RVOL_WINDOW:i]]
-    avg = sum(past) / len(past) if past else 0
-    return round(cur / avg, 2) if avg > 0 else 0.0
-
-
-def session_peak_rvol(candles: list, market: str, profile: dict = None) -> float:
-    """오늘 세션 중 최고 RVOL.
-
-    실행 중 관측한 값만 쌓으면 장중에 스크립트를 켰을 때 이전 정점을 모른다.
-    캔들 이력에서 직접 계산하면 언제 켜도 그날의 정점이 잡힌다.
-    """
-    if len(candles) < RVOL_WINDOW + 1:
-        return 0.0
-    last = _bucket(candles[-1], market)
-    if last is None:
-        return 0.0
-    session = last[0]
-    peak = 0.0
-    for i in range(RVOL_WINDOW, len(candles)):
-        b = _bucket(candles[i], market)
-        if b is None or b[0] != session:
-            continue
-        # 개장 직후 봉은 정점에서 뺀다. 개장봉은 구조적으로 거래량이 몰려
-        # 70배 같은 값이 나오는데, 그걸 정점으로 잡으면 3분 뒤 정상화를
-        # '연료 소진'으로 오독해 팔라고 하게 된다.
-        if 0 <= _minutes_from_open(b[1], market) < OPEN_EXCLUDE_MIN:
-            continue
-        peak = max(peak, rvol_at(candles, i, market, profile))
-    return round(peak, 2)
-
-
-def compute_vwap(candles: list, market: str) -> float:
-    """당일(현지 세션 기준) VWAP. typical price = (고+저+종)/3."""
-    if not candles:
-        return 0.0
-    last = _bucket(candles[-1], market)
-    if last is None:
-        return 0.0
-    session = last[0]
-    pv = vol = 0.0
-    for c in candles:
-        b = _bucket(c, market)
-        if b is None or b[0] != session:
+                return round(cur / base, 2), "프로파일"
+    past = []
+    for j in range(i - 1, -1, -1):
+        bj = _bucket(candles[j], market)
+        if bj is None or not _is_regular(bj[1], market):
             continue
         try:
-            tp = (float(c["highPrice"]) + float(c["lowPrice"]) + float(c["closePrice"])) / 3
-            v = float(c["volume"])
+            past.append(float(candles[j]["volume"]))
         except (KeyError, TypeError, ValueError):
             continue
-        pv += tp * v
-        vol += v
-    return round(pv / vol, 4) if vol > 0 else 0.0
+        if len(past) == RVOL_WINDOW:
+            break
+    if len(past) < RVOL_WINDOW:
+        return 0.0, "부족"
+    avg = sum(past) / RVOL_WINDOW
+    if avg <= 0:
+        return 0.0, "부족"
+    return round(cur / avg, 2), "이동평균"
+
+
+def compute_rvol(candles: list, market: str, profile: dict = None) -> tuple:
+    """(직전봉 RVOL, 현재봉 RVOL, 계산방식).
+
+    프로파일이 있으면 같은 현지 시각의 과거 중앙값과 비교, 없으면 직전 정규장 20봉 평균.
+    두 기준선은 스케일이 달라 방식을 함께 돌려준다. 직전봉과 현재봉의 방식이
+    다르면 '혼합'으로 표시하고, 호출부는 그 경우 돌파 판정을 보류한다.
+    """
+    n = len(candles)
+    if n < 2:
+        return 0.0, 0.0, "부족"
+    prev, prev_method = rvol_at(candles, n - 2, market, profile)
+    cur, cur_method = rvol_at(candles, n - 1, market, profile)
+    if "부족" in (prev_method, cur_method):
+        method = "부족"
+    else:
+        method = prev_method if prev_method == cur_method else "혼합"
+    return prev, cur, method
+
+
+class SessionState:
+    """종목 하나의 당일 정규장 누적값 — VWAP 과 세션 정점 RVOL.
+
+    120봉 창으로 계산하면 개장 2시간 뒤부터 앞부분이 잘려 VWAP 이 '세션 VWAP' 이 아니라
+    '최근 2시간 VWAP' 으로 표류하고, 오전 정점이 창 밖으로 나가 익절 판단이 틀어진다.
+    그래서 정규장 완성봉을 하나씩 누적한다. 기동 시엔 프로파일용으로 받은 긴 이력으로
+    오늘 세션을 백필하고, 이후엔 사이클마다 새 봉만 더한다. 같은 봉은 두 번 넣지 않는다.
+
+    프리마켓·시간외 봉은 넣지 않는다. 프로파일과 같은 기준이어야 정점 RVOL 과 VWAP 이
+    같은 세션을 말한다. 개장 후 OPEN_EXCLUDE_MIN 분은 정점 계산에서 뺀다 — 개장봉은
+    구조적으로 거래량이 몰려 70배 같은 값이 나오는데, 그걸 정점으로 잡으면 3분 뒤
+    정상화를 '연료 소진'으로 오독해 팔라고 하게 된다.
+    """
+
+    def __init__(self, market: str):
+        self.market = market
+        self.session = None      # 'YYYY-MM-DD' (현지)
+        self.pv = 0.0            # Σ typical price × volume
+        self.vol = 0.0
+        self.peak = 0.0          # 세션 정점 RVOL
+        self.last_dt = None      # 마지막으로 반영한 봉의 현지시각
+
+    def _reset(self, session: str):
+        self.session, self.pv, self.vol, self.peak, self.last_dt = session, 0.0, 0.0, 0.0, None
+
+    def update(self, candles: list, profile: dict = None) -> int:
+        """시간순 완성봉을 넣는다. 새로 반영한 봉 수를 돌려준다."""
+        added = 0
+        for i, c in enumerate(candles):
+            dt = parse_ts(c.get("timestamp"), self.market)
+            if dt is None:
+                continue
+            session, hhmm = dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+            if self.session is None or session > self.session:
+                self._reset(session)
+            elif session < self.session:
+                continue                      # 창에 남아 있는 전 세션 봉
+            if self.last_dt is not None and dt <= self.last_dt:
+                continue                      # 이미 반영한 봉
+            if not _is_regular(hhmm, self.market):
+                continue
+            try:
+                tp = (float(c["highPrice"]) + float(c["lowPrice"]) + float(c["closePrice"])) / 3
+                v = float(c["volume"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.pv += tp * v
+            self.vol += v
+            if _minutes_from_open(hhmm, self.market) >= OPEN_EXCLUDE_MIN:
+                self.peak = max(self.peak, rvol_at(candles, i, self.market, profile)[0])
+            self.last_dt = dt
+            added += 1
+        return added
+
+    @property
+    def vwap(self) -> float:
+        """당일 정규장 VWAP. typical price = (고+저+종)/3."""
+        return round(self.pv / self.vol, 4) if self.vol > 0 else 0.0
+
+    def to_dict(self) -> dict:
+        return {"session": self.session, "pv": self.pv, "vol": self.vol, "peak": self.peak,
+                "last_dt": self.last_dt.isoformat() if self.last_dt else None}
+
+    @classmethod
+    def from_dict(cls, market: str, d: dict) -> "SessionState":
+        s = cls(market)
+        s.session = d.get("session")
+        s.pv, s.vol, s.peak = float(d.get("pv", 0)), float(d.get("vol", 0)), float(d.get("peak", 0))
+        s.last_dt = parse_ts(d["last_dt"], market) if d.get("last_dt") else None
+        return s
 
 
 def compute_ema(values: list, period: int) -> float:
@@ -196,41 +226,51 @@ def ema_alignment(candles: list) -> str:
 
 
 def compute_rsi(candles: list, period: int = 14) -> tuple:
-    """(직전 RSI, 현재 RSI). 기울기를 보기 위해 둘 다."""
+    """(직전 RSI, 현재 RSI). 기울기를 보기 위해 둘 다.
+
+    Wilder 평활을 쓴다 — 토스 앱을 비롯한 차트 프로그램과 같은 방식이라 값을 대조할 수 있다.
+    단순평균(Cutler) 방식은 창에서 큰 변화가 빠져나가는 순간 값이 툭 튀어 기울기가 흔들린다.
+    """
     closes = [float(c["closePrice"]) for c in candles]
     if len(closes) < period + 2:
         return 0.0, 0.0
+    gains = [max(closes[i] - closes[i - 1], 0.0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0.0) for i in range(1, len(closes))]
 
-    def at(end: int) -> float:
-        g = l = 0.0
-        for i in range(end - period + 1, end + 1):
-            d = closes[i] - closes[i - 1]
-            g += max(d, 0)
-            l += max(-d, 0)
+    def rsi(g: float, l: float) -> float:
         if l == 0:
             return 100.0
-        return round(100 - 100 / (1 + (g / period) / (l / period)), 1)
+        return round(100 - 100 / (1 + g / l), 1)
 
-    return at(len(closes) - 2), at(len(closes) - 1)
+    avg_g = sum(gains[:period]) / period
+    avg_l = sum(losses[:period]) / period
+    series = [rsi(avg_g, avg_l)]
+    for g, l in zip(gains[period:], losses[period:]):
+        avg_g = (avg_g * (period - 1) + g) / period
+        avg_l = (avg_l * (period - 1) + l) / period
+        series.append(rsi(avg_g, avg_l))
+    return series[-2], series[-1]
 
 
 def compute_atr_pct(candles: list, n: int = 20) -> float:
-    """최근 n봉의 평균 진폭(고가-저가)을 가격 대비 %로.
+    """최근 n봉의 평균 True Range 를 가격 대비 %로.
 
+    TR = max(고-저, |고-전봉 종가|, |저-전봉 종가|). 단순 고저폭은 봉 사이 갭을 놓친다.
     고정 밴드(0.15%)는 종목마다 의미가 다르다. SOXL 은 1분에 0.5% 가 보통이라
     0.15% 는 노이즈 안이고, 조용한 종목은 0.15% 도 큰 움직임이다.
     변동성에 맞춰 밴드를 늘리면 '사자마자 팔라'는 진동이 줄어든다.
     """
-    if len(candles) < n:
+    if len(candles) < n + 1:
         return 0.0
     ranges = []
-    for c in candles[-n:]:
+    for prev, c in zip(candles[-n - 1:-1], candles[-n:]):
         try:
             hi, lo, cl = float(c["highPrice"]), float(c["lowPrice"]), float(c["closePrice"])
-            if cl > 0:
-                ranges.append((hi - lo) / cl * 100)
+            pc = float(prev["closePrice"])
         except (KeyError, TypeError, ValueError):
             continue
+        if cl > 0:
+            ranges.append(max(hi - lo, abs(hi - pc), abs(lo - pc)) / cl * 100)
     return round(sum(ranges) / len(ranges), 3) if ranges else 0.0
 
 

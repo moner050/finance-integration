@@ -19,7 +19,7 @@ class SignalTracker:
     """
 
     HEADER = ("signal_time,ticker,entry_price,vwap,rvol_prev,rvol,rvol_method,"
-              "leader_pct,ema,rsi,horizon_min,later_price,change_pct\n")
+              "leader_pct,ema,rsi,leader_mom,horizon_min,later_price,change_pct\n")
 
     def __init__(self, path: Path):
         self.path = path
@@ -60,7 +60,7 @@ class SignalTracker:
             row = (f'{item["signal_time"].isoformat()},{item["ticker"]},{base},'
                    f'{m.get("vwap", "")},{m.get("rvol_prev", "")},{m.get("rvol", "")},'
                    f'{m.get("rvol_method", "")},{m.get("leader_pct", "")},'
-                   f'{m.get("ema", "")},{m.get("rsi", "")},'
+                   f'{m.get("ema", "")},{m.get("rsi", "")},{m.get("leader_mom", "")},'
                    f'{item["horizon"]},{later},{change}\n')
             try:
                 with self.path.open("a", encoding="utf-8-sig") as f:
