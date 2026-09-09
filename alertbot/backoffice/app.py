@@ -16,7 +16,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import db
-from ..config import CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_TOKEN
+from ..config import (AUTOTRADE_HARD_MAX_AMOUNT_KRW, AUTOTRADE_HARD_MAX_AMOUNT_USD, AUTOTRADE_MODE,
+                      CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_TOKEN)
 from ..models import Signal
 from ..notify import build_channels
 from ..notify.dispatcher import Dispatcher
@@ -126,11 +127,14 @@ def watchlist_page(request: Request, edit: str = None):
 def watchlist_save(request: Request, symbol: str = Form(...), market: str = Form(...),
                    name: str = Form(""), leaders: str = Form(""), inverse: bool = Form(False),
                    pair: str = Form(""), hold_only: bool = Form(False), note: str = Form(""),
-                   enabled: bool = Form(False)):
+                   enabled: bool = Form(False), auto_trade: bool = Form(False), auto_amount: str = Form("0")):
     try:
+        amount = float(auto_amount or 0)
+        if amount < 0:
+            raise ValueError("1회 매수 금액은 0 이상")
         with get_db() as d:
             db.upsert_watch(d, symbol, market, name.strip(), leaders.split(","), inverse, pair,
-                            hold_only, note.strip(), enabled)
+                            hold_only, note.strip(), enabled, auto_trade, amount)
     except ValueError as e:
         return render(request, "watchlist.html", status_code=400, **watchlist_context(error=str(e)))
     log.info("백오피스: 종목 저장 %s", symbol.strip().upper())
@@ -178,6 +182,86 @@ def signals_page(request: Request, symbol: str = "", severity: str = "", limit: 
         rows = db.recent_signals(d, limit=min(max(limit, 1), 1000), symbol=symbol.strip().upper() or None,
                                  severity=severity or None)
     return render(request, "signals.html", rows=rows, symbol=symbol, severity=severity)
+
+
+# -- 자동매매 ------------------------------------------------------------------
+
+def trading_context(message: str = None) -> dict:
+    with get_db() as d:
+        settings = db.get_settings(d)
+        orders = db.recent_orders(d, 200)
+        rows = db.list_watch_rows(d)
+    auto_rows = [r for r in rows if r.get("auto_trade")]
+    live_ready = AUTOTRADE_MODE == "live" and settings["autotrade_enabled"] == "1" and bool(auto_rows)
+    return {"mode": AUTOTRADE_MODE, "settings": settings, "orders": orders, "auto_rows": auto_rows,
+            "live_ready": live_ready, "hard_max": {"KRW": AUTOTRADE_HARD_MAX_AMOUNT_KRW, "USD": AUTOTRADE_HARD_MAX_AMOUNT_USD},
+            "open_count": sum(1 for o in orders if o["status"] in ("sent", "open")), "message": message}
+
+
+@app.get("/trading", response_class=HTMLResponse)
+def trading_page(request: Request, message: str = None):
+    return render(request, "trading.html", **trading_context(message))
+
+
+@app.post("/trading/toggle")
+def trading_toggle():
+    with get_db() as d:
+        cur = db.get_settings(d)["autotrade_enabled"]
+        db.set_setting(d, "autotrade_enabled", 0 if cur == "1" else 1)
+    log.info("백오피스: 자동매매 킬 스위치 → %s", "OFF" if cur == "1" else "ON")
+    return RedirectResponse("/trading", status_code=303)
+
+
+@app.post("/trading/settings")
+def trading_settings(request: Request, max_positions: int = Form(...), max_orders_per_day: int = Form(...),
+                     daily_loss_limit_krw: float = Form(...), daily_loss_limit_usd: float = Form(...),
+                     max_order_amount_krw: float = Form(...), max_order_amount_usd: float = Form(...)):
+    values = {"max_positions": max_positions, "max_orders_per_day": max_orders_per_day,
+              "daily_loss_limit_krw": daily_loss_limit_krw, "daily_loss_limit_usd": daily_loss_limit_usd,
+              "max_order_amount_krw": max_order_amount_krw, "max_order_amount_usd": max_order_amount_usd}
+    if any(v < 0 for v in values.values()):
+        return render(request, "trading.html", status_code=400, **trading_context("한도는 0 이상이어야 한다"))
+    with get_db() as d:
+        for k, v in values.items():
+            db.set_setting(d, k, f"{v:g}")
+    return RedirectResponse("/trading", status_code=303)
+
+
+@app.post("/trading/orders/{intent_id}/cancel", response_class=HTMLResponse)
+def trading_cancel(intent_id: str):
+    """미결 주문 수동 취소. live 는 실제 취소, dry 는 기록만 바꾼다."""
+    with get_db() as d:
+        row = db.get_order(d, intent_id)
+        if not row or row["status"] not in ("sent", "open"):
+            return '<span class="warn">취소할 수 있는 상태가 아니다</span>'
+        if row["mode"] == "live":
+            try:
+                from ..trading.broker import BrokerError, TossOrderClient
+                cli = TossReadOnlyClient(CLIENT_ID, CLIENT_SECRET)
+                cli.load_account()
+                TossOrderClient(cli).cancel(row["order_id"])
+            except (Exception, SystemExit) as e:
+                return f'<span class="warn">취소 실패: {html.escape(str(e))}</span>'
+        db.update_order(d, intent_id, status="canceled", reason="manual")
+    return '<span class="ok">취소됨 (새로고침)</span>'
+
+
+@app.post("/trading/check-permission", response_class=HTMLResponse)
+def trading_check_permission():
+    """주문 권한 확인: 매수가능금액 조회(읽기 전용)가 prerequisite-required 를 돌려주는지 본다."""
+    try:
+        from ..trading.broker import BrokerError, TossOrderClient
+        cli = TossReadOnlyClient(CLIENT_ID, CLIENT_SECRET)
+        if not cli.load_account():
+            return '<span class="warn">BROKERAGE 계좌를 찾지 못했다</span>'
+        krw = TossOrderClient(cli).buying_power("KRW")
+        return f'<span class="ok">주문 API 접근 가능 · 매수가능금액 {krw:,.0f} KRW</span>'
+    except BrokerError as e:
+        if e.code == "prerequisite-required":
+            return '<span class="warn">사전 자격 미충족 — 토스 WTS 에서 약관 동의·교육 이수·위험 고지를 완료해야 한다</span>'
+        return f'<span class="warn">주문 API 오류: {html.escape(str(e))}</span>'
+    except (Exception, SystemExit) as e:
+        return f'<span class="warn">조회 실패: {html.escape(str(e))}</span>'
 
 
 # -- 채널 ----------------------------------------------------------------------

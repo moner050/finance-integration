@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% set nav = "trading" %}
+{% block content %}
+<h2>자동매매</h2>
+{% if message %}<p class="warn">{{ message }}</p>{% endif %}
+<p>
+ 모드(.env <code>AUTOTRADE_MODE</code>): <strong>{{ mode }}</strong>
+ {% if mode == 'off' %}<span class="muted">— 실행기 없음. 알림만 보낸다.</span>
+ {% elif mode == 'dry' %}<span class="muted">— 정책·의도 기록은 실제와 같고 주문은 가상 체결.</span>
+ {% else %}<span class="warn">— 실제 주문 모드.</span>{% endif %}
+ <br>킬 스위치(DB): <strong class="{{ 'ok' if settings.autotrade_enabled == '1' else 'warn' }}">{{ 'ON' if settings.autotrade_enabled == '1' else 'OFF' }}</strong>
+ <form class="inline" method="post" action="/trading/toggle"><button>{{ '끄기' if settings.autotrade_enabled == '1' else '켜기' }}</button></form>
+ <br>자동매매 종목: {% if auto_rows %}{% for r in auto_rows %}{{ r.symbol }}({{ '{:,.0f}'.format(r.auto_amount or 0) }}) {% endfor %}{% else %}<span class="muted">없음 — 종목 화면에서 지정</span>{% endif %}
+ <br>실제 주문 조건: {% if live_ready %}<span class="warn">충족 (모드 live + 킬 스위치 ON + 자동 종목 있음)</span>{% else %}<span class="ok">미충족 — 주문이 나가지 않는다</span>{% endif %}
+ <br><button hx-post="/trading/check-permission" hx-target="#perm">주문 권한 확인 (매수가능금액 조회)</button> <span id="perm"></span>
+</p>
+
+<h3>한도 (재시작 없이 반영)</h3>
+<form class="card" method="post" action="/trading/settings">
+ <label>동시 보유 종목 수 <input type="text" name="max_positions" value="{{ settings.max_positions }}"></label>
+ <label>하루 주문 횟수 (손절 제외) <input type="text" name="max_orders_per_day" value="{{ settings.max_orders_per_day }}"></label>
+ <label>일일 손실 한도 KRW <input type="text" name="daily_loss_limit_krw" value="{{ settings.daily_loss_limit_krw }}"></label>
+ <label>일일 손실 한도 USD <input type="text" name="daily_loss_limit_usd" value="{{ settings.daily_loss_limit_usd }}"></label>
+ <label>1회 매수 상한 KRW <input type="text" name="max_order_amount_krw" value="{{ settings.max_order_amount_krw }}"><span class="muted">하드캡 {{ '{:,.0f}'.format(hard_max.KRW) }}</span></label>
+ <label>1회 매수 상한 USD <input type="text" name="max_order_amount_usd" value="{{ settings.max_order_amount_usd }}"><span class="muted">하드캡 {{ '{:,.0f}'.format(hard_max.USD) }}</span></label>
+ <div class="full"><button type="submit" class="primary">저장</button></div>
+</form>
+
+<h3>주문 의도 (최근 200건, 미결 {{ open_count }})</h3>
+<table>
+<tr><th>시각 (KST)</th><th>모드</th><th>종목</th><th>신호</th><th>주문</th><th>가격</th><th>수량</th><th>금액</th><th>상태</th><th>사유 / 주문번호</th><th>체결</th><th>손익</th><th></th></tr>
+{% for o in orders %}
+<tr>
+ <td>{{ o.created_at|kst }}</td>
+ <td>{{ o.mode }}</td>
+ <td>{{ o.symbol }} <span class="muted">{{ o.market }}</span></td>
+ <td>{{ o.kind }}</td>
+ <td>{{ o.side }} {{ o.order_type }}</td>
+ <td>{{ o.price }}</td>
+ <td>{{ '{:g}'.format(o.quantity) }}</td>
+ <td>{{ '{:,.0f}'.format(o.amount) }}</td>
+ <td><span class="badge {{ 'action' if o.status in ('failed',) else ('info' if o.status == 'filled' else '') }}">{{ o.status }}</span></td>
+ <td>{{ o.reason or '' }}{% if o.order_id %}<br><span class="muted">{{ o.order_id }}</span>{% endif %}</td>
+ <td>{% if o.filled_qty %}{{ '{:g}'.format(o.filled_qty) }} @ {{ o.avg_price }}{% endif %}</td>
+ <td>{% if o.pnl is not none %}{{ '{:+,.0f}'.format(o.pnl) }}{% endif %}</td>
+ <td>{% if o.status in ('sent', 'open') %}<button hx-post="/trading/orders/{{ o.intent_id }}/cancel" hx-target="#c-{{ o.intent_id }}">취소</button> <span id="c-{{ o.intent_id }}"></span>{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="13" class="muted">기록이 없다</td></tr>
+{% endfor %}
+</table>
+<p class="muted">live 전환 순서: dry 로 1주 이상 운영해 위 기록을 검토 → .env <code>AUTOTRADE_MODE=live</code> → 엔진 재시작 → 킬 스위치 켜기 → 종목별 자동매매 체크.</p>
+{% endblock %}
