@@ -65,8 +65,9 @@ class CaptureNotifier:
     def __init__(self):
         self.sent = []
 
-    def send(self, level, ticker, msg):
-        self.sent.append([level, ticker, msg])
+    def send(self, signal, force=False):
+        self.sent.append([signal.title, signal.label, signal.body])
+        return {"capture": "ok"}
 
 
 STEPS = [

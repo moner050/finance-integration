@@ -38,7 +38,9 @@ def load_config() -> dict:
             k, v = line.split("=", 1)
             cfg[k.strip()] = v.strip().strip("'\"")
     for key in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET",
-                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+                "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_TO",
+                "MYSQL_HOST", "MYSQL_PORT", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD"):
         if not cfg.get(key):
             cfg[key] = os.getenv(key, "")
     return cfg
@@ -58,6 +60,30 @@ TG_TOKEN = _CFG["TELEGRAM_BOT_TOKEN"]
 # 각 수신자는 봇에게 먼저 /start 를 보내야 한다. 텔레그램 봇은 먼저 말을 건
 # 상대에게만 메시지를 보낼 수 있어서, 이 단계를 빼먹으면 chat not found 가 난다.
 TG_CHATS = [c.strip() for c in _CFG["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
+TG_MIN_SEVERITY = _CFG.get("TELEGRAM_MIN_SEVERITY") or "info"
+
+# WhatsApp (Meta Cloud API). 24시간 창 밖의 발신은 승인된 템플릿으로만 가능하다.
+# 개발 중엔 Meta 테스트 번호 + hello_world 템플릿(en_US)으로 연결만 확인한다.
+WA_TOKEN = _CFG["WHATSAPP_ACCESS_TOKEN"]
+WA_PHONE_ID = _CFG["WHATSAPP_PHONE_NUMBER_ID"]
+WA_TO = [c.strip() for c in _CFG["WHATSAPP_TO"].split(",") if c.strip()]
+WA_TEMPLATE = _CFG.get("WHATSAPP_TEMPLATE") or "trade_alert"
+WA_TEMPLATE_LANG = _CFG.get("WHATSAPP_TEMPLATE_LANG") or "ko"
+# 건당 과금이라 기본은 행동(action)+검토(review) 등급만. 시황 요약(info)은 텔레그램만 받는다.
+WA_MIN_SEVERITY = _CFG.get("WHATSAPP_MIN_SEVERITY") or "review"
+
+# 백오피스. 같은 .env 를 쓰는 다른 프로젝트의 BACKOFFICE_* 키와 겹치지 않게 ALERT_ 접두어를 쓴다.
+BACKOFFICE_HOST = _CFG.get("ALERT_BACKOFFICE_HOST") or "127.0.0.1"
+BACKOFFICE_PORT = int(_CFG.get("ALERT_BACKOFFICE_PORT") or 8000)
+
+# 저장소: 이미 쓰고 있는 MySQL (.env 의 MYSQL_*). 테이블은 alert_ 접두어로 만든다.
+MYSQL = {
+    "host": _CFG["MYSQL_HOST"] or "127.0.0.1",
+    "port": int(_CFG["MYSQL_PORT"] or 3306),
+    "user": _CFG["MYSQL_USER"],
+    "password": _CFG["MYSQL_PASSWORD"],
+    "database": _CFG["MYSQL_DATABASE"],
+}
 
 WATCH_HOLDINGS = True          # 보유 조회(읽기 전용). False 면 ENTRY 알림만
 ENABLE_EXIT_SIGNAL = True      # 거래량 소진 기반 익절 알림. 끄려면 False

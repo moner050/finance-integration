@@ -1,47 +1,50 @@
-"""알림 발송 — 쿨다운 후 텔레그램으로 보낸다."""
+"""알림 발송 — 쿨다운 → 로그 → 채널 라우팅 → 이력 기록.
+
+한 채널이 실패해도 다른 채널은 보낸다. 쿨다운 키는 (종류, 종목)이다. 제목 문자열로
+키를 잡으면 '전량 익절하세요'/'전량 정리하세요'처럼 손익 부호에 따라 키가 갈려
+같은 청산 신호가 쿨다운을 무시하고 다시 나간다.
+"""
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-import requests
-
-from ..config import ALERT_COOLDOWN_MIN, TG_CHATS, TG_TOKEN, WEAK_COOLDOWN_MIN
+from ..config import ALERT_COOLDOWN_MIN, WEAK_COOLDOWN_MIN
 
 log = logging.getLogger("scalper")
 
+COOLDOWN_MIN = {"strong": ALERT_COOLDOWN_MIN, "weak": WEAK_COOLDOWN_MIN, "none": 0}
 
-@dataclass
-class Notifier:
-    last_sent: dict = None
 
-    def __post_init__(self):
-        self.last_sent = {}
+class Dispatcher:
+    def __init__(self, channels=(), record=None):
+        self.channels = list(channels)
+        self.record = record        # record(signal, results) — signal_log 기록. None 이면 생략
+        self.last_sent = {}         # signal.key -> 마지막 발송 시각
 
-    def send(self, level: str, ticker: str, msg: str):
-        key = f"{level}:{ticker}"
+    def send(self, signal, force: bool = False) -> dict:
+        """채널별 결과 {"telegram": "ok", "whatsapp": "error: ..."}. 쿨다운에 걸리면 빈 dict."""
         now = datetime.now(timezone.utc)
-        # 강도별로 재발송 간격을 다르게 둔다. 검토 권유가 15분마다 오면
-        # 정작 손절 알림이 왔을 때도 흘려보게 된다.
-        if any(x in level for x in ("📊", "🔔", "🔕", "📈")):
-            gap = 0        # 시황 요약은 정기 발송이라 쿨다운을 두지 않는다
-        else:
-            gap = WEAK_COOLDOWN_MIN if "🟡" in level else ALERT_COOLDOWN_MIN
-        prev = self.last_sent.get(key)
-        if prev and now - prev < timedelta(minutes=gap):
-            return
-        self.last_sent[key] = now
-        line = f"{level} | {ticker}\n{msg}"
-        log.info(line)
-        if not (TG_TOKEN and TG_CHATS):
-            return
-        # 한 명에게 실패해도 나머지에게는 보내야 한다.
-        for chat in TG_CHATS:
+        if not force:
+            gap = COOLDOWN_MIN[signal.cooldown]
+            prev = self.last_sent.get(signal.key)
+            if prev and now - prev < timedelta(minutes=gap):
+                return {}
+        self.last_sent[signal.key] = now
+        log.info(signal.text())
+
+        results = {}
+        for ch in self.channels:
+            if not ch.accepts(signal):
+                results[ch.name] = "skip"
+                continue
             try:
-                resp = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                                     json={"chat_id": chat, "text": line}, timeout=5)
-                body = resp.json()
-                if not body.get("ok"):
-                    log.warning("텔레그램 전송 실패(%s): %s", chat, body.get("description"))
-            except (requests.RequestException, ValueError) as e:
-                log.warning("텔레그램 전송 오류(%s): %s", chat, e)
+                results[ch.name] = ch.send(signal)
+            except Exception as e:           # 채널 하나의 버그가 나머지 발송을 막으면 안 된다
+                results[ch.name] = f"error: {e}"
+                log.warning("%s 채널 오류: %s", ch.name, e)
+        if self.record is not None:
+            try:
+                self.record(signal, results)
+            except Exception as e:
+                log.warning("신호 이력 기록 실패: %s", e)
+        return results

@@ -15,6 +15,3 @@ venv/
 scalping_signals.log
 signal_tracking.csv
 trade_log.csv
-alertbot.db
-alertbot.db-wal
-alertbot.db-shm

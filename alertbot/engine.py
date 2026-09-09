@@ -23,7 +23,8 @@ from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, BASE_DIR, CLOSE_WARN
 from .indicators import (SessionState, build_volume_profile, compute_rsi, compute_rvol,
                          effective_band, ema_alignment, strong_bar, vwap_position)
 from .market_hours import MarketHours
-from .notify.dispatcher import Notifier
+from .models import Signal
+from .notify.dispatcher import Dispatcher
 from .timeutil import now_local, parse_ts, to_local
 from .toss_client import TossReadOnlyClient
 from .tracking import SignalTracker, TradeLog
@@ -32,7 +33,7 @@ log = logging.getLogger("scalper")
 
 
 class SignalEngine:
-    def __init__(self, client: TossReadOnlyClient, notifier: Notifier, watch_holdings: bool,
+    def __init__(self, client: TossReadOnlyClient, notifier: Dispatcher, watch_holdings: bool,
                  watchlist: dict):
         self.client = client
         self.notify = notifier
@@ -74,6 +75,11 @@ class SignalEngine:
     @property
     def tickers(self) -> list:
         return list(self.watchlist.keys())
+
+    # -- 알림 ---------------------------------------------------------------
+    def _emit(self, kind: str, title: str, label: str, symbol, body: str):
+        """알림 한 건. 채널 선택·쿨다운·이력 기록은 Dispatcher 가 맡는다."""
+        self.notify.send(Signal(kind, title, label, body, symbol))
 
     # -- 집계 ---------------------------------------------------------------
     def bump(self, ticker: str, key: str):
@@ -300,12 +306,12 @@ class SignalEngine:
                 # 근거가 무너졌으면 기다릴 이유가 없다
                 self.state[ticker] = "관망"
                 self.pending.pop(ticker, None)
-                self.notify.send("⚪ 매수 취소", label,
+                self._emit("ENTRY_CANCEL", "⚪ 매수 취소", label, ticker,
                                  f"현재가 {price}가 기준선 {vwap} 아래로 내려감\n"
                                  f"진입 근거 소멸 — 관망으로 전환")
             else:
                 sig = self.pending.get(ticker, {})
-                self.notify.send("🔵 매수하세요", label,
+                self._emit("ENTRY", "🔵 매수하세요", label, ticker,
                                  f"현재가 {price}  (신호가 {sig.get('price', price)})\n"
                                  f"거래량 {rvol}배, 기준선 {vwap} 위 유지\n"
                                  f"아직 미진입 — 조건 유지 중")
@@ -358,7 +364,7 @@ class SignalEngine:
             self.state[ticker] = "진입대기"
             self.pending[ticker] = {"price": price, "at": datetime.now(timezone.utc)}
             note = snap["cfg"].get("note")
-            self.notify.send("🔵 매수하세요", label,
+            self._emit("ENTRY", "🔵 매수하세요", label, ticker,
                              f"현재가 {price}\n"
                              f"거래량 {prev_rvol}→{rvol}배 돌파, 기준선 {vwap} 위\n"
                              f"{direction_txt} | EMA {align} | RSI {rsi_now}({slope})"
@@ -434,7 +440,7 @@ class SignalEngine:
                     f"{qty:g}주 정리 완료\n"
                     f"다음 신호를 기다리면 돼")
         body += f"\n\n※ 실제 체결가는 다를 수 있음 (추정치)"
-        self.notify.send(head, label, body)
+        self._emit("CLOSED", head, label, ticker, body)
         self.trades.add(ticker, label, qty, avg, price, pnl)
 
     def _check_holding(self, ticker, label, market, price, vwap, pos_now,
@@ -458,10 +464,10 @@ class SignalEngine:
         if self.state.get(ticker) == "청산대기":
             first = self.pending.get(ticker, {})
             if pnl <= STOP_LOSS_PCT and first.get("level") != "🔴 손절하세요":
-                self.pending[ticker] = {"level": "🔴 손절하세요", "why": f"손절 한도 {STOP_LOSS_PCT}% 도달"}
+                self.pending[ticker] = {"kind": "STOP", "level": "🔴 손절하세요", "why": f"손절 한도 {STOP_LOSS_PCT}% 도달"}
                 first = self.pending[ticker]
             level = first.get("level", "🔴 매도하세요")
-            self.notify.send(level, label,
+            self._emit(first.get("kind", "SELL"), level, label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"아직 미청산 — {first.get('why', '청산 신호 유지')}\n"
                              f"{held['qty']:g}주 보유 중")
@@ -511,8 +517,8 @@ class SignalEngine:
             self.exit_at[ticker] = datetime.now(timezone.utc)
             self.entry_at.pop(ticker, None)
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = {"level": "🔴 손절하세요", "why": f"손절 한도 {STOP_LOSS_PCT}% 도달"}
-            self.notify.send("🔴 손절하세요", label,
+            self.pending[ticker] = {"kind": "STOP", "level": "🔴 손절하세요", "why": f"손절 한도 {STOP_LOSS_PCT}% 도달"}
+            self._emit("STOP", "🔴 손절하세요", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"손절 한도 {STOP_LOSS_PCT}% 도달 — 최후 안전망")
         elif broke:
@@ -523,8 +529,8 @@ class SignalEngine:
             self.exit_at[ticker] = datetime.now(timezone.utc)
             self.entry_at.pop(ticker, None)
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = {"level": "🔴 매도하세요", "why": f"{sell_why} {sell_line} 이탈"}
-            self.notify.send("🔴 매도하세요", label,
+            self.pending[ticker] = {"kind": "SELL", "level": "🔴 매도하세요", "why": f"{sell_why} {sell_line} 이탈"}
+            self._emit("SELL", "🔴 매도하세요", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"{flavor}\n"
                              f"{sell_why} {sell_line} 아래로 내려감")
@@ -538,9 +544,9 @@ class SignalEngine:
             self.entry_at.pop(ticker, None)
             qty = held["qty"]
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = {"level": f"🟢 {EXIT_PORTION_STRONG} {verb}",
+            self.pending[ticker] = {"kind": "EXIT_FULL", "level": f"🟢 {EXIT_PORTION_STRONG} {verb}",
                                     "why": f"거래량 정점 {rvol_peak}배 대비 {round(faded * 100)}% 로 소진"}
-            self.notify.send(f"🟢 {EXIT_PORTION_STRONG} {verb}", label,
+            self._emit("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"보유 {qty:g}주 → {EXIT_PORTION_STRONG} 정리 권장\n"
                              f"거래량이 오늘 정점 {rvol_peak}배 → 현재 {rvol}배 "
@@ -552,14 +558,14 @@ class SignalEngine:
             # 불타기: 진입 근거(VWAP 위)가 유지되고 새 거래량이 붙었으며 이미 수익 중.
             # 손실 중에는 절대 발동하지 않는다 — 물타기는 이 시스템이 다루지 않는다.
             self.addon_count[ticker] = self.addon_count.get(ticker, 0) + 1
-            self.notify.send("🔵 추가매수 검토", label,
+            self._emit("ADDON", "🔵 추가매수 검토", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"거래량 {prev_rvol}→{rvol}배 재돌파, 추세 살아있음\n"
                              f"⚠ 물량 늘리면 손절 시 손실도 같은 배로 커짐")
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
               and faded <= FADE_WEAK_RATIO):
             qty = held["qty"]
-            self.notify.send(f"🟡 {EXIT_PORTION_HALF} 익절 검토", label,
+            self._emit("EXIT_HALF", f"🟡 {EXIT_PORTION_HALF} 익절 검토", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"보유 {qty:g}주 → {qty / 2:g}주 정리, {qty / 2:g}주 유지\n"
                              f"거래량이 오늘 정점 {rvol_peak}배 → 현재 {rvol}배 "
@@ -570,13 +576,13 @@ class SignalEngine:
             # 다른 알림이 하나도 안 걸려 방치되기 쉬운 사각지대다.
             qty = held["qty"]
             part = round(qty / 3, 1)
-            self.notify.send(f"🟡 {EXIT_PORTION_THIRD} 익절 검토", label,
+            self._emit("EXIT_THIRD", f"🟡 {EXIT_PORTION_THIRD} 익절 검토", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"보유 {qty:g}주 → {part:g}주 정리, {qty - part:g}주 유지\n"
                              f"흐려진 근거: {self._ambiguous_reason(pos_now, ctx)}\n"
                              f"급하지 않음. 조금 덜어내고 지켜봐도 되는 구간")
         elif self.hours.near_close(market):
-            self.notify.send("🟠 마감 전 정리", label,
+            self._emit("CLOSE_WARN", "🟠 마감 전 정리", label, ticker,
                              f"손익 {pnl}%  ({held['qty']:g}주 보유)\n"
                              f"마감 {CLOSE_WARN_MIN}분 전 — 3배 상품은 오버나잇 시 가치 감소")
 
@@ -660,7 +666,7 @@ class SignalEngine:
         lines.append("※ 참고용. 매수·매도는 개별 알림(🔵🔴🟢)이 왔을 때만")
         ref = (active or pre)[0]
         clock = now_local(self.watchlist[ref]["market"]).strftime("%H:%M")
-        self.notify.send("📊 시황", clock, "\n".join(lines))
+        self._emit("SUMMARY", "📊 시황", clock, None, "\n".join(lines))
 
     @staticmethod
     def _stance(snap) -> tuple:
@@ -706,15 +712,15 @@ class SignalEngine:
             for m in now_open - prev_open:
                 names = [self.watchlist[t].get("name") or t
                          for t in self.tickers if self.watchlist[t]["market"] == m]
-                self.notify.send("🔔 장 시작", "한국" if m == "KR" else "미국",
+                self._emit("MARKET_OPEN", "🔔 장 시작", "한국" if m == "KR" else "미국", None,
                                  f"{', '.join(names)} 감시 시작")
             for m in prev_open - now_open:
-                self.notify.send("🔕 장 마감", "한국" if m == "KR" else "미국",
+                self._emit("MARKET_CLOSE", "🔕 장 마감", "한국" if m == "KR" else "미국", None,
                                  "감시 종료 — 다음 개장까지 알림이 없어")
                 # 오늘 청산된 거래가 있으면 성적표를 보낸다
                 report = self.trades.daily_summary(m)
                 if report:
-                    self.notify.send("📈 오늘 성적", "한국" if m == "KR" else "미국", report)
+                    self._emit("DAILY_REPORT", "📈 오늘 성적", "한국" if m == "KR" else "미국", None, report)
             prev_open = now_open
 
             if not active and not pre:
