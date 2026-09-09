@@ -22,7 +22,7 @@ class Dispatcher:
         self.last_sent = {}         # signal.key -> 마지막 발송 시각
 
     def send(self, signal, force: bool = False) -> dict:
-        """채널별 결과 {"telegram": "ok", "whatsapp": "error: ..."}. 쿨다운에 걸리면 빈 dict."""
+        """채널별 결과 {"telegram": "ok"}. 쿨다운에 걸리면 빈 dict."""
         now = datetime.now(timezone.utc)
         if not force:
             gap = COOLDOWN_MIN[signal.cooldown]

@@ -85,9 +85,9 @@ def test_validate_uses_toss_prices(client, monkeypatch):
 
 def test_signals_page(client):
     c, store = client
-    DBM.log_signal(store, Signal("ENTRY", "🔵 매수하세요", "SOXX", "현재가 1", "SOXX"), {"telegram": "ok", "whatsapp": "skip"})
+    DBM.log_signal(store, Signal("ENTRY", "🔵 매수하세요", "SOXX", "현재가 1", "SOXX"), {"telegram": "ok"})
     r = c.get("/signals?severity=action")
-    assert "🔵 매수하세요" in r.text and "telegram: ok" in r.text and "whatsapp: skip" in r.text
+    assert "🔵 매수하세요" in r.text and "telegram: ok" in r.text
     assert "기록이 없다" in c.get("/signals?severity=info").text
     assert "🔵 매수하세요" in c.get("/signals?symbol=soxx").text
 
@@ -99,6 +99,6 @@ def test_channel_test_send(client, monkeypatch):
     r = c.post("/channels/telegram/test")
     assert "ok" in r.text and len(rec.got) == 1 and rec.got[0].kind == "SYSTEM"
     assert DBM.recent_signals(store)[0]["kind"] == "SYSTEM"
-    assert "설정되어 있지 않다" in c.post("/channels/whatsapp/test").text
+    assert "설정되어 있지 않다" in c.post("/channels/nope/test").text
     r = c.get("/channels")
-    assert r.status_code == 200 and "telegram" in r.text and "whatsapp" in r.text
+    assert r.status_code == 200 and "telegram" in r.text

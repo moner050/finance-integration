@@ -1,7 +1,7 @@
 # 단타 알림 시스템 (토스증권 Open API · 알림 전용)
 
 토스증권 읽기 전용 API 로 1분봉·현재가·보유를 30초마다 폴링하고, VWAP·RVOL·선행 바스켓
-조건으로 매수/손절/익절 신호를 만들어 **텔레그램·WhatsApp** 으로 보낸다. 주문은 내지 않는다.
+조건으로 매수/손절/익절 신호를 만들어 **텔레그램**으로 보낸다. 주문은 내지 않는다.
 감시 종목은 **백오피스 화면**에서 지정하고, 엔진은 재시작 없이 다음 사이클에 반영한다.
 
 ```
@@ -14,7 +14,7 @@ alertbot/
   engine.py        신호 엔진: 스냅샷 → 상태기계 → 알림, 시황 요약, 워치리스트 핫리로드, 상태 영속
   tracking.py      신호 추적·거래 기록 CSV
   models.py        Signal (종류·등급·쿨다운)
-  notify/          Dispatcher(쿨다운·라우팅·이력) + telegram / whatsapp 채널
+  notify/          Dispatcher(쿨다운·라우팅·이력) + telegram 채널
   db.py            MySQL 저장소 (alert_watchlist / alert_engine_status / alert_signal_log)
   backoffice/      FastAPI + Jinja2 + HTMX 화면 (상태 · 종목 · 신호 이력 · 채널)
 run_engine.py      엔진 워커 진입점
@@ -34,10 +34,6 @@ pip install -r requirements.txt
 TOSS_CLIENT_ID=...            TOSS_CLIENT_SECRET=...          # WTS > 설정 > Open API, 허용 IP 등록 필요
 TELEGRAM_BOT_TOKEN=...        TELEGRAM_CHAT_ID=111,222        # 수신자는 봇에게 먼저 /start
 TELEGRAM_MIN_SEVERITY=info                                    # info | review | action
-WHATSAPP_ACCESS_TOKEN=...     WHATSAPP_PHONE_NUMBER_ID=...    # Meta Cloud API
-WHATSAPP_TO=+8210...,+8210...                                 # E.164, 쉼표 구분
-WHATSAPP_TEMPLATE=trade_alert WHATSAPP_TEMPLATE_LANG=ko       # 승인 전엔 hello_world / en_US
-WHATSAPP_MIN_SEVERITY=review                                  # 행동 + 검토 알림만 (건당 과금)
 MYSQL_HOST=... MYSQL_PORT=3306 MYSQL_DATABASE=... MYSQL_USER=... MYSQL_PASSWORD=...
 ALERT_BACKOFFICE_HOST=127.0.0.1  ALERT_BACKOFFICE_PORT=8000
 ```
@@ -54,26 +50,19 @@ python -m pytest                # 테스트
 
 | 등급 | 알림 | 쿨다운 | 기본 수신 |
 |---|---|---|---|
-| action | 🔵 매수 · 🔴 손절/매도 · 🟢 익절 · 🔵 추가매수 · 🟠 마감 정리 | 15분 | 텔레그램 + WhatsApp |
-| review | 🟡 일부 익절 검토(45분) · ⚪ 매수 취소 · 청산 완료 | 45분/15분 | 텔레그램 + WhatsApp |
-| info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 성적 · 시스템 | 없음 | 텔레그램만 |
+| action | 🔵 매수 · 🔴 손절/매도 · 🟢 익절 · 🔵 추가매수 · 🟠 마감 정리 | 15분 | 항상 |
+| review | 🟡 일부 익절 검토(45분) · ⚪ 매수 취소 · 청산 완료 | 45분/15분 | 항상 |
+| info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 성적 · 시스템 | 없음 | TELEGRAM_MIN_SEVERITY=info 일 때 |
 
-쿨다운 키는 (신호 종류, 종목)이다. 채널 하나가 실패해도 다른 채널은 보내며, 결과는
+쿨다운 키는 (신호 종류, 종목)이다. 채널은 추가할 수 있게 분리되어 있고(`notify/base.py`), 결과는
 `alert_signal_log` 에 남고 백오피스 '신호 이력'에서 본다.
-
-## WhatsApp (Meta Cloud API) 제약
-
-- 수신자가 24시간 안에 먼저 보낸 적이 없으면 **승인된 템플릿**으로만 보낼 수 있다 → 템플릿만 쓴다.
-- 템플릿 파라미터 값에 개행이 올 수 없다 → 본문 줄을 ` · ` 로 이어 한 파라미터에 넣는다.
-- 템플릿 `trade_alert` (Utility, 한국어) 본문: `{{1}} | {{2}}` 다음 줄 `{{3}}`.
-- 준비 순서와 테스트 발송 버튼은 백오피스 '채널' 화면에 있다.
 
 ## 백오피스
 
 - **상태**: 엔진 heartbeat(90초 넘으면 경고), 종목별 상태·현재가·VWAP·RVOL·정점·선행·손절선. 30초 자동 갱신.
 - **종목**: 추가/편집/중지/삭제, 토스 현재가 API 로 심볼 검증, 페어 정합성 경고. 저장 즉시 엔진이 다음 사이클에 반영.
 - **신호 이력**: 종목·등급 필터, 채널별 전송 결과.
-- **채널**: 설정 상태와 테스트 발송.
+- **채널**: 텔레그램 설정 상태와 테스트 발송.
 
 ## 감지기 변경 요약 (원본 대비)
 

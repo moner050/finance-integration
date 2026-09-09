@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-# 등급은 채널이 어디까지 받을지 고르는 기준이다 (WhatsApp 은 건당 과금이라 기본 review 이상).
+# 등급은 채널이 어디까지 받을지 고르는 기준이다 (TELEGRAM_MIN_SEVERITY).
 #   action — 지금 행동해야 한다 (매수·손절·매도·익절·추가매수·마감 정리)
 #   review — 살펴볼 일이 생겼다 (일부 익절 검토, 매수 취소, 청산 완료)
 #   info   — 정기·시스템 (시황, 장 시작/마감, 성적, 기동)

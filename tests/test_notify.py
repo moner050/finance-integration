@@ -1,11 +1,10 @@
-"""알림 계층 — 쿨다운, 채널 격리, 등급 필터, 텔레그램/WhatsApp 페이로드."""
+"""알림 계층 — 쿨다운, 채널 격리, 등급 필터, 텔레그램 페이로드."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 import alertbot.notify.dispatcher as D
 import alertbot.notify.telegram as T
-import alertbot.notify.whatsapp as W
 from alertbot.models import KINDS, Signal
 from alertbot.notify.base import Channel
 
@@ -60,18 +59,18 @@ def test_weak_and_none_cooldown():
 
 
 def test_channel_isolation_and_severity_filter():
-    bad, tg, wa = Recorder("bad", fail=True), Recorder("telegram"), Recorder("whatsapp", "review")
+    bad, tg, wa = Recorder("bad", fail=True), Recorder("telegram"), Recorder("strict", "review")
     recorded = []
     d = D.Dispatcher([bad, tg, wa], record=lambda s, r: recorded.append((s.kind, dict(r))))
     r = d.send(Signal("SUMMARY", "📊 시황", "10:00", "x"))
-    assert r["bad"].startswith("error") and r["telegram"] == "ok" and r["whatsapp"] == "skip"
+    assert r["bad"].startswith("error") and r["telegram"] == "ok" and r["strict"] == "skip"
     r = d.send(sig("EXIT_HALF", title="🟡 절반 익절 검토"))
-    assert r["whatsapp"] == "ok"
+    assert r["strict"] == "ok"
     r = d.send(sig())
-    assert r["whatsapp"] == "ok" and len(tg.got) == 3 and len(wa.got) == 2
+    assert r["strict"] == "ok" and len(tg.got) == 3 and len(wa.got) == 2
     assert [k for k, _ in recorded] == ["SUMMARY", "EXIT_HALF", "ENTRY"]
     wa.enabled = False
-    assert d.send(sig(symbol="CCC"))["whatsapp"] == "skip"
+    assert d.send(sig(symbol="CCC"))["strict"] == "skip"
 
 
 def test_record_failure_does_not_break_send():
@@ -108,49 +107,3 @@ def test_telegram_payload_and_partial_failure(monkeypatch):
     assert ch.send(Signal("SUMMARY", "📊 시황", "10:00", "x")) .startswith("partial")
     ch.chat_ids = ["1"]
     assert ch.send(sig()) == "ok"
-
-
-# --- WhatsApp -------------------------------------------------------------------
-
-def test_template_params_flatten_lines():
-    s = Signal("STOP", "🔴 손절하세요", "SK하이닉스", "손익 -5.1%  (평단 100 → 현재 94.9)\n\t손절 한도 -5.0% 도달 — 최후     안전망\n\n", "000660")
-    p = W.template_params(s)
-    assert p == ["🔴 손절하세요", "SK하이닉스", "손익 -5.1% (평단 100 → 현재 94.9) · 손절 한도 -5.0% 도달 — 최후 안전망"]
-    assert all("\n" not in x and "\t" not in x and "    " not in x for x in p)
-    assert W.template_params(Signal("SUMMARY", "📊 시황", "10:00", "\n \n"))[2] == "-"
-    assert len(W.template_params(sig(body="x" * 3000))[2]) == W.PARAM_MAX_LEN
-
-
-def test_whatsapp_payload_and_hello_world():
-    ch = W.WhatsAppChannel("TOK", "12345", ["+82 10-1234-5678"], template="trade_alert", lang="ko")
-    p = ch.payload("+82 10-1234-5678", sig())
-    assert p["to"] == "821012345678" and p["type"] == "template"
-    assert p["template"]["name"] == "trade_alert" and p["template"]["language"] == {"code": "ko"}
-    params = p["template"]["components"][0]["parameters"]
-    assert [x["type"] for x in params] == ["text"] * 3 and params[2]["text"] == "현재가 100 · 거래량 3배"
-    hello = W.WhatsAppChannel("TOK", "12345", ["1"], template="hello_world", lang="en_US")
-    assert "components" not in hello.payload("1", sig())["template"]
-    assert ch.url == "https://graph.facebook.com/v22.0/12345/messages"
-
-
-def test_whatsapp_retry_token_error_and_4xx(monkeypatch):
-    calls = []
-    queue = [FakeResp(503, text="down"), FakeResp(200, {"messages": [{"id": "wamid.1"}]})]
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        calls.append((url, headers["Authorization"]))
-        return queue.pop(0)
-    monkeypatch.setattr(W.requests, "post", fake_post)
-    ch = W.WhatsAppChannel("TOK", "12345", ["1"])
-    assert ch.send(sig()) == "ok" and len(calls) == 2 and calls[0][1] == "Bearer TOK"   # 5xx 는 한 번 더
-
-    queue[:] = [FakeResp(400, {"error": {"message": "template missing", "code": 132001}})]
-    calls.clear()
-    assert ch.send(sig()).startswith("error: 1: error: 132001") and len(calls) == 1      # 4xx 는 재시도 없음
-
-    queue[:] = [FakeResp(401, {"error": {"message": "expired", "code": 190}})]
-    ch.to_numbers = ["1", "2"]
-    calls.clear()
-    assert ch.send(sig()).startswith("error:")
-    assert ch.enabled is False and len(calls) == 1                                        # 토큰 무효 → 채널 중단
-    assert ch.accepts(sig()) is False

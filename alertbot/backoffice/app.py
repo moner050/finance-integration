@@ -16,8 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import db
-from ..config import (CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_TOKEN,
-                      WA_MIN_SEVERITY, WA_PHONE_ID, WA_TEMPLATE, WA_TEMPLATE_LANG, WA_TO, WA_TOKEN)
+from ..config import CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_TOKEN
 from ..models import Signal
 from ..notify import build_channels
 from ..notify.dispatcher import Dispatcher
@@ -187,8 +186,6 @@ def channel_rows() -> list:
     return [
         {"name": "telegram", "configured": bool(TG_TOKEN and TG_CHATS), "recipients": len(TG_CHATS),
          "min_severity": TG_MIN_SEVERITY, "detail": "Bot API sendMessage"},
-        {"name": "whatsapp", "configured": bool(WA_TOKEN and WA_PHONE_ID and WA_TO), "recipients": len(WA_TO),
-         "min_severity": WA_MIN_SEVERITY, "detail": f"Meta Cloud API 템플릿 {WA_TEMPLATE} ({WA_TEMPLATE_LANG})"},
     ]
 
 

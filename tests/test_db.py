@@ -60,11 +60,11 @@ def test_engine_status_and_signal_log():
     assert st["pre"] == ["OKLO"] and st["state"]["SOXX"]["state"] == "관망"
     assert st["last_error"] == "x" and st["heartbeat_at"]
 
-    DBM.log_signal(d, Signal("ENTRY", "🔵 매수하세요", "테스트", "본문", "SOXX"), {"telegram": "ok", "whatsapp": "skip"})
+    DBM.log_signal(d, Signal("ENTRY", "🔵 매수하세요", "테스트", "본문", "SOXX"), {"telegram": "ok", "log": "skip"})
     DBM.log_signal(d, Signal("SUMMARY", "📊 시황", "10:00", "b"), {"telegram": "ok"})
     rows = DBM.recent_signals(d, limit=10)
     assert [r["kind"] for r in rows] == ["SUMMARY", "ENTRY"]
-    assert rows[1]["results"] == {"telegram": "ok", "whatsapp": "skip"} and rows[1]["severity"] == "action"
+    assert rows[1]["results"] == {"telegram": "ok", "log": "skip"} and rows[1]["severity"] == "action"
     assert [r["kind"] for r in DBM.recent_signals(d, symbol="SOXX")] == ["ENTRY"]
     assert [r["kind"] for r in DBM.recent_signals(d, severity="info")] == ["SUMMARY"]
     assert DBM.recent_signals(d, limit=1)[0]["kind"] == "SUMMARY"
