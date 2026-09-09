@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-# 프로젝트 루트. .env, 로그, CSV, SQLite 파일이 모두 여기에 놓인다.
+# 프로젝트 루트. .env 는 여기서 읽는다.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -38,11 +38,13 @@ def load_config() -> dict:
                 continue
             k, v = line.split("=", 1)
             cfg[k.strip()] = v.strip().strip("'\"")
-    for key in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET",
-                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    # 환경변수 폴백: Docker(env_file) 처럼 .env 파일이 없이 환경변수로만 줄 때. 이 접두어의 키는 전부 받는다.
+    for key, value in os.environ.items():
+        if key.startswith(("TOSS_", "TELEGRAM_", "MYSQL_", "ALERT_", "AUTOTRADE_")) and not cfg.get(key):
+            cfg[key] = value
+    for key in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
                 "MYSQL_HOST", "MYSQL_PORT", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD"):
-        if not cfg.get(key):
-            cfg[key] = os.getenv(key, "")
+        cfg.setdefault(key, "")
     return cfg
 
 
@@ -192,8 +194,10 @@ TRACK_MINUTES = [15, 30, 60]   # ENTRY 후 몇 분 뒤를 기록할지
 TRACK_FILE = "signal_tracking.csv"
 TRADE_FILE = "trade_log.csv"    # 청산된 거래 기록 (일일 성적 집계용)
 
-# 로그는 프로젝트 루트에 쓴다.
-LOG_PATH = BASE_DIR / "scalping_signals.log"
+# 런타임 산출물(로그·추적 CSV·거래 CSV) 위치. 기본은 프로젝트 루트, Docker 에선 볼륨(ALERT_DATA_DIR=/data).
+DATA_DIR = Path(_CFG.get("ALERT_DATA_DIR") or os.getenv("ALERT_DATA_DIR") or BASE_DIR)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_PATH = DATA_DIR / "scalping_signals.log"
 
 
 def setup_logging(path: Path = None):

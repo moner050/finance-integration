@@ -185,7 +185,7 @@ def test_engine_hooks_pass_signals_and_fill_prices(monkeypatch, tmp_path):
     monkeypatch.setattr(E, "now_local", sc.fixed_now_local)
     monkeypatch.setattr(MH, "now_local", sc.fixed_now_local)
     monkeypatch.setattr(X, "now_local", sc.fixed_now_local)
-    monkeypatch.setattr(E, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(E, "DATA_DIR", tmp_path)
     cap = sc.CaptureNotifier()
     eng = E.SignalEngine(sc.FakeClient(sc.scenario_candles()), cap, True, DBM.load_watchlist(store), store, ex)
     assert ex.hours is eng.hours

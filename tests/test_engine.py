@@ -22,7 +22,7 @@ GOLDEN = json.loads(Path(__file__).with_name("golden_engine.json").read_text(enc
 def make_engine(monkeypatch, tmp_path, candles=None, client=None, watchlist=None, store=None):
     monkeypatch.setattr(E, "now_local", sc.fixed_now_local)
     monkeypatch.setattr(MH, "now_local", sc.fixed_now_local)   # 마감임박 판정도 고정 시각으로
-    monkeypatch.setattr(E, "BASE_DIR", tmp_path)      # CSV 를 프로젝트 루트에 쓰지 않는다
+    monkeypatch.setattr(E, "DATA_DIR", tmp_path)      # CSV 를 프로젝트 루트에 쓰지 않는다
     cap = sc.CaptureNotifier()
     client = client or sc.FakeClient(candles or sc.scenario_candles())
     eng = E.SignalEngine(client, cap, True, watchlist or sc.WATCHLIST, store)

@@ -13,7 +13,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from . import db
-from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, BASE_DIR, CLOSE_WARN_MIN,
+from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, CLOSE_WARN_MIN, DATA_DIR,
                      ENABLE_ADD_ON, ENABLE_AMBIGUOUS, ENABLE_EXIT_SIGNAL, ENABLE_TRACKING,
                      ENTRY_MIN_PEAK_RATIO, EXIT_GRACE_MIN, EXIT_PORTION_HALF, EXIT_PORTION_STRONG,
                      EXIT_PORTION_THIRD, FADE_MIN_PEAK, FADE_STRONG_RATIO, FADE_WEAK_RATIO,
@@ -53,9 +53,9 @@ class SignalEngine:
         self.price_hist = {}            # symbol -> deque[(utc, price)] 선행 모멘텀용
         self.stats = {}
         self.last_report = datetime.now(timezone.utc)
-        self.tracker = (SignalTracker(BASE_DIR / TRACK_FILE)
+        self.tracker = (SignalTracker(DATA_DIR / TRACK_FILE)
                         if ENABLE_TRACKING else None)
-        self.trades = TradeLog(BASE_DIR / TRADE_FILE)
+        self.trades = TradeLog(DATA_DIR / TRADE_FILE)
         # 불타기 알림을 포지션당 몇 번 보냈는지. 청산되면 초기화한다.
         self.addon_count = {}
         # 매도 계열 알림을 보낸 시각. 이후 일정 시간 매수 알림을 막는다.

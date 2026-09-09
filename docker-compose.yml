@@ -1,0 +1,29 @@
+# 우분투 배포: 엔진 + 백오피스. MySQL 은 이미 쓰는 외부 서버(.env 의 MYSQL_*)를 쓴다.
+#   docker compose up -d --build
+#   docker compose logs -f engine
+services:
+  engine:
+    build: .
+    container_name: alertbot-engine
+    env_file: .env
+    environment:
+      ALERT_DATA_DIR: /data
+    volumes:
+      - ./data:/data                 # scalping_signals.log, signal_tracking.csv, trade_log.csv
+    restart: unless-stopped
+    command: ["python", "run_engine.py"]
+
+  backoffice:
+    build: .
+    container_name: alertbot-backoffice
+    env_file: .env
+    environment:
+      ALERT_DATA_DIR: /data
+      ALERT_BACKOFFICE_HOST: 0.0.0.0   # 컨테이너 안에서는 모든 인터페이스. 밖으로는 아래 ports 로 localhost 만 연다
+      ALERT_BACKOFFICE_PORT: "8000"
+    ports:
+      - "127.0.0.1:8000:8000"        # 서버 밖에서 보려면 SSH 터널: ssh -L 8000:127.0.0.1:8000 user@server
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    command: ["python", "run_backoffice.py"]
