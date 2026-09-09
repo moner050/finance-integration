@@ -88,12 +88,12 @@ MYSQL = {
 WATCH_HOLDINGS = True          # 보유 조회(읽기 전용). False 면 ENTRY 알림만
 ENABLE_EXIT_SIGNAL = True      # 거래량 소진 기반 익절 알림. 끄려면 False
 
-# 감시 종목
+# 감시 종목 — 초기 시딩용. 운영 목록은 MySQL alert_watchlist 이고 백오피스에서 바꾼다.
 #   market  : "US" | "KR"  — 장 시간·타임존이 다르다
 #   leaders : 선행 바스켓. None 이면 방향 조건을 생략 (개별주)
 #   inverse : 인버스면 선행 바스켓 방향을 뒤집는다
 #   pair    : 동시 진입을 막을 반대 종목
-WATCHLIST = {
+SEED_WATCHLIST = {
     # 반도체: 신호는 1배 ETF(SOXX)에서 낸다. 3배 상품은 1분봉이 너무 튀어
     # 지표가 지저분하다. SOXX 에서 매수 신호가 뜨면 사람이 SOXL 을 산다.
     "SOXX":   {"market": "US", "leaders": ["NVDA", "AVGO", "TSM", "MU"],
@@ -119,7 +119,6 @@ WATCHLIST = {
     "114800": {"market": "KR", "leaders": ["069500"],
                "inverse": True,  "pair": None, "name": "KODEX 인버스"},
 }
-TICKERS = list(WATCHLIST.keys())
 
 POLL_INTERVAL_SEC = 30         # 위험 알림(손절·매도) 지연을 줄이려 30초.
                                # ENTRY 는 완성봉 기준이라 이 값과 무관하게 봉당 1회다.

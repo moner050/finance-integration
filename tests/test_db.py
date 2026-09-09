@@ -38,9 +38,11 @@ def test_watchlist_roundtrip():
     row = DBM.get_watch_row(d, "AAPL")
     assert row["leaders"] == ["MSFT"] and row["pair"] is None and row["note"] is None
     assert DBM.load_watchlist(d)["AAPL"]["leaders"] == ["MSFT"]
+    v3 = DBM.watchlist_version(d)                               # 4행
+    assert v3 != v2
     DBM.delete_watch(d, "AAPL")
     assert DBM.get_watch_row(d, "AAPL") is None
-    assert DBM.watchlist_version(d) != v2                       # 삭제도 행 수로 잡힌다
+    assert DBM.watchlist_version(d) != v3                       # 삭제는 행 수로 잡힌다
     assert [r["symbol"] for r in DBM.list_watch_rows(d)] == ["005930", "SOXL", "SOXX"]
 
     with pytest.raises(ValueError):

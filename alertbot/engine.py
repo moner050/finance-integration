@@ -12,6 +12,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
+from . import db
 from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, BASE_DIR, CLOSE_WARN_MIN,
                      ENABLE_ADD_ON, ENABLE_AMBIGUOUS, ENABLE_EXIT_SIGNAL, ENABLE_TRACKING,
                      ENTRY_MIN_PEAK_RATIO, EXIT_GRACE_MIN, EXIT_PORTION_HALF, EXIT_PORTION_STRONG,
@@ -34,11 +35,13 @@ log = logging.getLogger("scalper")
 
 class SignalEngine:
     def __init__(self, client: TossReadOnlyClient, notifier: Dispatcher, watch_holdings: bool,
-                 watchlist: dict):
+                 watchlist: dict, store=None):
         self.client = client
         self.notify = notifier
         self.watch_holdings = watch_holdings
         self.watchlist = watchlist      # symbol -> 설정 dict (market/leaders/inverse/pair/hold_only/name/note)
+        self.store = store              # db.DB. None 이면 핫리로드·상태 영속 없이 돈다 (테스트)
+        self.watch_version = None       # 마지막으로 읽은 워치리스트 버전
         self.last_bar = {}              # ticker -> 마지막으로 평가한 완성봉 timestamp
         self.prev_close = {}
         self.prev_close_date = {}       # symbol -> 전일 종가를 받은 현지 세션 날짜
@@ -71,6 +74,8 @@ class SignalEngine:
         # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 초기화한다.
         # 30분을 기다리면 '돌고 있는 건지' 확인이 늦어진다.
         self.last_summary = datetime.now(timezone.utc) - timedelta(minutes=SUMMARY_INTERVAL_MIN)
+        if store is not None:
+            self._restore_state()
 
     @property
     def tickers(self) -> list:
@@ -80,6 +85,112 @@ class SignalEngine:
     def _emit(self, kind: str, title: str, label: str, symbol, body: str):
         """알림 한 건. 채널 선택·쿨다운·이력 기록은 Dispatcher 가 맡는다."""
         self.notify.send(Signal(kind, title, label, body, symbol))
+
+    # -- 워치리스트 핫리로드 · 상태 영속 ----------------------------------------
+    def _reload_watchlist(self):
+        """백오피스가 바꾼 목록을 재시작 없이 반영한다. 버전이 바뀐 사이클에만 다시 읽는다."""
+        if self.store is None:
+            return
+        try:
+            version = db.watchlist_version(self.store)
+            if version == self.watch_version:
+                return
+            new = db.load_watchlist(self.store)
+        except Exception as e:
+            log.warning("워치리스트 조회 실패 — 이전 목록 유지: %s", e)
+            return
+        added = sorted(set(new) - set(self.watchlist))
+        removed = sorted(set(self.watchlist) - set(new))
+        changed = sorted(t for t in set(new) & set(self.watchlist) if new[t] != self.watchlist[t])
+        for t in removed:
+            self._forget(t)
+        for t in changed:
+            if new[t]["market"] != self.watchlist[t]["market"]:
+                self._forget(t)                 # 시장이 바뀌면 세션·프로파일이 다른 시간대다
+        self.watchlist = new
+        self.watch_version = version
+        if added or removed or changed:
+            log.info("감시 목록 변경 — 추가 %s / 제거 %s / 수정 %s → 현재 %s", added, removed, changed, self.tickers)
+
+    def _forget(self, ticker: str):
+        """감시에서 빠진 종목의 상태를 지운다. 보유 중이면 손절 알림이 더는 나가지 않으니 경고한다."""
+        if ticker in self._last_holdings:
+            log.warning("%s 보유 중인데 감시 목록에서 빠졌다 — 손절·매도 알림이 나가지 않는다", ticker)
+        for d in (self.state, self.pending, self.stop_ref, self.entry_at, self.exit_at, self.addon_count,
+                  self.last_seen, self.last_bar, self.sessions, self.volume_profile, self.profile_date,
+                  self.snapshots, self.stats):
+            d.pop(ticker, None)
+
+    _SNAP_KEYS = ("label", "market", "price", "close", "vwap", "band", "pos", "pos_close", "prev_rvol",
+                  "rvol", "rvol_method", "peak", "strength", "direction_ok", "momentum", "strong")
+
+    def _save_status(self, active: list, pre: list, error: str = None):
+        """사이클마다 heartbeat·종목 상태·지표를 저장한다. 백오피스가 읽고, 재시작 때 복원한다."""
+        if self.store is None:
+            return
+        tickers = set(self.state) | set(self.sessions) | set(self.stop_ref) | set(self.pending)
+        state = {}
+        for t in tickers:
+            item = {
+                "state": self.state.get(t, "관망"),
+                "pending": self.pending.get(t),
+                "stop_ref": self.stop_ref.get(t),
+                "entry_at": self.entry_at[t].isoformat() if t in self.entry_at else None,
+                "exit_at": self.exit_at[t].isoformat() if t in self.exit_at else None,
+                "addon_count": self.addon_count.get(t, 0),
+                "last_seen": self.last_seen.get(t),
+                "last_bar": self.last_bar.get(t),
+                "session": self.sessions[t].to_dict() if t in self.sessions else None,
+            }
+            state[t] = item
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        snaps = {t: {k: s.get(k) for k in self._SNAP_KEYS} | {"at": now}
+                 for t, s in self.snapshots.items()}
+        try:
+            db.save_engine_status(self.store, active, pre, state, snaps, error)
+        except Exception as e:                  # DB 장애가 감시를 멈추면 안 된다
+            log.warning("엔진 상태 저장 실패: %s", e)
+
+    def _restore_state(self):
+        """재시작 직후 이전 상태를 되살린다.
+
+        없으면 _sync_state 가 기존 보유를 '방금 매수'로 오인해 익절 유예를 다시 주고,
+        신호봉 저점 손절선(stop_ref)이 사라져 매도선이 밴드로 바뀌고, 불타기 횟수가 리셋된다.
+        오래된 타이머는 그대로 두어도 된다 — 유예·재진입 차단은 시간이 지나면 자연히 풀린다.
+        """
+        try:
+            saved = db.load_engine_status(self.store)
+        except Exception as e:
+            log.warning("엔진 상태 복원 실패: %s", e)
+            return
+        if not saved or not saved.get("state"):
+            return
+        restored = []
+        for t, item in saved["state"].items():
+            if t not in self.watchlist:
+                continue
+            self.state[t] = item.get("state", "관망")
+            if item.get("pending"):
+                self.pending[t] = item["pending"]
+            if item.get("stop_ref"):
+                self.stop_ref[t] = float(item["stop_ref"])
+            for key, target in (("entry_at", self.entry_at), ("exit_at", self.exit_at)):
+                if item.get(key):
+                    try:
+                        target[t] = datetime.fromisoformat(item[key])
+                    except ValueError:
+                        pass
+            if item.get("addon_count"):
+                self.addon_count[t] = int(item["addon_count"])
+            if item.get("last_seen"):
+                self.last_seen[t] = item["last_seen"]
+            if item.get("last_bar"):
+                self.last_bar[t] = item["last_bar"]
+            if item.get("session"):
+                self.sessions[t] = SessionState.from_dict(self.watchlist[t]["market"], item["session"])
+            restored.append(t)
+        if restored:
+            log.info("엔진 상태 복원 (%s 기준): %s", saved.get("heartbeat_at"), restored)
 
     # -- 집계 ---------------------------------------------------------------
     def bump(self, ticker: str, key: str):
@@ -698,6 +809,7 @@ class SignalEngine:
         # '조용한 이유'를 사람이 알 수 있게 한다.
         prev_open = set()
         while True:
+            self._reload_watchlist()
             open_now = [t for t in self.tickers if self.hours.market_open(self.watchlist[t]["market"])]
             # hold_only 종목(3배 레버리지)은 보유 중일 때만 감시한다.
             # 안 들고 있으면 조회할 이유가 없다 — 매수 신호는 SOXX 가 낸다.
@@ -724,6 +836,7 @@ class SignalEngine:
             prev_open = now_open
 
             if not active and not pre:
+                self._save_status([], [])       # 장 밖에서도 heartbeat 는 남긴다
                 time.sleep(POLL_INTERVAL_SEC)
                 continue
 
@@ -742,6 +855,7 @@ class SignalEngine:
                 holdings = self.client.get_holdings() if self.watch_holdings else {}
             except Exception as e:
                 log.exception("시세/보유 조회 실패: %s", e)
+                self._save_status(active, pre, error=str(e))
                 time.sleep(POLL_INTERVAL_SEC)
                 continue
 
@@ -777,6 +891,7 @@ class SignalEngine:
                     log.exception("%s 프리마켓 조회 오류: %s", t, e)
             # 요약은 평가 뒤에 보낸다. 이번 사이클의 지표를 써야 최신 상태가 담긴다.
             self.market_summary(active, holdings, pre)
+            self._save_status(active, pre)
             time.sleep(POLL_INTERVAL_SEC)
 
 
