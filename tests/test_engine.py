@@ -181,3 +181,22 @@ def test_status_persist_and_restore_after_restart(monkeypatch, tmp_path):
     DBM.save_engine_status(store, [], [], saved["state"], {})
     eng3, _ = make_engine(monkeypatch, tmp_path, store=store)
     assert "ZZZ" not in eng3.state and eng3.state["AAA"] == "보유"
+
+
+# --- 매수 신호는 정규장 봉에서만 ---------------------------------------------------
+
+def test_entry_only_on_regular_session_bar(monkeypatch, tmp_path):
+    def at_1545(market):
+        return datetime(2026, 3, 25, 15, 45, tzinfo=TZ["KR"]).astimezone(TZ[market])
+    # 신호봉이 15:31 (KR 정규장 마감 뒤 시간외 봉) → 조건이 다 맞아도 매수 신호 없음
+    eng, cap = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(14, 30))
+    monkeypatch.setattr(E, "now_local", at_1545)
+    monkeypatch.setattr(MH, "now_local", at_1545)
+    eng.evaluate("AAA", {"AAA": 100.8}, {})
+    assert cap.sent == [] and eng.snapshots["AAA"]["regular"] is False
+    # 같은 모양이 15:29 에 끝나면(정규장) 매수 신호가 난다
+    eng2, cap2 = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(14, 28))
+    monkeypatch.setattr(E, "now_local", at_1545)
+    monkeypatch.setattr(MH, "now_local", at_1545)
+    eng2.evaluate("AAA", {"AAA": 100.8}, {})
+    assert [x[0] for x in cap2.sent] == ["🔵 매수하세요"] and eng2.snapshots["AAA"]["regular"] is True

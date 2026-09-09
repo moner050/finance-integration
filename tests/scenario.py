@@ -15,9 +15,10 @@ def fixed_now_local(market: str) -> datetime:
     return FIXED_NOW_UTC.astimezone(TZ[market])
 
 
-def scenario_candles() -> list:
-    """09:00~10:01 KR 62봉. 60번째까지 조용하고, 60(거래량 1.5배)→61(3배, 강봉, 기준선 위) 돌파."""
-    t0 = datetime(2026, 3, 25, 9, 0, tzinfo=TZ["KR"])
+def scenario_candles(start_hour: int = 9, start_minute: int = 0) -> list:
+    """시작 시각부터 KR 62봉. 60번째까지 조용하고, 60(거래량 1.5배)→61(3배, 강봉, 기준선 위) 돌파.
+    기본 09:00~10:01."""
+    t0 = datetime(2026, 3, 25, start_hour, start_minute, tzinfo=TZ["KR"])
     out = []
     for i in range(60):
         close = 100.0 + (i % 3) * 0.05

@@ -22,7 +22,7 @@ from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, BASE_DIR, CLOSE_WARN
                      RVOL_TRIGGER, RVOL_WINDOW, STATS_REPORT_MIN, STOP_LOSS_PCT,
                      SUMMARY_INTERVAL_MIN, TRACK_FILE, TRADE_FILE, VWAP_BAND_PCT)
 from .indicators import (SessionState, build_volume_profile, compute_rsi, compute_rvol,
-                         effective_band, ema_alignment, strong_bar, vwap_position)
+                         effective_band, ema_alignment, is_regular_bar, strong_bar, vwap_position)
 from .market_hours import MarketHours
 from .models import Signal
 from .notify.dispatcher import Dispatcher
@@ -357,6 +357,7 @@ class SignalEngine:
             "pos_close": vwap_position(close, vwap, band),
             "last_low": float(candles[-1].get("lowPrice") or 0),
             "strong": strong_bar(candles[-1]),
+            "regular": is_regular_bar(candles[-1], market),
             "prev_rvol": prev_rvol, "rvol": rvol, "rvol_method": rvol_method,
             "peak": ss.peak,
             "strength": strength, "direction_ok": direction_ok, "momentum": momentum,
@@ -431,6 +432,10 @@ class SignalEngine:
         # ---- 관망: 매수 판단 ----
         if snap["cfg"].get("hold_only"):
             return          # 3배 상품은 매수 신호를 내지 않는다
+        if not snap["regular"]:
+            # 매수 신호는 정규장 봉에서만. 마감 뒤 10분 여유 구간이나 프리마켓의 시간외 봉은
+            # 유동성이 얇아 거래량 배수가 튀고, 기준선(정규장 VWAP)과 비교할 대상도 아니다.
+            return
         exited = self.exit_at.get(ticker)
         if exited and datetime.now(timezone.utc) - exited < timedelta(minutes=REENTRY_BLOCK_MIN):
             return

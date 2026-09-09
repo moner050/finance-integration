@@ -42,6 +42,12 @@ def _minutes_from_open(hhmm: str, market: str) -> int:
         return -1
 
 
+def is_regular_bar(candle: dict, market: str) -> bool:
+    """이 봉이 정규장 봉인지. 프리마켓·시간외(NXT 포함) 봉이면 False."""
+    b = _bucket(candle, market)
+    return bool(b) and _is_regular(b[1], market)
+
+
 def build_volume_profile(candles: list, market: str, exclude_session: str = None) -> dict:
     """현지 시각(HH:MM) -> 과거 그 시각의 거래량 목록.
 
@@ -157,7 +163,7 @@ class SessionState:
         self.session, self.pv, self.vol, self.peak, self.last_dt = session, 0.0, 0.0, 0.0, None
 
     def update(self, candles: list, profile: dict = None) -> int:
-        """시간순 완성봉을 넣는다. 새로 반영한 봉 수를 돌려준다."""
+        """시간순 완성봉을 넣는다. 마지막(최신) 세션에 새로 반영한 봉 수를 돌려준다."""
         added = 0
         for i, c in enumerate(candles):
             dt = parse_ts(c.get("timestamp"), self.market)
@@ -166,6 +172,7 @@ class SessionState:
             session, hhmm = dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
             if self.session is None or session > self.session:
                 self._reset(session)
+                added = 0                     # 백필 이력의 이전 세션은 세지 않는다
             elif session < self.session:
                 continue                      # 창에 남아 있는 전 세션 봉
             if self.last_dt is not None and dt <= self.last_dt:
