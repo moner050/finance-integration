@@ -1,0 +1,12 @@
+# Market data lake. Reproducible from data.binance.vision; never committed.
+data/
+
+# Secrets. The collector reads none of these, but nothing here belongs in git.
+.env
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+venv/
+.venv/
