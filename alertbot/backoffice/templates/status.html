@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% set nav = "status" %}
+{% block content %}
+<h2>엔진 상태</h2>
+<div id="status" hx-get="/partials/status" hx-trigger="every 30s" hx-swap="innerHTML">
+{% include "_status.html" %}
+</div>
+{% endblock %}

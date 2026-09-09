@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}단타 알림 백오피스{% endblock %}</title>
+<script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js"></script>
+<style>
+ body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Malgun Gothic",sans-serif;margin:0;background:#f6f7f9;color:#1f2933}
+ header{background:#1f2933;color:#fff;padding:.6rem 1.2rem;display:flex;gap:1.2rem;align-items:center}
+ header a{color:#cbd2d9;text-decoration:none}
+ header a.active,header a:hover{color:#fff}
+ main{padding:1.2rem;max-width:1280px;margin:0 auto}
+ h2{margin:.2rem 0 .8rem}
+ table{border-collapse:collapse;width:100%;background:#fff;font-size:.9rem}
+ th,td{border-bottom:1px solid #e4e7eb;padding:.45rem .6rem;text-align:left;vertical-align:top}
+ th{background:#f0f3f5;font-weight:600;white-space:nowrap}
+ .badge{display:inline-block;padding:.1rem .45rem;border-radius:.6rem;font-size:.78rem;background:#e4e7eb}
+ .action{background:#ffd8d8}.review{background:#fff2c2}.info{background:#dbe9ff}
+ .ok{color:#137333}.warn{color:#b3261e;font-weight:600}.muted{color:#7b8794}
+ form.card{background:#fff;padding:1rem;border:1px solid #e4e7eb;margin:1rem 0;display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem .9rem}
+ form.card label{display:flex;flex-direction:column;font-size:.85rem;gap:.2rem}
+ form.card .full{grid-column:1/-1;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+ input[type=text],select{padding:.35rem;border:1px solid #cbd2d9;border-radius:.3rem;font:inherit}
+ button{padding:.35rem .8rem;border:1px solid #9aa5b1;background:#fff;border-radius:.3rem;cursor:pointer;font:inherit}
+ button.primary{background:#1f2933;color:#fff;border-color:#1f2933}
+ button.danger{color:#b3261e}
+ pre{white-space:pre-wrap;margin:0;font-family:inherit}
+ .inline{display:inline}
+ code{background:#eef1f4;padding:.05rem .3rem;border-radius:.2rem}
+</style>
+</head>
+<body>
+<header>
+ <strong>단타 알림</strong>
+ <a href="/" class="{{ 'active' if nav == 'status' else '' }}">상태</a>
+ <a href="/watchlist" class="{{ 'active' if nav == 'watchlist' else '' }}">종목</a>
+ <a href="/signals" class="{{ 'active' if nav == 'signals' else '' }}">신호 이력</a>
+ <a href="/channels" class="{{ 'active' if nav == 'channels' else '' }}">채널</a>
+</header>
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

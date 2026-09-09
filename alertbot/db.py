@@ -100,6 +100,13 @@ UPSERT_STATUS = {
 }
 
 
+def _json_default(value):
+    """엔진 상태에 섞인 datetime 은 ISO 문자열로. 복원 쪽은 문자열이어도 쓰지 않는 필드(pending.at)다."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"JSON 직렬화 불가: {type(value).__name__}")
+
+
 def _now() -> str:
     """마이크로초까지. 같은 초 안의 연속 수정도 watchlist_version 이 구분해야 핫리로드가 빠뜨리지 않는다."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -130,7 +137,8 @@ class DB:
 
     @classmethod
     def sqlite(cls, path: str = ":memory:") -> "DB":
-        con = sqlite3.connect(path, isolation_level=None)      # autocommit
+        # autocommit. check_same_thread=False: 백오피스 테스트가 워커 스레드에서 같은 연결을 쓴다 (락으로 직렬화)
+        con = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         con.row_factory = sqlite3.Row
         return cls(con, "sqlite")
 
@@ -261,7 +269,8 @@ def seed_watchlist(db: DB, items: dict) -> int:
 def save_engine_status(db: DB, active: list, pre: list, state: dict, snapshots: dict, last_error: str = None):
     db.execute(UPSERT_STATUS[db.dialect],
                (_now(), json.dumps(active), json.dumps(pre), last_error,
-                json.dumps(state, ensure_ascii=False), json.dumps(snapshots, ensure_ascii=False)))
+                json.dumps(state, ensure_ascii=False, default=_json_default),
+                json.dumps(snapshots, ensure_ascii=False, default=_json_default)))
 
 
 def load_engine_status(db: DB):

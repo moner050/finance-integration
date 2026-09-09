@@ -20,6 +20,7 @@
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 # 프로젝트 루트. .env, 로그, CSV, SQLite 파일이 모두 여기에 놓인다.
@@ -193,8 +194,16 @@ LOG_PATH = BASE_DIR / "scalping_signals.log"
 
 
 def setup_logging(path: Path = None):
-    """엔진은 파일+콘솔, 백오피스는 콘솔만. 형식은 원본과 같다."""
-    handlers = [logging.StreamHandler()]
+    """엔진은 파일+콘솔, 백오피스는 콘솔만. 형식은 원본과 같다.
+
+    Windows 콘솔(cp949)은 이모지를 못 찍어 로그마다 'Logging error' 가 붙는다.
+    콘솔 쪽은 못 찍는 글자를 '?' 로 대체하고, 파일은 UTF-8 로 온전히 남긴다.
+    """
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+    handlers = [logging.StreamHandler(sys.stdout)]
     if path is not None:
         handlers.insert(0, logging.FileHandler(path, encoding="utf-8-sig"))
     logging.basicConfig(level=logging.INFO,

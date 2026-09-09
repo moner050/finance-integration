@@ -1,0 +1,34 @@
+{% if not status %}
+<p class="warn">엔진 상태 기록이 없다. run_engine.py 가 한 번도 돌지 않았다.</p>
+{% else %}
+<p>
+ 마지막 사이클 <strong>{{ status.heartbeat_at|kst }}</strong>
+ {% if stale %}<span class="warn">({{ age if age is not none else '?' }}초 전 — 엔진이 멈췄을 수 있다)</span>
+ {% else %}<span class="ok">({{ age }}초 전)</span>{% endif %}
+ · 감시 중: {{ status.active|join(', ') or '없음' }}
+ {% if status.pre %}· 프리마켓: {{ status.pre|join(', ') }}{% endif %}
+ · 종목 {{ enabled_count }}/{{ watch_count }} 활성
+ {% if status.last_error %}<br><span class="warn">마지막 오류: {{ status.last_error }}</span>{% endif %}
+</p>
+<table>
+<tr><th>종목</th><th>시장</th><th>상태</th><th>현재가</th><th>종가</th><th>VWAP (밴드)</th><th>위치 현재/종가</th><th>RVOL</th><th>정점</th><th>선행</th><th>손절선</th><th>갱신</th></tr>
+{% for t in tickers %}
+<tr>
+ <td><strong>{{ t.label or t.symbol }}</strong><br><span class="muted">{{ t.symbol }}</span></td>
+ <td>{{ t.market or '' }}</td>
+ <td><span class="badge">{{ t.state }}</span>{% if t.pending and t.pending.level %}<br><span class="muted">{{ t.pending.level }}</span>{% endif %}</td>
+ <td>{{ t.price if t.price is not none else '-' }}</td>
+ <td>{{ t.close if t.close is not none else '-' }}</td>
+ <td>{{ t.vwap if t.vwap is not none else '-' }} <span class="muted">±{{ t.band }}%</span></td>
+ <td>{{ t.pos or '-' }} / {{ t.pos_close or '-' }}</td>
+ <td>{{ t.prev_rvol }} → {{ t.rvol }} <span class="muted">{{ t.rvol_method or '' }}</span></td>
+ <td>{{ t.peak }}</td>
+ <td>{% if t.strength is none %}<span class="muted">없음</span>{% else %}{{ t.strength }}% {{ '✅' if t.direction_ok else '❌' }}{% if t.momentum is not none %} <span class="muted">({{ t.momentum }}%/5분)</span>{% endif %}{% endif %}</td>
+ <td>{{ t.stop_ref or '-' }}</td>
+ <td>{{ t.at|kst }}</td>
+</tr>
+{% else %}
+<tr><td colspan="12" class="muted">아직 지표가 없다 (장 밖이거나 첫 사이클 전)</td></tr>
+{% endfor %}
+</table>
+{% endif %}

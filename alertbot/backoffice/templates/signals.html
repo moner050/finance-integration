@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% set nav = "signals" %}
+{% block content %}
+<h2>신호 이력</h2>
+<form method="get" action="/signals" style="margin:.6rem 0;display:flex;gap:.6rem;align-items:center">
+ <input type="text" name="symbol" placeholder="심볼" value="{{ symbol or '' }}">
+ <select name="severity">
+  <option value="">모든 등급</option>
+  {% for s in ['action', 'review', 'info'] %}<option value="{{ s }}" {{ 'selected' if severity == s else '' }}>{{ s }}</option>{% endfor %}
+ </select>
+ <button>필터</button>
+ <span class="muted">최근 {{ rows|length }}건</span>
+</form>
+<table>
+<tr><th>시각 (KST)</th><th>종류</th><th>등급</th><th>종목</th><th>제목</th><th>본문</th><th>채널 결과</th></tr>
+{% for r in rows %}
+<tr>
+ <td>{{ r.sent_at|kst }}</td>
+ <td>{{ r.kind }}</td>
+ <td><span class="badge {{ r.severity }}">{{ r.severity }}</span></td>
+ <td>{{ r.label }}{% if r.symbol %}<br><span class="muted">{{ r.symbol }}</span>{% endif %}</td>
+ <td>{{ r.title }}</td>
+ <td><pre>{{ r.body }}</pre></td>
+ <td>{% for ch, res in r.results.items() %}<span class="{{ 'ok' if res == 'ok' else ('muted' if res == 'skip' else 'warn') }}">{{ ch }}: {{ res }}</span><br>{% endfor %}</td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="muted">기록이 없다</td></tr>
+{% endfor %}
+</table>
+{% endblock %}
