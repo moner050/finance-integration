@@ -23,7 +23,8 @@ def test_watchlist_roundtrip():
     assert DBM.seed_watchlist(d, SEED) == 0                    # 있으면 건너뛴다
     wl = DBM.load_watchlist(d)
     assert wl["SOXX"] == {"market": "US", "leaders": ["NVDA", "AVGO"], "inverse": False, "pair": None,
-                          "hold_only": False, "name": None, "note": "레버리지 진입 시 SOXL"}
+                          "hold_only": False, "name": None, "note": "레버리지 진입 시 SOXL",
+                          "auto_trade": False, "auto_amount": 0.0}
     assert wl["SOXL"]["hold_only"] is True and wl["SOXL"]["pair"] == "SOXS" and wl["SOXL"]["leaders"] is None
     assert wl["005930"]["name"] == "삼성전자"
 
@@ -68,3 +69,32 @@ def test_engine_status_and_signal_log():
     assert [r["kind"] for r in DBM.recent_signals(d, symbol="SOXX")] == ["ENTRY"]
     assert [r["kind"] for r in DBM.recent_signals(d, severity="info")] == ["SUMMARY"]
     assert DBM.recent_signals(d, limit=1)[0]["kind"] == "SUMMARY"
+
+
+def test_settings_and_orders():
+    d = fresh()
+    st = DBM.get_settings(d)
+    assert st["autotrade_enabled"] == "0" and st["max_positions"] == "3"
+    DBM.set_setting(d, "autotrade_enabled", 1)
+    DBM.set_setting(d, "max_positions", "5")
+    assert DBM.get_settings(d)["autotrade_enabled"] == "1" and DBM.get_settings(d)["max_positions"] == "5"
+    with pytest.raises(ValueError):
+        DBM.set_setting(d, "nope", 1)
+
+    DBM.upsert_watch(d, "AAA", "KR", auto_trade=True, auto_amount=500000)
+    assert DBM.load_watchlist(d)["AAA"]["auto_trade"] is True and DBM.load_watchlist(d)["AAA"]["auto_amount"] == 500000.0
+
+    row = {"intent_id": "AAA-1", "mode": "dry", "symbol": "AAA", "market": "KR", "side": "BUY", "kind": "ENTRY",
+           "order_type": "LIMIT", "price": 100.0, "quantity": 10, "amount": 1000.0, "bar_key": "t1", "ref_avg": None,
+           "status": "sent", "reason": None, "order_id": "o1", "filled_qty": 0, "avg_price": None, "pnl": None,
+           "created_at": "2026-09-09T01:00:00+00:00", "updated_at": None}
+    DBM.insert_order(d, row)
+    assert [o["intent_id"] for o in DBM.open_orders(d)] == ["AAA-1"]
+    assert DBM.open_orders(d, "BBB") == []
+    DBM.update_order(d, "AAA-1", status="filled", filled_qty=10, avg_price=99.5)
+    got = DBM.get_order(d, "AAA-1")
+    assert got["status"] == "filled" and got["avg_price"] == 99.5 and got["updated_at"]
+    assert DBM.open_orders(d) == []
+    assert len(DBM.orders_since(d, "2026-09-09T00:00:00+00:00", mode="dry")) == 1
+    assert DBM.orders_since(d, "2026-09-10T00:00:00+00:00") == []
+    assert DBM.recent_orders(d, 5)[0]["price"] == 100.0

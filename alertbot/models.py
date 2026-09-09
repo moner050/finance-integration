@@ -27,6 +27,12 @@ KINDS = {
     "DAILY_REPORT": ("info", "none"),
     "SUMMARY": ("info", "none"),
     "SYSTEM": ("info", "none"),
+    # 자동매매. 주문 관련은 쿨다운 없이 매번 보낸다 — 같은 종목의 연속 주문도 각각 알아야 한다.
+    "ORDER_SENT": ("action", "none"),
+    "ORDER_FILLED": ("action", "none"),
+    "ORDER_CANCELED": ("review", "none"),
+    "ORDER_FAILED": ("action", "none"),
+    "AUTOTRADE_DISABLED": ("action", "none"),
 }
 
 

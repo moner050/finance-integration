@@ -54,6 +54,33 @@ SCHEMA = {
              results   TEXT         NOT NULL,
              INDEX idx_alert_signal_sent (sent_at)
            ) CHARACTER SET utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS alert_settings (
+             k VARCHAR(64) PRIMARY KEY, v VARCHAR(255) NOT NULL, updated_at VARCHAR(32) NOT NULL
+           ) CHARACTER SET utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS alert_orders (
+             intent_id  VARCHAR(40) PRIMARY KEY,
+             mode       VARCHAR(4)  NOT NULL,
+             symbol     VARCHAR(32) NOT NULL,
+             market     VARCHAR(2)  NOT NULL,
+             side       VARCHAR(4)  NOT NULL,
+             kind       VARCHAR(20) NOT NULL,
+             order_type VARCHAR(6)  NOT NULL,
+             price      DECIMAL(18,4) NOT NULL,
+             quantity   DECIMAL(18,6) NOT NULL,
+             amount     DECIMAL(18,4) NOT NULL,
+             bar_key    VARCHAR(40),
+             ref_avg    DECIMAL(18,4),
+             status     VARCHAR(10) NOT NULL,
+             reason     VARCHAR(255),
+             order_id   VARCHAR(64),
+             filled_qty DECIMAL(18,6) NOT NULL DEFAULT 0,
+             avg_price  DECIMAL(18,4),
+             pnl        DECIMAL(18,4),
+             created_at VARCHAR(32) NOT NULL,
+             updated_at VARCHAR(32),
+             INDEX idx_alert_orders_created (created_at),
+             INDEX idx_alert_orders_symbol (symbol, status)
+           ) CHARACTER SET utf8mb4""",
     ],
     "sqlite": [
         """CREATE TABLE IF NOT EXISTS alert_watchlist (
@@ -68,23 +95,51 @@ SCHEMA = {
              severity TEXT NOT NULL, symbol TEXT, label TEXT, title TEXT NOT NULL, body TEXT NOT NULL,
              results TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_alert_signal_sent ON alert_signal_log (sent_at)",
+        "CREATE TABLE IF NOT EXISTS alert_settings (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        """CREATE TABLE IF NOT EXISTS alert_orders (
+             intent_id TEXT PRIMARY KEY, mode TEXT NOT NULL, symbol TEXT NOT NULL, market TEXT NOT NULL,
+             side TEXT NOT NULL, kind TEXT NOT NULL, order_type TEXT NOT NULL, price REAL NOT NULL,
+             quantity REAL NOT NULL, amount REAL NOT NULL, bar_key TEXT, ref_avg REAL, status TEXT NOT NULL,
+             reason TEXT, order_id TEXT, filled_qty REAL NOT NULL DEFAULT 0, avg_price REAL, pnl REAL,
+             created_at TEXT NOT NULL, updated_at TEXT)""",
     ],
+}
+
+# 기존 테이블에 나중에 추가된 컬럼. init_schema 가 없으면 붙인다.
+WATCHLIST_EXTRA_COLUMNS = {
+    "mysql": [("auto_trade", "TINYINT NOT NULL DEFAULT 0"), ("auto_amount", "DECIMAL(18,2) NOT NULL DEFAULT 0")],
+    "sqlite": [("auto_trade", "INTEGER NOT NULL DEFAULT 0"), ("auto_amount", "REAL NOT NULL DEFAULT 0")],
+}
+
+# 자동매매 운영 설정 기본값. 백오피스에서 바꾸고 엔진이 매 사이클 읽는다.
+SETTING_DEFAULTS = {
+    "autotrade_enabled": "0",            # 킬 스위치. 1 이어야 주문이 나간다 (.env AUTOTRADE_MODE 와 별개)
+    "max_positions": "3",                # 동시 보유 종목 수 상한 (열린 매수 의도 포함)
+    "max_orders_per_day": "20",          # 하루 주문 횟수 상한 (손절 매도는 면제)
+    "daily_loss_limit_krw": "300000",    # 오늘 실현손실이 이 아래면 매수 중단 (원)
+    "daily_loss_limit_usd": "200",       # 같은 기준 (달러)
+    "max_order_amount_krw": "1000000",   # 1회 매수 금액 상한 (원)
+    "max_order_amount_usd": "1000",      # 1회 매수 금액 상한 (달러)
 }
 
 # upsert 는 방언이 다르다. MySQL 은 8.0.19+ 의 행 별칭(AS new) 구문 — VALUES() 는 8.0.20 부터 폐기 예정.
 UPSERT_WATCH = {
     "mysql": """INSERT INTO alert_watchlist
-                  (symbol, market, name, leaders, inverse, pair, hold_only, note, enabled, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
+                  (symbol, market, name, leaders, inverse, pair, hold_only, note, enabled, auto_trade, auto_amount,
+                   created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE market=new.market, name=new.name, leaders=new.leaders,
                   inverse=new.inverse, pair=new.pair, hold_only=new.hold_only, note=new.note,
-                  enabled=new.enabled, updated_at=new.updated_at""",
+                  enabled=new.enabled, auto_trade=new.auto_trade, auto_amount=new.auto_amount,
+                  updated_at=new.updated_at""",
     "sqlite": """INSERT INTO alert_watchlist
-                  (symbol, market, name, leaders, inverse, pair, hold_only, note, enabled, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  (symbol, market, name, leaders, inverse, pair, hold_only, note, enabled, auto_trade, auto_amount,
+                   created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(symbol) DO UPDATE SET market=excluded.market, name=excluded.name,
                   leaders=excluded.leaders, inverse=excluded.inverse, pair=excluded.pair,
                   hold_only=excluded.hold_only, note=excluded.note, enabled=excluded.enabled,
+                  auto_trade=excluded.auto_trade, auto_amount=excluded.auto_amount,
                   updated_at=excluded.updated_at""",
 }
 UPSERT_STATUS = {
@@ -173,7 +228,19 @@ class DB:
     def init_schema(self):
         for stmt in SCHEMA[self.dialect]:
             self.execute(stmt)
+        self._add_missing_columns()
         return self
+
+    def _add_missing_columns(self):
+        """기존 alert_watchlist 에 자동매매 컬럼이 없으면 붙인다 (있으면 아무것도 안 한다)."""
+        if self.dialect == "mysql":
+            have = {r["Field"] for r in self.fetchall("SHOW COLUMNS FROM alert_watchlist")}
+        else:
+            have = {r["name"] for r in self.fetchall("PRAGMA table_info(alert_watchlist)")}
+        for col, ddl in WATCHLIST_EXTRA_COLUMNS[self.dialect]:
+            if col not in have:
+                self.execute(f"ALTER TABLE alert_watchlist ADD COLUMN {col} {ddl}")
+                log.info("alert_watchlist.%s 컬럼 추가", col)
 
     def close(self):
         self.con.close()
@@ -197,6 +264,8 @@ def _row_to_item(row: dict) -> dict:
         "hold_only": bool(row["hold_only"]),
         "name": row["name"] or None,
         "note": row["note"] or None,
+        "auto_trade": bool(row.get("auto_trade") or 0),
+        "auto_amount": float(row.get("auto_amount") or 0),
     }
 
 
@@ -228,7 +297,7 @@ def watchlist_version(db: DB) -> str:
 
 def upsert_watch(db: DB, symbol: str, market: str, name: str = None, leaders: list = None,
                  inverse: bool = False, pair: str = None, hold_only: bool = False,
-                 note: str = None, enabled: bool = True):
+                 note: str = None, enabled: bool = True, auto_trade: bool = False, auto_amount: float = 0):
     symbol = symbol.strip().upper()
     if not symbol:
         raise ValueError("symbol 이 비어 있다")
@@ -239,7 +308,7 @@ def upsert_watch(db: DB, symbol: str, market: str, name: str = None, leaders: li
     db.execute(UPSERT_WATCH[db.dialect],
                (symbol, market, name or None, leaders_json, int(bool(inverse)),
                 (pair or "").strip().upper() or None, int(bool(hold_only)), note or None,
-                int(bool(enabled)), now, now))
+                int(bool(enabled)), int(bool(auto_trade)), float(auto_amount or 0), now, now))
 
 
 def set_enabled(db: DB, symbol: str, enabled: bool):
@@ -259,7 +328,8 @@ def seed_watchlist(db: DB, items: dict) -> int:
         if symbol in existing:
             continue
         upsert_watch(db, symbol, cfg["market"], cfg.get("name"), cfg.get("leaders") or [],
-                     cfg.get("inverse", False), cfg.get("pair"), cfg.get("hold_only", False), cfg.get("note"))
+                     cfg.get("inverse", False), cfg.get("pair"), cfg.get("hold_only", False), cfg.get("note"),
+                     auto_trade=cfg.get("auto_trade", False), auto_amount=cfg.get("auto_amount", 0))
         added += 1
     return added
 
@@ -308,6 +378,83 @@ def recent_signals(db: DB, limit: int = 200, symbol: str = None, severity: str =
     for r in rows:
         r["results"] = json.loads(r["results"])
     return rows
+
+
+# -- 자동매매 설정 -------------------------------------------------------------
+
+def get_settings(db: DB) -> dict:
+    """기본값 위에 저장된 값을 덮는다. 없는 키는 기본값이다."""
+    out = dict(SETTING_DEFAULTS)
+    for r in db.fetchall("SELECT k, v FROM alert_settings"):
+        out[r["k"]] = r["v"]
+    return out
+
+
+def set_setting(db: DB, key: str, value):
+    if key not in SETTING_DEFAULTS:
+        raise ValueError(f"알 수 없는 설정: {key}")
+    sql = {
+        "mysql": "INSERT INTO alert_settings (k, v, updated_at) VALUES (%s, %s, %s) AS new "
+                 "ON DUPLICATE KEY UPDATE v=new.v, updated_at=new.updated_at",
+        "sqlite": "INSERT INTO alert_settings (k, v, updated_at) VALUES (%s, %s, %s) "
+                  "ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at",
+    }[db.dialect]
+    db.execute(sql, (key, str(value), _now()))
+
+
+# -- 주문 의도 -----------------------------------------------------------------
+
+ORDER_COLUMNS = ("intent_id", "mode", "symbol", "market", "side", "kind", "order_type", "price", "quantity",
+                 "amount", "bar_key", "ref_avg", "status", "reason", "order_id", "filled_qty", "avg_price", "pnl",
+                 "created_at", "updated_at")
+
+
+def insert_order(db: DB, row: dict):
+    cols = ", ".join(ORDER_COLUMNS)
+    marks = ", ".join(["%s"] * len(ORDER_COLUMNS))
+    db.execute(f"INSERT INTO alert_orders ({cols}) VALUES ({marks})", tuple(row.get(c) for c in ORDER_COLUMNS))
+
+
+def update_order(db: DB, intent_id: str, **fields):
+    fields["updated_at"] = _now()
+    sets = ", ".join(f"{k} = %s" for k in fields)
+    db.execute(f"UPDATE alert_orders SET {sets} WHERE intent_id = %s", tuple(fields.values()) + (intent_id,))
+
+
+def _order_rows(db: DB, sql: str, params=()) -> list:
+    rows = db.fetchall(sql, params)
+    for r in rows:
+        for k in ("price", "quantity", "amount", "ref_avg", "filled_qty", "avg_price", "pnl"):
+            if r.get(k) is not None:
+                r[k] = float(r[k])
+    return rows
+
+
+def open_orders(db: DB, symbol: str = None) -> list:
+    sql = "SELECT * FROM alert_orders WHERE status IN ('sent', 'open')"
+    params = []
+    if symbol:
+        sql += " AND symbol = %s"
+        params.append(symbol)
+    return _order_rows(db, sql + " ORDER BY created_at", params)
+
+
+def orders_since(db: DB, since_iso: str, mode: str = None) -> list:
+    """since_iso(UTC ISO) 이후 생성된 의도. 하루 주문 수·실현손익 집계용."""
+    sql, params = "SELECT * FROM alert_orders WHERE created_at >= %s", [since_iso]
+    if mode:
+        sql += " AND mode = %s"
+        params.append(mode)
+    return _order_rows(db, sql + " ORDER BY created_at", params)
+
+
+def recent_orders(db: DB, limit: int = 200) -> list:
+    return _order_rows(db, "SELECT * FROM alert_orders ORDER BY created_at DESC LIMIT %s", (int(limit),))
+
+
+def get_order(db: DB, intent_id: str):
+    rows = _order_rows(db, "SELECT * FROM alert_orders WHERE intent_id = %s", (intent_id,))
+    return rows[0] if rows else None
 
 
 # -- CLI -----------------------------------------------------------------------

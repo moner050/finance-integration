@@ -67,6 +67,19 @@ TG_MIN_SEVERITY = _CFG.get("TELEGRAM_MIN_SEVERITY") or "info"
 BACKOFFICE_HOST = _CFG.get("ALERT_BACKOFFICE_HOST") or "127.0.0.1"
 BACKOFFICE_PORT = int(_CFG.get("ALERT_BACKOFFICE_PORT") or 8000)
 
+# 자동매매 — 기본 off. 코드 배포만으로는 절대 live 가 되지 않는다.
+#   off : 실행기를 만들지 않는다 (알림만)
+#   dry : 정책 검사·주문 의도 기록까지 실제와 같고, 브로커만 가짜(참조가로 가상 체결)
+#   live: 실제 주문. DB 킬 스위치(autotrade_enabled)와 종목별 auto_trade 까지 켜져야 나간다
+AUTOTRADE_MODE = (_CFG.get("AUTOTRADE_MODE") or "off").strip().lower()
+if AUTOTRADE_MODE not in ("off", "dry", "live"):
+    raise SystemExit(f"AUTOTRADE_MODE 는 off|dry|live 중 하나: {AUTOTRADE_MODE}")
+AUTOTRADE_BUY_BUFFER_PCT = float(_CFG.get("AUTOTRADE_BUY_BUFFER_PCT") or 0.3)   # 매수 지정가 = 신호가 × (1 + 이 %)
+AUTOTRADE_BUY_TTL_MIN = int(_CFG.get("AUTOTRADE_BUY_TTL_MIN") or 3)            # 이 시간 안에 미체결이면 취소
+# 하드캡: 1회 주문 금액 상한. DB 설정(max_order_amount_*)보다 우선하는 최후의 안전망이다.
+AUTOTRADE_HARD_MAX_AMOUNT_KRW = float(_CFG.get("AUTOTRADE_HARD_MAX_AMOUNT_KRW") or 2_000_000)
+AUTOTRADE_HARD_MAX_AMOUNT_USD = float(_CFG.get("AUTOTRADE_HARD_MAX_AMOUNT_USD") or 2_000)
+
 # 저장소: 이미 쓰고 있는 MySQL (.env 의 MYSQL_*). 테이블은 alert_ 접두어로 만든다.
 MYSQL = {
     "host": _CFG["MYSQL_HOST"] or "127.0.0.1",

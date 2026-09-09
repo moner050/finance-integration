@@ -6,8 +6,8 @@
 
 import logging
 
-from alertbot.config import (CLIENT_ID, CLIENT_SECRET, LOG_PATH, SEED_WATCHLIST, WATCH_HOLDINGS,
-                             setup_logging)
+from alertbot.config import (AUTOTRADE_MODE, CLIENT_ID, CLIENT_SECRET, LOG_PATH, SEED_WATCHLIST,
+                             WATCH_HOLDINGS, setup_logging)
 from alertbot import db
 from alertbot.engine import SignalEngine, log_timestamp_sample
 from alertbot.models import Signal
@@ -35,8 +35,22 @@ def main():
     if not watch:
         log.info("보유 조회 비활성 — ENTRY 알림만 나온다")
     notifier = Dispatcher(build_channels(), record=lambda s, r: db.log_signal(store, s, r))
-    notifier.send(Signal("SYSTEM", "⚪ 시스템", "감시 시작", ", ".join(watchlist) or "(종목 없음)"))
-    SignalEngine(cli, notifier, watch, watchlist, store).run()
+    executor = build_executor(store, cli, notifier)
+    notifier.send(Signal("SYSTEM", "⚪ 시스템", "감시 시작",
+                         f"{', '.join(watchlist) or '(종목 없음)'}
+자동매매: {AUTOTRADE_MODE}"))
+    SignalEngine(cli, notifier, watch, watchlist, store, executor).run()
+
+
+def build_executor(store, cli, notifier):
+    """AUTOTRADE_MODE 에 따라 실행기를 만든다. off 면 None — 주문 코드가 아예 실행되지 않는다."""
+    if AUTOTRADE_MODE == "off":
+        log.info("자동매매 비활성(off) — 알림만 보낸다")
+        return None
+    from alertbot.trading.broker import DryRunBroker, TossOrderClient
+    from alertbot.trading.executor import Executor
+    broker = TossOrderClient(cli) if AUTOTRADE_MODE == "live" else DryRunBroker()
+    return Executor(store, broker, AUTOTRADE_MODE, notifier)
 
 
 if __name__ == "__main__":

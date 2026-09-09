@@ -35,12 +35,13 @@ log = logging.getLogger("scalper")
 
 class SignalEngine:
     def __init__(self, client: TossReadOnlyClient, notifier: Dispatcher, watch_holdings: bool,
-                 watchlist: dict, store=None):
+                 watchlist: dict, store=None, executor=None):
         self.client = client
         self.notify = notifier
         self.watch_holdings = watch_holdings
         self.watchlist = watchlist      # symbol -> 설정 dict (market/leaders/inverse/pair/hold_only/name/note)
         self.store = store              # db.DB. None 이면 핫리로드·상태 영속 없이 돈다 (테스트)
+        self.executor = executor        # trading.Executor. AUTOTRADE_MODE=off 면 None — 알림만
         self.watch_version = None       # 마지막으로 읽은 워치리스트 버전
         self.last_bar = {}              # ticker -> 마지막으로 평가한 완성봉 timestamp
         self.prev_close = {}
@@ -65,6 +66,7 @@ class SignalEngine:
         self.state = {}
         self.pending = {}           # 이행 대기 중인 신호 정보
         self._last_holdings = {}    # 직전 사이클 보유. hold_only 종목의 감시 여부 결정
+        self._holdings_now = {}     # 이번 evaluate 에 넘어온 보유. 실행기가 매도 수량·평단을 여기서 본다
         # 청산 직전 마지막으로 관측한 평단·시세. 마감 메시지의 손익 추정에 쓴다.
         self.last_seen = {}
         # 매수 신호봉의 저점. 이게 구조적 손절선이다.
@@ -76,6 +78,8 @@ class SignalEngine:
         self.last_summary = datetime.now(timezone.utc) - timedelta(minutes=SUMMARY_INTERVAL_MIN)
         if store is not None:
             self._restore_state()
+        if executor is not None:
+            executor.hours = self.hours     # 정규장 판정을 엔진과 같은 캘린더로
 
     @property
     def tickers(self) -> list:
@@ -83,8 +87,29 @@ class SignalEngine:
 
     # -- 알림 ---------------------------------------------------------------
     def _emit(self, kind: str, title: str, label: str, symbol, body: str):
-        """알림 한 건. 채널 선택·쿨다운·이력 기록은 Dispatcher 가 맡는다."""
+        """알림 한 건. 채널 선택·쿨다운·이력 기록은 Dispatcher 가 맡는다.
+
+        자동매매가 켜져 있으면 같은 신호를 실행기에도 넘긴다. 실행기 오류가 알림을 막으면 안 되므로
+        알림을 먼저 보내고, 실행기 예외는 잡아서 로그만 남긴다.
+        """
         self.notify.send(Signal(kind, title, label, body, symbol))
+        if self.executor is not None and symbol:
+            try:
+                self.executor.on_signal(Signal(kind, title, label, body, symbol), self.snapshots.get(symbol),
+                                        self._holdings_now)
+            except Exception as e:
+                log.exception("자동매매 실행기 오류 (%s %s): %s", kind, symbol, e)
+
+    def _reconcile_orders(self):
+        """미결 주문 추적. 체결된 매도의 실제 평균가를 청산 메시지에 쓰도록 남긴다."""
+        if self.executor is None:
+            return
+        try:
+            for symbol, qty, avg in self.executor.reconcile():
+                if symbol in self.last_seen:
+                    self.last_seen[symbol].update({"price": avg, "actual": True})
+        except Exception as e:
+            log.exception("자동매매 미결 추적 오류: %s", e)
 
     # -- 워치리스트 핫리로드 · 상태 영속 ----------------------------------------
     def _reload_watchlist(self):
@@ -389,6 +414,7 @@ class SignalEngine:
         return st
 
     def evaluate(self, ticker: str, prices: dict, holdings: dict):
+        self._holdings_now = holdings
         snap = self._snapshot(ticker, prices)
         if snap is None:
             return
@@ -555,7 +581,8 @@ class SignalEngine:
             body = (f"손익 없음  (평단 {avg})\n"
                     f"{qty:g}주 정리 완료\n"
                     f"다음 신호를 기다리면 돼")
-        body += f"\n\n※ 실제 체결가는 다를 수 있음 (추정치)"
+        body += ("\n\n※ 자동매매 체결가 기준" if seen.get("actual")
+                 else "\n\n※ 실제 체결가는 다를 수 있음 (추정치)")
         self._emit("CLOSED", head, label, ticker, body)
         self.trades.add(ticker, label, qty, avg, price, pnl)
 
@@ -841,6 +868,7 @@ class SignalEngine:
             prev_open = now_open
 
             if not active and not pre:
+                self._reconcile_orders()
                 self._save_status([], [])       # 장 밖에서도 heartbeat 는 남긴다
                 time.sleep(POLL_INTERVAL_SEC)
                 continue
@@ -896,6 +924,7 @@ class SignalEngine:
                     log.exception("%s 프리마켓 조회 오류: %s", t, e)
             # 요약은 평가 뒤에 보낸다. 이번 사이클의 지표를 써야 최신 상태가 담긴다.
             self.market_summary(active, holdings, pre)
+            self._reconcile_orders()
             self._save_status(active, pre)
             time.sleep(POLL_INTERVAL_SEC)
 
