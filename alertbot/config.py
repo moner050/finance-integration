@@ -1,0 +1,172 @@
+"""설정 — .env 로드와 임계값 상수.
+
+.env·로그·CSV·SQLite 는 패키지 폴더가 아니라 프로젝트 루트(BASE_DIR)에 둔다.
+상대경로로 두면 실행 방식(더블클릭, 다른 폴더에서 실행)에 따라 작업 디렉토리가
+달라져 파일이 엉뚱한 곳에 생긴다.
+
+사전 준비
+--------
+1. 토스증권 WTS > 설정 > Open API 에서 client_id / client_secret 발급
+2. 같은 화면 하단 '허용 IP 관리'에 현재 공인 IP 등록 (미등록 IP 는 403)
+3. 프로젝트 루트의 .env 파일 (따옴표 없이, 등호 앞뒤 공백 없이):
+     TOSS_CLIENT_ID=...
+     TOSS_CLIENT_SECRET=...
+     TELEGRAM_BOT_TOKEN=...
+     TELEGRAM_CHAT_ID=...
+4. Windows 는 IANA 타임존 DB 가 없어 zoneinfo 가 실패할 수 있다.
+     pip install tzdata
+   설치하지 않으면 고정 오프셋으로 대체하되, 미국 서머타임 전환 주간에 1시간 오차가 날 수 있다.
+"""
+
+import logging
+import os
+from pathlib import Path
+
+# 프로젝트 루트. .env, 로그, CSV, SQLite 파일이 모두 여기에 놓인다.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def load_config() -> dict:
+    """스크립트와 같은 폴더의 .env 를 읽고, 없는 항목은 환경변수로 채운다."""
+    cfg = {}
+    env_path = BASE_DIR / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip().strip("'\"")
+    for key in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET",
+                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        if not cfg.get(key):
+            cfg[key] = os.getenv(key, "")
+    return cfg
+
+
+_CFG = load_config()
+
+# ---------------------------------------------------------------------------
+# 설정
+# ---------------------------------------------------------------------------
+
+API_BASE = "https://openapi.tossinvest.com"
+CLIENT_ID = _CFG["TOSS_CLIENT_ID"]
+CLIENT_SECRET = _CFG["TOSS_CLIENT_SECRET"]
+TG_TOKEN = _CFG["TELEGRAM_BOT_TOKEN"]
+# 쉼표로 여러 명을 넣을 수 있다: TELEGRAM_CHAT_ID=111111,222222
+# 각 수신자는 봇에게 먼저 /start 를 보내야 한다. 텔레그램 봇은 먼저 말을 건
+# 상대에게만 메시지를 보낼 수 있어서, 이 단계를 빼먹으면 chat not found 가 난다.
+TG_CHATS = [c.strip() for c in _CFG["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
+
+WATCH_HOLDINGS = True          # 보유 조회(읽기 전용). False 면 ENTRY 알림만
+ENABLE_EXIT_SIGNAL = True      # 거래량 소진 기반 익절 알림. 끄려면 False
+
+# 감시 종목
+#   market  : "US" | "KR"  — 장 시간·타임존이 다르다
+#   leaders : 선행 바스켓. None 이면 방향 조건을 생략 (개별주)
+#   inverse : 인버스면 선행 바스켓 방향을 뒤집는다
+#   pair    : 동시 진입을 막을 반대 종목
+WATCHLIST = {
+    # 반도체: 신호는 1배 ETF(SOXX)에서 낸다. 3배 상품은 1분봉이 너무 튀어
+    # 지표가 지저분하다. SOXX 에서 매수 신호가 뜨면 사람이 SOXL 을 산다.
+    "SOXX":   {"market": "US", "leaders": ["NVDA", "AVGO", "TSM", "MU"],
+               "inverse": False, "pair": None,
+               "note": "레버리지 진입 시 SOXL"},
+    # 3배 상품은 보유 중일 때만 감시한다 (매수 신호는 안 낸다).
+    # 손절·익절은 자기 캔들로 판단해야 3배 변동폭이 반영된다.
+    "SOXL":   {"market": "US", "leaders": None, "inverse": False,
+               "pair": "SOXS", "hold_only": True},
+    "SOXS":   {"market": "US", "leaders": None, "inverse": True,
+               "pair": "SOXL", "hold_only": True},
+    "KORU":   {"market": "US", "leaders": ["EWY"],
+               "inverse": False, "pair": None},
+    "BITX":   {"market": "US", "leaders": ["IBIT"],
+               "inverse": False, "pair": None},
+    # 개별주. 선행 바스켓 없이 VWAP + RVOL 두 조건으로 판단한다.
+    "OKLO":   {"market": "US", "leaders": None,
+               "inverse": False, "pair": None},
+    "000660": {"market": "KR", "leaders": None,
+               "inverse": False, "pair": None, "name": "SK하이닉스"},
+    "005930": {"market": "KR", "leaders": None,
+               "inverse": False, "pair": None, "name": "삼성전자"},
+    "114800": {"market": "KR", "leaders": ["069500"],
+               "inverse": True,  "pair": None, "name": "KODEX 인버스"},
+}
+TICKERS = list(WATCHLIST.keys())
+
+POLL_INTERVAL_SEC = 30         # 위험 알림(손절·매도) 지연을 줄이려 30초.
+                               # ENTRY 는 완성봉 기준이라 이 값과 무관하게 봉당 1회다.
+MIN_CALL_GAP_SEC = 0.3         # API 호출 최소 간격 (레이트리밋 회피)
+CANDLE_COUNT = 120             # EMA50 계산에 최소 50봉 필요
+RVOL_WINDOW = 20               # 프로파일이 없을 때 쓰는 이동평균 구간
+RVOL_TRIGGER = 2.0
+VWAP_BAND_PCT = 0.15           # VWAP 밴드 하한 (%). 실제는 변동성에 맞춰 커진다
+ATR_BAND_MULT = 0.5            # 밴드 = 최근 20봉 평균진폭 × 이 배수 (하한 이상)
+STRONG_BAR_MIN = 0.5           # 매수 신호봉 종가가 봉 범위의 이 비율 이상 위치해야 함
+LEADER_GAP_PCT = 1.0           # 선행 바스켓 평균 등락률 트리거 (%)
+STOP_LOSS_PCT = -5.0           # 고정 손절 한도
+# 익절은 평단이 아니라 거래량 소진으로 판단한다.
+# 평단은 진입가가 아닐 수 있고(물타기·장기분 혼합), 시장은 내 평단을 모른다.
+# 거래량이 정점 대비 얼마나 줄었는지가 추세의 실제 연료 상태를 보여준다.
+FADE_STRONG_RATIO = 0.4        # 세션 정점 대비 이 아래면 연료 소진 — 익절 신호
+FADE_WEAK_RATIO = 0.6          # 이 아래면 둔화 시작 — 일부 익절 검토
+FADE_MIN_PEAK = 2.5            # 정점이 이 배수는 넘어야 '터졌다'고 본다
+OPEN_EXCLUDE_MIN = 10          # 개장 후 이 분 동안의 봉은 정점 계산에서 제외
+
+# 신호 강도에 따른 익절 비중 제안.
+# "애매하다"고만 하면 판단이 그대로 남지만, 비중을 제시하면 행동이 가능해진다.
+# 확신이 낮을수록 적게 덜어내고 남은 물량으로 추세를 계속 본다.
+EXIT_PORTION_STRONG = "전량"    # 연료 완전 소진
+EXIT_PORTION_HALF = "절반"      # 둔화 진행
+EXIT_PORTION_THIRD = "1/3"      # 근거만 흐려짐
+PROFILE_PAGES = 16             # 거래량 프로파일용 페이지 수 (200봉/페이지, 약 8세션)
+MIN_PROFILE_SESSIONS = 3       # 같은 시각 표본 최소 개수
+ALERT_COOLDOWN_MIN = 15        # 강한 알림(손절·익절·매도) 재발송 간격
+WEAK_COOLDOWN_MIN = 45         # 약한 알림(검토 권유) 재발송 간격. 자주 오면 무시하게 된다
+
+# 매도 계열 알림이 나간 뒤 같은 종목의 매수 알림을 막는 시간.
+# 익절 직후 거래량이 잠깐 반등하면 2.0 을 다시 넘길 수 있는데,
+# 그건 새로운 추세가 아니라 소진된 추세의 잔진동이다.
+REENTRY_BLOCK_MIN = 60
+# 매수 신호 직후 익절 알림을 막는 시간.
+# 거래량이 한 봉만 튀고 식으면 정점 대비 비율이 곧바로 무너져,
+# 산 지 1~2분 만에 '정리하세요'가 나오는 모순이 생긴다.
+# 손절·매도(위험 알림)에는 적용하지 않는다.
+EXIT_GRACE_MIN = 20
+# 매수 신호는 그날 정점 대비 이 비율 이상이어야 한다.
+# 정점 5배였던 종목이 2.1배로 반등한 걸 '돌파'로 보면 안 된다.
+ENTRY_MIN_PEAK_RATIO = 0.6
+CLOSE_WARN_MIN = 30
+STATS_REPORT_MIN = 60
+SUMMARY_INTERVAL_MIN = 30      # 전 종목 시황 요약 발송 주기
+
+# 불타기(추세 지속 확인 후 추가 매수) 알림
+ENABLE_ADD_ON = True
+ADDON_MIN_PROFIT_PCT = 2.0     # 이 수익률 이상일 때만. 손실 중 추가매수는 다루지 않는다
+ADDON_MAX_COUNT = 1            # 포지션당 최대 알림 횟수. 3배 상품에서 포지션이 눈덩이가 되는 걸 막는다
+
+# 판단 애매 알림: 수익 중인데 추세 근거가 흐려질 때.
+# 단타는 근거가 흐려지면 정리하는 게 원칙이지만, 장기 포지션에 같은 기준을
+# 적용하면 '승자 조기 청산'이 된다. 이 알림은 단타 종목에만 의미가 있다.
+ENABLE_AMBIGUOUS = True        # 근거가 흐려졌을 때 검토 알림. 수익 여부와 무관하게 판단한다
+
+# 신호 추적: ENTRY 발생 후 일정 시간 뒤 가격을 CSV 에 기록한다.
+# 임계값(RVOL 2.0, 밴드 0.15%, 선행 1%)이 맞는지는 이 데이터로만 판단할 수 있다.
+ENABLE_TRACKING = True
+TRACK_MINUTES = [15, 30, 60]   # ENTRY 후 몇 분 뒤를 기록할지
+TRACK_FILE = "signal_tracking.csv"
+TRADE_FILE = "trade_log.csv"    # 청산된 거래 기록 (일일 성적 집계용)
+
+# 로그는 프로젝트 루트에 쓴다.
+LOG_PATH = BASE_DIR / "scalping_signals.log"
+
+
+def setup_logging(path: Path = None):
+    """엔진은 파일+콘솔, 백오피스는 콘솔만. 형식은 원본과 같다."""
+    handlers = [logging.StreamHandler()]
+    if path is not None:
+        handlers.insert(0, logging.FileHandler(path, encoding="utf-8-sig"))
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s",
+                        handlers=handlers)

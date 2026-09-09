@@ -1,0 +1,72 @@
+{
+ "ema9": 101.1452,
+ "ema20": 101.1043,
+ "ema50": 101.1049,
+ "ema_alignment": "혼조",
+ "rsi_cutler": [
+  49.7,
+  55.3
+ ],
+ "atr_pct": 0.989,
+ "band": 0.494,
+ "profile_buckets": 70,
+ "profile_0930": [
+  1000.0,
+  1000.0,
+  1000.0,
+  1000.0
+ ],
+ "rvol_ma": [
+  0.63,
+  0.69,
+  "이동평균"
+ ],
+ "rvol_profile": [
+  0.8,
+  0.86,
+  "프로파일"
+ ],
+ "rvol_at_40_profile": 6.0,
+ "rvol_at_40_ma": 5.03,
+ "rvol_at_10": 0.0,
+ "peak_profile": 6.0,
+ "peak_ma": 5.03,
+ "vwap": 101.0896,
+ "vwap_partial_50": 101.0634,
+ "bucket_first": [
+  "2026-03-25",
+  "09:00"
+ ],
+ "bucket_us": [
+  "2026-03-25",
+  "09:30"
+ ],
+ "strong": [
+  true,
+  true,
+  false,
+  true
+ ],
+ "vwap_pos": [
+  "above",
+  "below",
+  "neutral",
+  "neutral",
+  "neutral"
+ ],
+ "is_regular": [
+  false,
+  true,
+  true,
+  false,
+  false,
+  true,
+  true,
+  false
+ ],
+ "minutes_from_open": [
+  5,
+  5,
+  -10
+ ]
+}

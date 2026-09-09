@@ -10,3 +10,11 @@ __pycache__/
 .ruff_cache/
 venv/
 .venv/
+
+# 단타 알림 시스템 런타임 산출물 (프로젝트 루트에 생성)
+scalping_signals.log
+signal_tracking.csv
+trade_log.csv
+alertbot.db
+alertbot.db-wal
+alertbot.db-shm
