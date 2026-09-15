@@ -17,6 +17,10 @@ KINDS = {
     "CRASH_BUY": ("action", "strong"),      # Binance 5분봉 급락 매수 후보 (run_binance.py). 워커가 60분 쿨다운을 따로 건다
     "SURGE_WATCH": ("review", "strong"),    # Binance 4시간봉 급등 확인 — 추종 관찰 (눌림 대기)
     "SURGE_ENTRY": ("action", "strong"),    # Binance 4시간봉 급등 뒤 눌림 재돌파 — 추종 진입 후보. 워커가 7일 쿨다운을 건다
+    "SURGE_WATCH_1D": ("review", "strong"), # 일봉 급등 확인 — 추종 관찰
+    "SURGE_ENTRY_1D": ("action", "strong"), # 일봉 급등 뒤 눌림 재돌파 — 추종 진입 후보 (20일 쿨다운)
+    "CRASH_WATCH_1D": ("review", "strong"), # 일봉 급락 확인 — 추종 관찰 (약세 국면)
+    "CRASH_SHORT_1D": ("action", "strong"), # 일봉 급락 뒤 반등 실패(EMA9 재이탈) — 추종 숏 후보 (20일 쿨다운)
     "STOP": ("action", "strong"),
     "SELL": ("action", "strong"),
     "EXIT_FULL": ("action", "strong"),      # '익절하세요'/'정리하세요' 문구가 달라도 같은 청산 신호다

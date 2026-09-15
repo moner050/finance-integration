@@ -55,7 +55,7 @@ def test_crash_with_reversal_bar_signals():
     assert r["mult"] >= CRASH_ATR_MULT and r["rsi"] <= 30 and r["close_pos"] >= 0.6
     assert r["drop"] < -7                                     # 7.5 → 6.95 는 -7.3%
     assert r["ref_high"] == max(b["high"] for b in bars[-1 - CRASH_LOOKBACK:-1])
-    assert r["rvol"] > 5 and r["stop"] < r["low"] < r["target"] < r["ref_high"]
+    assert r["rvol"] > 5 and abs(r["stop"] - r["close"] * 0.97) < 1e-9 and r["low"] < r["retrace50"] < r["ref_high"]
     assert 0 < base_atr_pct(bars) < 1
 
 
@@ -80,6 +80,7 @@ def test_signal_text_contains_key_numbers():
     assert s.kind == "CRASH_BUY" and s.severity == "action" and s.symbol == "ETCUSDT"
     body = s.text()
     assert "기준ATR" in body and "RSI14" in body and "펀딩 -0.0100%/8h" in body and "손절" in body
+    assert "(종가 -3%)" in body and "보유 한도 5시간" in body and "목표 지정가 없음" in body and "50% 되돌림선" in body
 
 
 class Recorder:

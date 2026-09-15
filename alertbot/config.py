@@ -217,25 +217,45 @@ CRASH_BASE_ATR_BARS = 864      # 기준 ATR = 직전 3일 ATR14% 중앙값
 CRASH_RVOL_WINDOW = 60         # RVOL 분모: 직전 60봉 거래량 중앙값 (참고 표기)
 CRASH_BETA_BTC = 1.35          # BTC 동반 판정용 베타 (ETC 이동 ≈ BTC 이동 × 1.35)
 CRASH_COOLDOWN_MIN = 60        # 같은 심볼 재알림 간격
+CRASH_STOP_PCT = 3.0           # 손절 참고선: 신호봉 종가 -3% 재난 손절. 저가-2ATR(진입 대비 0.7%)은 5분봉 스윕 구간이라 폐기 (2026-09-15 레버리지 분석)
+CRASH_HOLD_HOURS = 5           # 보유 한도 참고. 목표 지정가는 없다 — 50% 되돌림 목표는 5시간 보유 종료보다 평균이 낮았다
 BINANCE_LOG_PATH = DATA_DIR / "binance_signals.log"
 
-# 4시간봉 급등 추종 알림 (alertbot/binance_surge.py). 같은 워커 프로세스가 돌린다.
-# 스윙 분석 「스윙의 급등과 급락」의 4시간봉 BTC 'M2'(급등 뒤 첫 눌림에서 EMA9 재돌파) 트리거.
-# 급등 숏은 어느 봉에서도 손실이라 만들지 않는다.
+# 상위 봉 추종 알림 (alertbot/binance_follow.py). 같은 워커 프로세스가 사양(FOLLOW_SPECS)마다 워커 하나씩 돌린다.
+# 스윙 분석 「스윙의 급등과 급락」의 'M2' 계열: 급변 뒤 첫 눌림(반등)에서 EMA9 를 되찾는(잃는) 봉에 진입 후보.
+# 급등 숏은 어느 봉에서도 손실이라 만들지 않는다. 아래 SURGE_* 는 4시간봉 BTC 급등 추종 사양의 값이다.
 SURGE_SYMBOLS = [s.strip().upper() for s in (_CFG.get("ALERT_BINANCE_SURGE_SYMBOLS") or "BTCUSDT").split(",") if s.strip()]
-SURGE_INTERVAL = "4h"
-SURGE_KLINES = 400             # 기준 ATR(30일 = 180봉) + 룩백 + EMA9 계산에 충분한 봉 수
-SURGE_DAILY_KLINES = 400       # 국면(일봉 EMA200) 계산용
+FOLLOW_KLINES = 400            # 사양당 받는 봉 수. 기준 ATR 창(4시간봉 30일 = 180봉) + 룩백 + 일봉 EMA200 에 충분
 SURGE_LOOKBACK = 30            # 직전 30봉(5일) 저점 대비 상승폭
 SURGE_ATR_MULT = 6.0           # 상승폭 ≥ 기준 ATR × 6 (BTC 는 대략 +9% 이상)
 SURGE_RSI_MIN = 70.0           # RSI14 과매수 — 스윙에서는 추종 근거
 SURGE_BASE_ATR_BARS = 180      # 기준 ATR = 직전 30일 ATR14% 중앙값
 SURGE_REENTRY_BARS = 10        # 급등 뒤 이 봉 안의 EMA9 재돌파만 진입 후보
 SURGE_RVOL_WINDOW = 60         # RVOL 분모 (참고 표기)
-SURGE_BRACKET_ATR = 8.0        # 손절·목표 참고선 ±8 기준 ATR (1:1, BTC 는 대략 ±12%)
+SURGE_STOP_ATR = 2.5           # 손절 참고선: 눌림 저점 - 2.5 기준 ATR (진입 대비 중앙 -6%). ±8ATR 브래킷은 58건 중 4건만 걸려 손절 역할을 못 했다
 SURGE_HOLD_BARS = 42           # 보유 한도 7일. 단계별 재알림 간격도 같다
 SURGE_REQUIRE_BULL = True      # 일봉 종가가 EMA200 위일 때만 알린다 (약세 국면은 기대값 음수)
 SURGE_FUNDING_WARN = 0.0003    # 펀딩 > 3bp/8h(연 30%+)면 과열 표기
+# 일봉 사양 심볼: 급등 추종 롱(BTC 19건 승률 84% 순 +7.4%) · 급락 추종 숏(ETC 9건 중 8건 이익 순 +3.5%, 약세 국면만)
+SURGE_1D_SYMBOLS = [s.strip().upper() for s in (_CFG.get("ALERT_BINANCE_SURGE_1D_SYMBOLS") or "BTCUSDT").split(",") if s.strip()]
+CRASHFOLLOW_1D_SYMBOLS = [s.strip().upper() for s in (_CFG.get("ALERT_BINANCE_CRASHFOLLOW_1D_SYMBOLS") or "ETCUSDT").split(",") if s.strip()]
+# 사양: side 롱은 룩백 저점 대비 상승·RSI ≥ rsi, 숏은 룩백 고점 대비 하락·RSI ≤ rsi. regime 은 일봉 EMA200 기준 필요 국면.
+# hold_bars 는 보유 한도이자 단계별 재알림 간격, kinds 는 (관찰, 진입) 신호 종류. stop 은 손절 참고선 규칙 — ('pull_atr', m) 은 눌림 저점/반등 고점
+# ∓ m 기준 ATR, ('pct', p) 는 진입(신호 종가) ∓ p%. 목표 지정가는 두지 않는다(두면 세 사양 모두 평균 하락 — 2026-09-15 레버리지 분석).
+FOLLOW_SPECS = [
+    {"name": "급등 추종", "side": "long", "interval": "4h", "label": "4시간봉", "symbols": SURGE_SYMBOLS,
+     "lookback": SURGE_LOOKBACK, "atr_mult": SURGE_ATR_MULT, "rsi": SURGE_RSI_MIN, "base_bars": SURGE_BASE_ATR_BARS,
+     "reentry_bars": SURGE_REENTRY_BARS, "hold_bars": SURGE_HOLD_BARS, "stop": ("pull_atr", SURGE_STOP_ATR),
+     "regime": "bull" if SURGE_REQUIRE_BULL else None, "kinds": ("SURGE_WATCH", "SURGE_ENTRY")},
+    # 일봉 급등 추종 롱: 20봉 저점 대비 ≥ 기준ATR(90일 중앙값)×4 (BTC 약 +16%), 재돌파 10봉 안, 보유 20일, 손절 진입 -10% (이긴 거래의 최대 역행 8.2%)
+    {"name": "급등 추종", "side": "long", "interval": "1d", "label": "일봉", "symbols": SURGE_1D_SYMBOLS,
+     "lookback": 20, "atr_mult": 4.0, "rsi": 70.0, "base_bars": 90, "reentry_bars": 10, "hold_bars": 20, "stop": ("pct", 10.0),
+     "regime": "bull", "kinds": ("SURGE_WATCH_1D", "SURGE_ENTRY_1D")},
+    # 일봉 급락 추종 숏: 20봉 고점 대비 ≥ 기준ATR×4 (ETC 약 -27%), 첫 반등 뒤 EMA9 재이탈, 약세 국면만, 손절 진입 +25% (반등 고점은 8건 중 6건에서 5~7% 더 뚫린다)
+    {"name": "급락 추종", "side": "short", "interval": "1d", "label": "일봉", "symbols": CRASHFOLLOW_1D_SYMBOLS,
+     "lookback": 20, "atr_mult": 4.0, "rsi": 30.0, "base_bars": 90, "reentry_bars": 10, "hold_bars": 20, "stop": ("pct", 25.0),
+     "regime": "bear", "kinds": ("CRASH_WATCH_1D", "CRASH_SHORT_1D")},
+]
 
 
 def setup_logging(path: Path = None):

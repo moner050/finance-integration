@@ -13,7 +13,7 @@
   notify/       알림 발송 (텔레그램 등)
   engine        신호 엔진 (상태기계 + 메인 루프)
   binance_crash Binance 선물 5분봉 급락 매수 알림 (별도 워커 run_binance.py, 공개 REST)
-  binance_surge Binance 선물 4시간봉 급등 추종 알림 (같은 워커)
+  binance_follow Binance 선물 추종 알림 — 급등 추종 롱(4시간봉·일봉)·급락 추종 숏(일봉) (같은 워커, 사양별)
 
 알림 종류
 --------
@@ -26,6 +26,8 @@
   CRASH_BUY  Binance 5분봉 급락 매수 후보 — 48봉 고점 대비 ≥ 기준ATR×10 + RSI14 ≤ 30 + 반전봉
   SURGE_WATCH  Binance 4시간봉 급등 확인 — 30봉 저점 대비 ≥ 기준ATR×6 + RSI14 ≥ 70 (강세 국면)
   SURGE_ENTRY  급등 뒤 10봉 안 첫 눌림에서 EMA9 재돌파 — 추종 진입 후보
+  *_1D         일봉 사양: SURGE_WATCH_1D/SURGE_ENTRY_1D (BTC 급등 추종 롱), CRASH_WATCH_1D/CRASH_SHORT_1D
+               (ETC 급락 추종 숏 — 급락 뒤 첫 반등에서 EMA9 재이탈, 약세 국면만)
 
 주요 설계 결정
 ------------

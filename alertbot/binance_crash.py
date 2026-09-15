@@ -10,6 +10,8 @@
   반전봉  신호봉 종가가 봉 범위의 상위 40% (종가 위치 ≥ 0.6)
 기준 ATR = 직전 3일(864봉) ATR14% 의 중앙값. 급락 자체가 ATR 을 부풀리는 효과를 뺀 변동성 척도다.
 RVOL·꼬리·테이커·BTC 동반·펀딩은 조건이 아니라 판단 참고로 메시지에 싣는다.
+손절 참고선은 2026-09-15 레버리지 분석(마크 가격 봉 재생)에서 종가 -3% 재난 손절 + 5시간 보유 종료로 바꿨다 — 저가-2ATR(진입 대비 0.7%)은
+5분봉 스윕 깊이(p90 3.75 기준ATR) 안이라 45건 중 19건이 걸려 우위가 사라졌고, 50% 되돌림 목표도 평균을 낮춰 목표 지정가는 두지 않는다.
 """
 
 import logging
@@ -21,7 +23,7 @@ import requests
 
 from .config import (BINANCE_FAPI, BINANCE_INTERVAL, BINANCE_KLINES, CRASH_ATR_MULT,
                      CRASH_BASE_ATR_BARS, CRASH_BETA_BTC, CRASH_CLOSE_POS_MIN, CRASH_COOLDOWN_MIN,
-                     CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_RVOL_WINDOW)
+                     CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_RVOL_WINDOW, CRASH_STOP_PCT)
 from .indicators import compute_rsi
 from .models import Signal
 
@@ -107,8 +109,8 @@ def evaluate(bars: list, btc_bars: list = None, funding=None):
         "rvol": sig["volume"] / vol_med if vol_med > 0 else 0.0,
         "lower_wick": (min(sig["open"], sig["close"]) - sig["low"]) / rng if rng > 0 else 0.0,
         "taker": sig["taker_buy"] / sig["volume"] if sig["volume"] > 0 else 0.5,
-        "stop": sig["low"] * (1 - 2 * base / 100),                 # 신호봉 저가 - 2 기준 ATR
-        "target": sig["low"] + 0.5 * (ref_high - sig["low"]),       # 이동폭의 50% 되돌림
+        "stop": sig["close"] * (1 - CRASH_STOP_PCT / 100),          # 신호봉 종가 -3% 재난 손절 (저가-2ATR 은 스윕 구간)
+        "retrace50": sig["low"] + 0.5 * (ref_high - sig["low"]),    # 낙폭의 50% 되돌림선 — 목표가 아니라 참고
         "funding": funding,
     }
     # BTC 동반 여부: 같은 시각 봉이 있을 때만. 베타 보정한 BTC 하락폭이 ETC 하락폭의 몇 배인지.
@@ -139,8 +141,8 @@ def build_signal(symbol: str, r: dict) -> Signal:
         lines.append(f"BTC 같은 구간 {r['btc_drop']:+.2f}% → {r['btc_label']} (기여 {r['btc_share']:.2f})")
     if r.get("funding") is not None:
         lines.append(f"펀딩 {r['funding'] * 100:+.4f}%/8h")
-    lines.append(f"참고: 손절 {fmt_price(r['stop'])} (신호봉 저가 -2 기준ATR) · "
-                 f"1차 목표 {fmt_price(r['target'])} (50% 되돌림)")
+    lines.append(f"참고: 손절 {fmt_price(r['stop'])} (종가 -{CRASH_STOP_PCT:g}%) · 보유 한도 {CRASH_HOLD_HOURS}시간 · "
+                 f"목표 지정가 없음 · 50% 되돌림선 {fmt_price(r['retrace50'])}")
     return Signal("CRASH_BUY", "🔵 급락 매수 후보", f"{symbol} 5분봉", "\n".join(lines), symbol)
 
 
