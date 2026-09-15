@@ -14,6 +14,7 @@
   engine        신호 엔진 (상태기계 + 메인 루프)
   binance_crash Binance 선물 5분봉 급락 매수 알림 (별도 워커 run_binance.py, 공개 REST)
   binance_follow Binance 선물 추종 알림 — 급등 추종 롱(4시간봉·일봉)·급락 추종 숏(일봉) (같은 워커, 사양별)
+  binance_trade Binance 선물 자동매매 dry — 진입 후보를 가상 체결, 마크 손절·보유 한도·펀딩 (ALERT_BINANCE_TRADE_MODE=dry)
 
 알림 종류
 --------

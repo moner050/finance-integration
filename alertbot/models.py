@@ -40,6 +40,10 @@ KINDS = {
     "ORDER_CANCELED": ("review", "none"),
     "ORDER_FAILED": ("action", "none"),
     "AUTOTRADE_DISABLED": ("action", "none"),
+    # Binance 자동매매 (dry, run_binance.py). 포지션 사건은 쿨다운 없이 매번 보낸다
+    "BN_ENTRY": ("action", "none"),
+    "BN_EXIT": ("action", "none"),
+    "BN_SKIP": ("review", "none"),
 }
 
 

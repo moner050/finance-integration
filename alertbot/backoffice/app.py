@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 from .. import db
 from ..config import (AUTOTRADE_HARD_MAX_AMOUNT_KRW, AUTOTRADE_HARD_MAX_AMOUNT_USD, AUTOTRADE_MODE,
                       CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_TOKEN)
+from ..config import BINANCE_TRADE_MODE
 from ..models import Signal
 from ..notify import build_channels
 from ..notify.dispatcher import Dispatcher
@@ -191,11 +192,13 @@ def trading_context(message: str = None) -> dict:
         settings = db.get_settings(d)
         orders = db.recent_orders(d, 200)
         rows = db.list_watch_rows(d)
+        bn = db.binance_positions(d, limit=100)
     auto_rows = [r for r in rows if r.get("auto_trade")]
     live_ready = AUTOTRADE_MODE == "live" and settings["autotrade_enabled"] == "1" and bool(auto_rows)
     return {"mode": AUTOTRADE_MODE, "settings": settings, "orders": orders, "auto_rows": auto_rows,
             "live_ready": live_ready, "hard_max": {"KRW": AUTOTRADE_HARD_MAX_AMOUNT_KRW, "USD": AUTOTRADE_HARD_MAX_AMOUNT_USD},
-            "open_count": sum(1 for o in orders if o["status"] in ("sent", "open")), "message": message}
+            "open_count": sum(1 for o in orders if o["status"] in ("sent", "open")), "message": message,
+            "bn_mode": BINANCE_TRADE_MODE, "bn_positions": bn}
 
 
 @app.get("/trading", response_class=HTMLResponse)

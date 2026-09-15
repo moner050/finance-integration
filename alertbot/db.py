@@ -54,6 +54,30 @@ SCHEMA = {
              results   TEXT         NOT NULL,
              INDEX idx_alert_signal_sent (sent_at)
            ) CHARACTER SET utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS alert_binance_positions (
+             id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+             mode         VARCHAR(8)  NOT NULL,
+             strategy     VARCHAR(20) NOT NULL,
+             symbol       VARCHAR(32) NOT NULL,
+             side         VARCHAR(5)  NOT NULL,
+             qty          DECIMAL(18,6) NOT NULL,
+             entry_price  DECIMAL(18,6) NOT NULL,
+             notional     DECIMAL(18,4) NOT NULL,
+             leverage     DECIMAL(6,2)  NOT NULL,
+             stop         DECIMAL(18,6) NOT NULL,
+             deadline     VARCHAR(32) NOT NULL,
+             signal_bar   BIGINT,
+             next_funding BIGINT,
+             funding      DECIMAL(18,6) NOT NULL DEFAULT 0,
+             status       VARCHAR(8)  NOT NULL,
+             exit_price   DECIMAL(18,6),
+             exit_reason  VARCHAR(16),
+             pnl          DECIMAL(18,4),
+             opened_at    VARCHAR(32) NOT NULL,
+             closed_at    VARCHAR(32),
+             updated_at   VARCHAR(32),
+             INDEX idx_alert_bn_status (status)
+           ) CHARACTER SET utf8mb4""",
         """CREATE TABLE IF NOT EXISTS alert_settings (
              k VARCHAR(64) PRIMARY KEY, v VARCHAR(255) NOT NULL, updated_at VARCHAR(32) NOT NULL
            ) CHARACTER SET utf8mb4""",
@@ -95,6 +119,12 @@ SCHEMA = {
              severity TEXT NOT NULL, symbol TEXT, label TEXT, title TEXT NOT NULL, body TEXT NOT NULL,
              results TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_alert_signal_sent ON alert_signal_log (sent_at)",
+        """CREATE TABLE IF NOT EXISTS alert_binance_positions (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, strategy TEXT NOT NULL, symbol TEXT NOT NULL,
+             side TEXT NOT NULL, qty REAL NOT NULL, entry_price REAL NOT NULL, notional REAL NOT NULL,
+             leverage REAL NOT NULL, stop REAL NOT NULL, deadline TEXT NOT NULL, signal_bar INTEGER, next_funding INTEGER,
+             funding REAL NOT NULL DEFAULT 0, status TEXT NOT NULL, exit_price REAL, exit_reason TEXT, pnl REAL,
+             opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT)""",
         "CREATE TABLE IF NOT EXISTS alert_settings (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TEXT NOT NULL)",
         """CREATE TABLE IF NOT EXISTS alert_orders (
              intent_id TEXT PRIMARY KEY, mode TEXT NOT NULL, symbol TEXT NOT NULL, market TEXT NOT NULL,
@@ -455,6 +485,45 @@ def recent_orders(db: DB, limit: int = 200) -> list:
 def get_order(db: DB, intent_id: str):
     rows = _order_rows(db, "SELECT * FROM alert_orders WHERE intent_id = %s", (intent_id,))
     return rows[0] if rows else None
+
+
+# -- Binance 가상 포지션 (alertbot/binance_trade.py) --------------------------------
+
+BN_COLUMNS = ("mode", "strategy", "symbol", "side", "qty", "entry_price", "notional", "leverage", "stop", "deadline",
+              "signal_bar", "next_funding", "funding", "status", "opened_at")
+BN_FLOATS = ("qty", "entry_price", "notional", "leverage", "stop", "funding", "exit_price", "pnl")
+
+
+def insert_binance_position(db: DB, row: dict) -> int:
+    cols, marks = ", ".join(BN_COLUMNS), ", ".join(["%s"] * len(BN_COLUMNS))
+    cur = db.execute(f"INSERT INTO alert_binance_positions ({cols}) VALUES ({marks})",
+                     tuple(row.get(c) for c in BN_COLUMNS))
+    return int(cur.lastrowid)
+
+
+def update_binance_position(db: DB, pos_id: int, **fields):
+    fields["updated_at"] = _now()
+    sets = ", ".join(f"{k} = %s" for k in fields)
+    db.execute(f"UPDATE alert_binance_positions SET {sets} WHERE id = %s", (*fields.values(), pos_id))
+
+
+def binance_positions(db: DB, status: str = None, limit: int = 200) -> list:
+    sql, params = "SELECT * FROM alert_binance_positions", []
+    if status:
+        sql, params = sql + " WHERE status = %s", [status]
+    rows = db.fetchall(sql + " ORDER BY id DESC LIMIT %s", params + [int(limit)])
+    for r in rows:
+        for k in BN_FLOATS:
+            if r.get(k) is not None:
+                r[k] = float(r[k])
+    return rows
+
+
+def binance_pnl_since(db: DB, since_iso: str, mode: str) -> float:
+    """since_iso(UTC ISO) 이후 종료된 가상 포지션의 실현손익 합 — 일손실 한도용."""
+    row = db.fetchone("SELECT COALESCE(SUM(pnl), 0) AS s FROM alert_binance_positions "
+                      "WHERE status = 'closed' AND mode = %s AND closed_at >= %s", (mode, since_iso))
+    return float(row["s"] or 0)
 
 
 # -- CLI -----------------------------------------------------------------------

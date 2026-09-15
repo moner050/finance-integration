@@ -49,5 +49,23 @@
 <tr><td colspan="13" class="muted">기록이 없다</td></tr>
 {% endfor %}
 </table>
+<h3>Binance 선물 자동매매 — 가상 포지션 (모드 {{ bn_mode }}, 최근 100건)</h3>
+<p class="muted">.env <code>ALERT_BINANCE_TRADE_MODE=dry</code> 일 때 run_binance.py 가 진입 후보를 가상 체결한다. 손절은 마크 가격, 종료는 보유 한도. live 는 아직 없다.</p>
+<table>
+<tr><th>열림 (KST)</th><th>전략</th><th>심볼</th><th>방향</th><th>수량</th><th>진입가</th><th>명목 USDT</th><th>배율</th><th>손절</th><th>보유 한도 (KST)</th><th>상태</th><th>종료가 / 사유</th><th>펀딩</th><th>손익 USDT</th></tr>
+{% for p in bn_positions %}
+<tr>
+ <td>{{ p.opened_at|kst }}</td><td>{{ p.strategy }}</td><td>{{ p.symbol }}</td><td>{{ p.side }}</td>
+ <td>{{ '{:g}'.format(p.qty) }}</td><td>{{ p.entry_price }}</td><td>{{ '{:,.0f}'.format(p.notional) }}</td><td>{{ '{:g}'.format(p.leverage) }}</td>
+ <td>{{ p.stop }}</td><td>{{ p.deadline|kst }}</td>
+ <td><span class="badge {{ 'info' if p.status == 'closed' else '' }}">{{ p.status }}</span></td>
+ <td>{% if p.exit_price %}{{ p.exit_price }} <span class="muted">{{ p.exit_reason }}</span>{% endif %}</td>
+ <td>{{ '{:+.2f}'.format(p.funding) }}</td>
+ <td>{% if p.pnl is not none %}{{ '{:+,.2f}'.format(p.pnl) }}{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="14" class="muted">기록이 없다</td></tr>
+{% endfor %}
+</table>
 <p class="muted">live 전환 순서: dry 로 1주 이상 운영해 위 기록을 검토 → .env <code>AUTOTRADE_MODE=live</code> → 엔진 재시작 → 킬 스위치 켜기 → 종목별 자동매매 체크.</p>
 {% endblock %}

@@ -258,6 +258,19 @@ FOLLOW_SPECS = [
 ]
 
 
+# Binance 자동매매 (alertbot/binance_trade.py) — 기본 off. dry 는 공개 시세로 가상 체결(API 키 불필요). live 는 아직 없다.
+BINANCE_TRADE_MODE = (_CFG.get("ALERT_BINANCE_TRADE_MODE") or "off").strip().lower()
+if BINANCE_TRADE_MODE not in ("off", "dry"):
+    raise SystemExit(f"ALERT_BINANCE_TRADE_MODE 는 off|dry 중 하나 (live 는 아직 구현 전): {BINANCE_TRADE_MODE}")
+BINANCE_TRADE_CAPITAL = float(_CFG.get("ALERT_BINANCE_TRADE_CAPITAL") or 1000)   # 전략별 배분 자본 (USDT, 가상)
+# 전략(진입 신호 종류)별 유효 배율 = 명목가 ÷ 배분 자본. 레버리지 분석의 시작값 — 최대는 3 / 1.5 / 2 / 1
+BINANCE_TRADE_LEVERAGE = {"CRASH_BUY": 2.0, "SURGE_ENTRY": 1.0, "SURGE_ENTRY_1D": 1.5, "CRASH_SHORT_1D": 0.5}
+BINANCE_TRADE_FEE = 0.0005                                    # 테이커 편도
+BINANCE_TRADE_SLIP = {"ETCUSDT": 0.0005, "BTCUSDT": 0.0002}   # dry 체결 슬리피지 편도 (없는 심볼은 0.0005)
+BINANCE_TRADE_MAX_TOTAL_LEV = 3.0                             # 합산 명목 ≤ 자본 합 × 3
+BINANCE_TRADE_DAILY_LOSS_PCT = 6.0                            # 오늘 실현손실이 자본 합의 이 % 를 넘으면 신규 진입 중단
+
+
 def setup_logging(path: Path = None):
     """엔진은 파일+콘솔, 백오피스는 콘솔만. 형식은 원본과 같다.
 

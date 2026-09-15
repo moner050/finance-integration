@@ -8,7 +8,7 @@
 |---|---|---|
 | 엔진 워커 | `python run_engine.py` | 30초 폴링 → 지표 → 상태기계 → 텔레그램 알림 → (자동매매) |
 | 백오피스 | `python run_backoffice.py` | http://127.0.0.1:8000 — 종목·상태·신호 이력·채널·자동매매 |
-| Binance 워커 | `python run_binance.py` | 20초 폴링 → 5분봉 ETC 급락 매수 후보 · 4시간봉/일봉 BTC 급등 추종 · 일봉 ETC 급락 추종 숏 → 텔레그램 (토스 엔진과 독립, 3.5절) |
+| Binance 워커 | `python run_binance.py` | 20초 폴링 → 5분봉 ETC 급락 매수 후보 · 4시간봉/일봉 BTC 급등 추종 · 일봉 ETC 급락 추종 숏 → 텔레그램 (토스 엔진과 독립, 3.5절 · dry 자동매매는 3.6절) |
 | MySQL | 이미 쓰는 서버 | `alert_*` 테이블 5개. 세 프로세스가 공유하는 유일한 통로 |
 
 ---
@@ -39,7 +39,7 @@
 
 | 등급 | 알림 | 쿨다운 |
 |---|---|---|
-| action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 · 🔵 급락 매수 후보 · 🔵 눌림 재돌파 진입 후보 · 🔴 반등 실패 숏 후보(Binance) | 15분 (주문 관련은 없음, Binance 급락 매수 60분 · 추종은 보유 한도 7일/20일) |
+| action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 · 🔵 급락 매수 후보 · 🔵 눌림 재돌파 진입 후보 · 🔴 반등 실패 숏 후보 · 📥📤 가상 포지션 진입/종료(Binance) | 15분 (주문 관련은 없음, Binance 급락 매수 60분 · 추종은 보유 한도 7일/20일) |
 | review | 🟡 절반/1/3 익절 검토 · ⚪ 매수 취소 · 🎉✅ 청산 완료 · 📈 급등 확인 관찰 · 📉 급락 확인 관찰(Binance) | 45분 / 15분 (Binance 추종은 7일/20일) |
 | info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 오늘 성적 · ⚪ 시스템 | 없음 |
 
@@ -59,6 +59,7 @@ alertbot/
   engine.py          신호 엔진 (상태기계, 시황 요약, 워치리스트 핫리로드, 상태 저장·복원, 자동매매 훅)
   binance_crash.py   Binance 선물 5분봉 급락 매수 알림 (공개 REST 폴링 · 판정 · 워커) — 별도 프로세스
   binance_follow.py  Binance 선물 추종 알림 — 급등 추종 롱(4시간봉·일봉)·급락 추종 숏(일봉). 사양(FOLLOW_SPECS)별 워커, 일봉 EMA200 국면
+  binance_trade.py   Binance 선물 자동매매 dry — 진입 후보 가상 체결, 마크 손절·보유 한도·펀딩, alert_binance_positions
   tracking.py        signal_tracking.csv(신호 뒤 15/30/60분 가격), trade_log.csv(청산 기록)
   models.py          Signal (종류·등급·쿨다운)
   notify/            Dispatcher(쿨다운·이력) + telegram 채널
@@ -66,7 +67,7 @@ alertbot/
   trading/           자동매매: broker(TossOrderClient·DryRunBroker) · policy(리스크 정책) · executor(실행기) · models
   backoffice/        FastAPI + Jinja2 + HTMX 화면
 run_engine.py        엔진 진입점          run_backoffice.py   백오피스 진입점      run_binance.py   Binance 워커 진입점
-Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest 80개
+Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest 88개
 ```
 
 ---
@@ -88,6 +89,8 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `ALERT_BINANCE_SURGE_SYMBOLS` | | Binance 4시간봉 급등 추종 롱 알림 심볼(쉼표) | BTCUSDT |
 | `ALERT_BINANCE_SURGE_1D_SYMBOLS` | | Binance 일봉 급등 추종 롱 알림 심볼 | BTCUSDT |
 | `ALERT_BINANCE_CRASHFOLLOW_1D_SYMBOLS` | | Binance 일봉 급락 추종 숏 알림 심볼 | ETCUSDT |
+| `ALERT_BINANCE_TRADE_MODE` | | Binance 자동매매 모드 `off`(알림만) / `dry`(가상 체결, 3.6절). live 는 아직 없다 | off |
+| `ALERT_BINANCE_TRADE_CAPITAL` | | dry 자동매매의 전략별 배분 자본 (USDT) | 1000 |
 | `AUTOTRADE_MODE` | | 자동매매 모드 `off` / `dry` / `live` (4절) | off |
 | `AUTOTRADE_BUY_BUFFER_PCT` | | 매수 지정가 = 신호가 × (1 + 이 %) | 0.3 |
 | `AUTOTRADE_BUY_TTL_MIN` | | 매수 지정가가 이 분 안에 안 체결되면 취소 | 3 |
@@ -148,7 +151,7 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 
 토스 엔진과 별개의 워커 한 프로세스가 네 알림을 돌린다. Binance USDⓈ-M 무기한 선물 봉을 공개 REST 로 20초마다 받아(키 불필요)
 **완성봉마다 한 번** 판정한다. 신호는 텔레그램과 `alert_signal_log`(백오피스 '신호 이력')에 남고, 로그는 `binance_signals.log` 다.
-자동매매·보유 판단은 없다.
+자동매매는 3.6절의 dry 모드(가상 체결)로만 있고, 보유 판단은 없다.
 
 **급락 매수 (5분봉, 기본 ETCUSDT, 종류 `CRASH_BUY`, 같은 심볼 60분 쿨다운)**
 
@@ -189,6 +192,28 @@ ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지에는 판단 참
 손절 참고선은 2026-09-15 레버리지 분석에서 정했다: ±8 기준 ATR 브래킷(4시간봉 −12%)은 58건 중 4건만 걸려 손절 역할을 못 했고, 눌림 저점 − 2.5 기준 ATR 이
 평균 +1.5%·켈리 3.0 으로 최고였다. 일봉 롱은 이긴 거래의 최대 역행폭이 8.2% 라 −10%, 일봉 숏은 반등 고점이 8건 중 6건에서 5~7% 더 뚫려 +25% 다.
 세 사양 모두 목표를 두면 평균이 내려가 목표 지정가는 없다.
+
+### 3.6 Binance 자동매매 — dry (`binance_trade.py`, `ALERT_BINANCE_TRADE_MODE=dry`)
+
+`.env` 에 `ALERT_BINANCE_TRADE_MODE=dry` 를 넣으면 `run_binance.py` 가 진입 후보 알림(🔵 급락 매수 후보 · 🔵 눌림 재돌파 진입 후보 · 🔴 반등 실패 숏 후보)을
+**가상 체결**하고 열린 포지션을 20초마다 감시한다. 공개 시세만 쓰므로 API 키가 필요 없고 실제 주문은 나가지 않는다. live 는 아직 없다 —
+`live` 를 넣으면 기동 때 멈춘다. 설계는 2026-09-15 레버리지 분석 「청산선 밖의 배율」을 따른다.
+
+| 항목 | 규칙 | 상수 |
+|---|---|---|
+| 크기 | 명목가 = 전략별 배분 자본 × 유효 배율. 급락 매수 2 · 4시간봉 급등 추종 1 · 일봉 급등 추종 1.5 · 일봉 급락 숏 0.5 (분석의 시작값, 최대 3 / 1.5 / 2 / 1) | `ALERT_BINANCE_TRADE_CAPITAL`(기본 1000 USDT), `BINANCE_TRADE_LEVERAGE` |
+| 펀딩 게이트 | 진입 시 펀딩이 롱 +3bp/8h 초과, 숏 -3bp 미만이면 크기 절반 | `SURGE_FUNDING_WARN` |
+| 체결 | 진입·종료 모두 마지막 체결가 ± 슬리피지(ETC 0.05%, BTC 0.02%), 수수료 테이커 0.05% 편도 | `BINANCE_TRADE_SLIP`, `BINANCE_TRADE_FEE` |
+| 손절 | 알림의 손절 참고선(3.5절). **마크 가격**이 닿으면 종료 — 실제 STOP_MARKET(MARK_PRICE) 주문과 같은 조건 | |
+| 종료 | 보유 한도(5분봉 5시간 · 4시간봉 7일 · 일봉 20일)에 닿으면 종료. 목표 지정가 없음 | |
+| 펀딩 | 정산 시각(00·08·16 UTC)을 지날 때마다 정산된 펀딩비 × 명목가 (롱은 양의 펀딩 지급) | |
+| 한도 | 전략당 열린 포지션 하나 · 합산 명목 ≤ 자본 합 × 3 · 오늘(KST) 실현손실이 자본 합의 6% 를 넘으면 신규 진입 중단 | `BINANCE_TRADE_MAX_TOTAL_LEV`, `BINANCE_TRADE_DAILY_LOSS_PCT` |
+
+포지션은 MySQL `alert_binance_positions` 에만 있어 재시작해도 이어지고, 백오피스 '자동매매' 화면 아래쪽 표와 텔레그램(📥 진입 · 📤 종료 · ⏸ 보류,
+본문 앞에 `[DRY]`)으로 본다. 같은 심볼의 롱(5분봉)과 숏(일봉)은 동시에 열릴 수 있다 — 실제 계좌라면 헤지 모드가 필요한 부분이다.
+
+live 에 필요한 것(아직 없음): Binance 선물 API 키(거래 권한만) 서명 클라이언트, 기동 시 헤지 모드·격리·심볼 배율 3배 설정, 시장가 진입 +
+STOP_MARKET reduceOnly 마크 트리거 손절, 토스와 같은 킬 스위치. dry 기록이 표본 성과(3.5절)와 비슷하게 나온 뒤에 만든다.
 
 ## 4. `AUTOTRADE_MODE` 상세
 

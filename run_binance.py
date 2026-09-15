@@ -4,6 +4,7 @@
 감시 심볼은 .env 의 ALERT_BINANCE_SYMBOLS(5분봉 급락 매수, 기본 ETCUSDT) 와 추종 사양별 키
 (ALERT_BINANCE_SURGE_SYMBOLS 4시간봉 BTCUSDT · ALERT_BINANCE_SURGE_1D_SYMBOLS 일봉 BTCUSDT ·
 ALERT_BINANCE_CRASHFOLLOW_1D_SYMBOLS 일봉 ETCUSDT). 토스 엔진과 독립적으로 돈다. 공개 REST 라 Binance API 키는 필요 없다.
+ALERT_BINANCE_TRADE_MODE=dry 면 진입 후보를 가상 체결하는 자동매매(alertbot/binance_trade.py)도 같이 돈다 — 역시 키 불필요.
 """
 
 import logging
@@ -12,7 +13,9 @@ import time
 from alertbot import db
 from alertbot.binance_crash import CrashWorker, fetch_klines
 from alertbot.binance_follow import BAR_HOURS, FollowWorker, stop_text
-from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SYMBOLS, CRASH_ATR_MULT,
+from alertbot.binance_trade import DryTrader
+from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SYMBOLS, BINANCE_TRADE_CAPITAL,
+                             BINANCE_TRADE_LEVERAGE, BINANCE_TRADE_MODE, CRASH_ATR_MULT,
                              CRASH_CLOSE_POS_MIN, CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_STOP_PCT,
                              FOLLOW_KLINES, FOLLOW_SPECS, setup_logging)
 from alertbot.models import Signal
@@ -46,13 +49,18 @@ def describe(spec: dict) -> str:
             f"손절 참고 {stop_text(spec)} · 보유 {spec['hold_bars'] * BAR_HOURS[spec['interval']] / 24:g}일")
 
 
-def run(workers: list):
+def run(workers: list, trader=None):
     while True:
         for w in workers:
             try:
                 w.poll_once()
             except Exception as e:      # 네트워크·파싱 오류는 다음 사이클에 다시 시도한다
                 log.warning("%s 사이클 오류: %s", type(w).__name__, e)
+        if trader is not None:
+            try:
+                trader.poll()           # 열린 가상 포지션의 손절·보유 한도·펀딩
+            except Exception as e:
+                log.warning("자동매매 감시 오류: %s", e)
         time.sleep(BINANCE_POLL_SEC)
 
 
@@ -64,8 +72,13 @@ def main():
     body = [f"급락 매수 5분봉 {', '.join(BINANCE_SYMBOLS)}: 하락 ≥ 기준ATR×{CRASH_ATR_MULT:g} (직전 {CRASH_LOOKBACK}봉 고점 대비) "
             f"· RSI14 ≤ {CRASH_RSI_MAX:g} · 종가위치 ≥ {CRASH_CLOSE_POS_MIN:g} · 손절 참고 종가 -{CRASH_STOP_PCT:g}% · "
             f"보유 {CRASH_HOLD_HOURS}시간"] + [describe(s) for s in FOLLOW_SPECS]
+    trader = DryTrader(store, notifier) if BINANCE_TRADE_MODE == "dry" else None
+    if trader is not None:
+        body.append(f"자동매매 dry (가상 체결): 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 유효 배율 "
+                    + " · ".join(f"{k} {v:g}배" for k, v in BINANCE_TRADE_LEVERAGE.items()))
     notifier.send(Signal("SYSTEM", "⚪ 시스템", "Binance 감시 시작", "\n".join(body)))
-    run([CrashWorker(BINANCE_SYMBOLS, notifier)] + [FollowWorker(spec, notifier) for spec in FOLLOW_SPECS])
+    run([CrashWorker(BINANCE_SYMBOLS, notifier, trader=trader)]
+        + [FollowWorker(spec, notifier, trader=trader) for spec in FOLLOW_SPECS], trader)
 
 
 if __name__ == "__main__":

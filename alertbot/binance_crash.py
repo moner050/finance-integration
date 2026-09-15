@@ -149,8 +149,9 @@ def build_signal(symbol: str, r: dict) -> Signal:
 class CrashWorker:
     """심볼별로 새 완성봉이 생길 때마다 한 번 판정한다. 같은 심볼은 CRASH_COOLDOWN_MIN 동안 한 번만 알린다."""
 
-    def __init__(self, symbols: list, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding):
+    def __init__(self, symbols: list, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding, trader=None):
         self.symbols = list(symbols)
+        self.trader = trader        # binance_trade.DryTrader — 진입 후보를 가상 체결한다. None 이면 알림만
         self.notify = notifier
         self.fetch_bars = fetch_bars
         self.fetch_fund = fetch_fund
@@ -179,4 +180,9 @@ class CrashWorker:
             self.notify.send(signal)
             self.last_alert[symbol] = now
             sent.append(signal)
+            if self.trader is not None:
+                try:
+                    self.trader.on_entry("CRASH_BUY", symbol, "long", result, CRASH_HOLD_HOURS, now)
+                except Exception as e:          # 자동매매 오류가 알림을 막으면 안 된다
+                    log.warning("%s 자동매매 진입 처리 실패: %s", symbol, e)
         return sent
