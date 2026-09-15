@@ -3,14 +3,21 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import alertbot.binance_trade as BT
 from alertbot import db
 from alertbot.binance_crash import CrashWorker
 from alertbot.binance_follow import FollowWorker
-from alertbot.binance_trade import DryTrader
-from alertbot.config import BINANCE_TRADE_CAPITAL, BINANCE_TRADE_FEE, BINANCE_TRADE_LEVERAGE
+from alertbot.binance_trade import Trader
+from alertbot.config import BINANCE_TRADE_FEE, BINANCE_TRADE_LEVERAGE
 
 T = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)
 RES = {"stop": 97.0, "open_time": 1_780_000_000_000, "funding": 0.0001}
+CAP = 1000.0                    # 테스트는 .env 의 배분 자본과 무관하게 1000 USDT 로 고정한다
+
+
+@pytest.fixture(autouse=True)
+def fixed_capital(monkeypatch):
+    monkeypatch.setattr(BT, "BINANCE_TRADE_CAPITAL", CAP)
 
 
 class Recorder:
@@ -32,7 +39,7 @@ def store():
 def make(store, price=100.0, nxt=1_000):
     q = {"price": price, "mark": price, "next": nxt, "settled": (nxt, 0.0001)}
     rec = Recorder()
-    t = DryTrader(store, rec, fetch_price=lambda s: q["price"],
+    t = Trader(store, rec, "dry", fetch_price=lambda s: q["price"],
                   fetch_premium=lambda s: {"mark": q["mark"], "next_funding": q["next"]},
                   fetch_settled_funding=lambda s: q["settled"])
     return t, q, rec
@@ -41,7 +48,7 @@ def make(store, price=100.0, nxt=1_000):
 def test_entry_sizes_by_capital_and_leverage(store):
     t, q, rec = make(store)
     p = t.on_entry("CRASH_BUY", "ETCUSDT", "long", RES, 5, now=T)
-    assert p["status"] == "open" and abs(p["notional"] - BINANCE_TRADE_CAPITAL * 2) < 1          # 유효 2배
+    assert p["status"] == "open" and abs(p["notional"] - CAP * 2) < 1          # 유효 2배
     assert p["entry_price"] == 100 * 1.0005 and p["deadline"] == (T + timedelta(hours=5)).isoformat(timespec="seconds")
     assert p["stop"] == 97.0 and p["next_funding"] == 1_000 and p["signal_bar"] == RES["open_time"]
     assert rec.sent[-1].kind == "BN_ENTRY" and rec.sent[-1].body.startswith("[DRY]") and "× 2배" in rec.sent[-1].body
@@ -53,9 +60,9 @@ def test_entry_sizes_by_capital_and_leverage(store):
 def test_funding_gate_halves_size(store):
     t, q, rec = make(store)
     p = t.on_entry("SURGE_ENTRY", "BTCUSDT", "long", dict(RES, funding=0.0005), 168, now=T)
-    assert abs(p["notional"] - BINANCE_TRADE_CAPITAL * 1.0 / 2) < 1 and "절반" in rec.sent[-1].body
+    assert abs(p["notional"] - CAP * 1.0 / 2) < 1 and "절반" in rec.sent[-1].body
     s = t.on_entry("CRASH_SHORT_1D", "ETCUSDT", "short", dict(RES, stop=125.0, funding=-0.0005), 480, now=T)
-    assert abs(s["notional"] - BINANCE_TRADE_CAPITAL * 0.5 / 2) < 1
+    assert abs(s["notional"] - CAP * 0.5 / 2) < 1
 
 
 def test_stop_on_mark_and_pnl(store):
@@ -77,7 +84,7 @@ def test_stop_on_mark_and_pnl(store):
 def test_time_exit_and_short_pnl(store):
     t, q, rec = make(store)
     p = t.on_entry("CRASH_SHORT_1D", "ETCUSDT", "short", dict(RES, stop=125.0), 480, now=T)
-    assert p["entry_price"] == 100 * (1 - 0.0005) and abs(p["notional"] - BINANCE_TRADE_CAPITAL * 0.5) < 1
+    assert p["entry_price"] == 100 * (1 - 0.0005) and abs(p["notional"] - CAP * 0.5) < 1
     q["price"] = q["mark"] = 90.0
     assert t.poll(T + timedelta(hours=479)) == []
     closed = t.poll(T + timedelta(hours=480))

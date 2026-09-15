@@ -76,6 +76,8 @@ SCHEMA = {
              opened_at    VARCHAR(32) NOT NULL,
              closed_at    VARCHAR(32),
              updated_at   VARCHAR(32),
+             entry_order_id VARCHAR(32),
+             stop_order_id  VARCHAR(32),
              INDEX idx_alert_bn_status (status)
            ) CHARACTER SET utf8mb4""",
         """CREATE TABLE IF NOT EXISTS alert_settings (
@@ -124,7 +126,7 @@ SCHEMA = {
              side TEXT NOT NULL, qty REAL NOT NULL, entry_price REAL NOT NULL, notional REAL NOT NULL,
              leverage REAL NOT NULL, stop REAL NOT NULL, deadline TEXT NOT NULL, signal_bar INTEGER, next_funding INTEGER,
              funding REAL NOT NULL DEFAULT 0, status TEXT NOT NULL, exit_price REAL, exit_reason TEXT, pnl REAL,
-             opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT)""",
+             opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT, entry_order_id TEXT, stop_order_id TEXT)""",
         "CREATE TABLE IF NOT EXISTS alert_settings (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TEXT NOT NULL)",
         """CREATE TABLE IF NOT EXISTS alert_orders (
              intent_id TEXT PRIMARY KEY, mode TEXT NOT NULL, symbol TEXT NOT NULL, market TEXT NOT NULL,
@@ -136,14 +138,21 @@ SCHEMA = {
 }
 
 # 기존 테이블에 나중에 추가된 컬럼. init_schema 가 없으면 붙인다.
-WATCHLIST_EXTRA_COLUMNS = {
-    "mysql": [("auto_trade", "TINYINT NOT NULL DEFAULT 0"), ("auto_amount", "DECIMAL(18,2) NOT NULL DEFAULT 0")],
-    "sqlite": [("auto_trade", "INTEGER NOT NULL DEFAULT 0"), ("auto_amount", "REAL NOT NULL DEFAULT 0")],
+EXTRA_COLUMNS = {
+    "alert_watchlist": {
+        "mysql": [("auto_trade", "TINYINT NOT NULL DEFAULT 0"), ("auto_amount", "DECIMAL(18,2) NOT NULL DEFAULT 0")],
+        "sqlite": [("auto_trade", "INTEGER NOT NULL DEFAULT 0"), ("auto_amount", "REAL NOT NULL DEFAULT 0")],
+    },
+    "alert_binance_positions": {                     # live 주문번호 (dry 행은 비어 있다)
+        "mysql": [("entry_order_id", "VARCHAR(32)"), ("stop_order_id", "VARCHAR(32)")],
+        "sqlite": [("entry_order_id", "TEXT"), ("stop_order_id", "TEXT")],
+    },
 }
 
 # 자동매매 운영 설정 기본값. 백오피스에서 바꾸고 엔진이 매 사이클 읽는다.
 SETTING_DEFAULTS = {
     "autotrade_enabled": "0",            # 킬 스위치. 1 이어야 주문이 나간다 (.env AUTOTRADE_MODE 와 별개)
+    "binance_trade_enabled": "0",        # Binance live 킬 스위치. 1 이어야 실제 진입한다 (dry 에는 적용 안 함)
     "max_positions": "3",                # 동시 보유 종목 수 상한 (열린 매수 의도 포함)
     "max_orders_per_day": "20",          # 하루 주문 횟수 상한 (손절 매도는 면제)
     "daily_loss_limit_krw": "300000",    # 오늘 실현손실이 이 아래면 매수 중단 (원)
@@ -262,15 +271,16 @@ class DB:
         return self
 
     def _add_missing_columns(self):
-        """기존 alert_watchlist 에 자동매매 컬럼이 없으면 붙인다 (있으면 아무것도 안 한다)."""
-        if self.dialect == "mysql":
-            have = {r["Field"] for r in self.fetchall("SHOW COLUMNS FROM alert_watchlist")}
-        else:
-            have = {r["name"] for r in self.fetchall("PRAGMA table_info(alert_watchlist)")}
-        for col, ddl in WATCHLIST_EXTRA_COLUMNS[self.dialect]:
-            if col not in have:
-                self.execute(f"ALTER TABLE alert_watchlist ADD COLUMN {col} {ddl}")
-                log.info("alert_watchlist.%s 컬럼 추가", col)
+        """기존 테이블에 나중에 생긴 컬럼이 없으면 붙인다 (있으면 아무것도 안 한다)."""
+        for table, cols in EXTRA_COLUMNS.items():
+            if self.dialect == "mysql":
+                have = {r["Field"] for r in self.fetchall(f"SHOW COLUMNS FROM {table}")}
+            else:
+                have = {r["name"] for r in self.fetchall(f"PRAGMA table_info({table})")}
+            for col, ddl in cols[self.dialect]:
+                if col not in have:
+                    self.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                    log.info("%s.%s 컬럼 추가", table, col)
 
     def close(self):
         self.con.close()
@@ -490,7 +500,7 @@ def get_order(db: DB, intent_id: str):
 # -- Binance 가상 포지션 (alertbot/binance_trade.py) --------------------------------
 
 BN_COLUMNS = ("mode", "strategy", "symbol", "side", "qty", "entry_price", "notional", "leverage", "stop", "deadline",
-              "signal_bar", "next_funding", "funding", "status", "opened_at")
+              "signal_bar", "next_funding", "funding", "status", "opened_at", "entry_order_id", "stop_order_id")
 BN_FLOATS = ("qty", "entry_price", "notional", "leverage", "stop", "funding", "exit_price", "pnl")
 
 

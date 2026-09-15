@@ -82,3 +82,12 @@ def test_manual_cancel_dry_and_permission_check(client, monkeypatch):
     assert "사전 자격 미충족" in c.post("/trading/check-permission").text
     FakeOrderClient.buying_power = lambda self, ccy: 1234567.0
     assert "1,234,567 KRW" in c.post("/trading/check-permission").text
+
+
+def test_binance_kill_switch_toggle(client):
+    c, store = client
+    assert "Binance 킬 스위치" in c.get("/trading").text
+    c.post("/trading/binance/toggle", follow_redirects=False)
+    assert DBM.get_settings(store)["binance_trade_enabled"] == "1"
+    c.post("/trading/binance/toggle", follow_redirects=False)
+    assert DBM.get_settings(store)["binance_trade_enabled"] == "0"

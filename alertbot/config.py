@@ -258,10 +258,15 @@ FOLLOW_SPECS = [
 ]
 
 
-# Binance 자동매매 (alertbot/binance_trade.py) — 기본 off. dry 는 공개 시세로 가상 체결(API 키 불필요). live 는 아직 없다.
+# Binance 자동매매 (alertbot/binance_trade.py) — 기본 off.
+#   dry : 공개 시세로 가상 체결 (API 키 불필요)
+#   live: 실제 주문 (binance_broker). 키 + 기동 시 헤지 모드·격리·배율 설정 + DB 킬 스위치(binance_trade_enabled)가 켜져야 진입한다
 BINANCE_TRADE_MODE = (_CFG.get("ALERT_BINANCE_TRADE_MODE") or "off").strip().lower()
-if BINANCE_TRADE_MODE not in ("off", "dry"):
-    raise SystemExit(f"ALERT_BINANCE_TRADE_MODE 는 off|dry 중 하나 (live 는 아직 구현 전): {BINANCE_TRADE_MODE}")
+if BINANCE_TRADE_MODE not in ("off", "dry", "live"):
+    raise SystemExit(f"ALERT_BINANCE_TRADE_MODE 는 off|dry|live 중 하나: {BINANCE_TRADE_MODE}")
+BINANCE_API_KEY = (_CFG.get("ALERT_BINANCE_API_KEY") or "").strip()        # 선물 거래 권한만 (출금 권한 없이)
+BINANCE_API_SECRET = (_CFG.get("ALERT_BINANCE_API_SECRET") or "").strip()
+BINANCE_TRADE_EXCHANGE_LEV = 3         # live 심볼 배율 (격리·헤지 모드). 청산 거리 33% — 가장 넓은 손절(일봉 숏 +25%)보다 밖
 BINANCE_TRADE_CAPITAL = float(_CFG.get("ALERT_BINANCE_TRADE_CAPITAL") or 1000)   # 전략별 배분 자본 (USDT, 가상)
 # 전략(진입 신호 종류)별 유효 배율 = 명목가 ÷ 배분 자본. 레버리지 분석의 시작값 — 최대는 3 / 1.5 / 2 / 1
 BINANCE_TRADE_LEVERAGE = {"CRASH_BUY": 2.0, "SURGE_ENTRY": 1.0, "SURGE_ENTRY_1D": 1.5, "CRASH_SHORT_1D": 0.5}

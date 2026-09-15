@@ -215,6 +215,16 @@ def trading_toggle():
     return RedirectResponse("/trading", status_code=303)
 
 
+@app.post("/trading/binance/toggle")
+def binance_toggle():
+    """Binance live 킬 스위치. dry 에는 영향이 없다."""
+    with get_db() as d:
+        cur = db.get_settings(d)["binance_trade_enabled"]
+        db.set_setting(d, "binance_trade_enabled", 0 if cur == "1" else 1)
+    log.info("백오피스: Binance 자동매매 킬 스위치 → %s", "OFF" if cur == "1" else "ON")
+    return RedirectResponse("/trading", status_code=303)
+
+
 @app.post("/trading/settings")
 def trading_settings(request: Request, max_positions: int = Form(...), max_orders_per_day: int = Form(...),
                      daily_loss_limit_krw: float = Form(...), daily_loss_limit_usd: float = Form(...),

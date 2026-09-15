@@ -5,6 +5,7 @@
 (ALERT_BINANCE_SURGE_SYMBOLS 4시간봉 BTCUSDT · ALERT_BINANCE_SURGE_1D_SYMBOLS 일봉 BTCUSDT ·
 ALERT_BINANCE_CRASHFOLLOW_1D_SYMBOLS 일봉 ETCUSDT). 토스 엔진과 독립적으로 돈다. 공개 REST 라 Binance API 키는 필요 없다.
 ALERT_BINANCE_TRADE_MODE=dry 면 진입 후보를 가상 체결하는 자동매매(alertbot/binance_trade.py)도 같이 돈다 — 역시 키 불필요.
+live 면 .env ALERT_BINANCE_API_KEY/SECRET 로 실제 주문을 낸다 — 기동 때 헤지 모드·격리·배율을 맞추고, DB 킬 스위치가 켜져야 진입한다.
 """
 
 import logging
@@ -13,9 +14,11 @@ import time
 from alertbot import db
 from alertbot.binance_crash import CrashWorker, fetch_klines
 from alertbot.binance_follow import BAR_HOURS, FollowWorker, stop_text
-from alertbot.binance_trade import DryTrader
+from alertbot.binance_broker import BinanceFutures, BrokerError
+from alertbot.binance_trade import Trader
 from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SYMBOLS, BINANCE_TRADE_CAPITAL,
-                             BINANCE_TRADE_LEVERAGE, BINANCE_TRADE_MODE, CRASH_ATR_MULT,
+                             BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TRADE_EXCHANGE_LEV, BINANCE_TRADE_LEVERAGE,
+                             BINANCE_TRADE_MODE, CRASH_ATR_MULT,
                              CRASH_CLOSE_POS_MIN, CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_STOP_PCT,
                              FOLLOW_KLINES, FOLLOW_SPECS, setup_logging)
 from alertbot.models import Signal
@@ -49,6 +52,22 @@ def describe(spec: dict) -> str:
             f"손절 참고 {stop_text(spec)} · 보유 {spec['hold_bars'] * BAR_HOURS[spec['interval']] / 24:g}일")
 
 
+def live_broker():
+    """live 사전 조건 — 키, 서버 시각, 심볼 필터, 헤지 모드·격리·배율. 하나라도 안 되면 기동을 멈춘다."""
+    if not (BINANCE_API_KEY and BINANCE_API_SECRET):
+        raise SystemExit("live 모드에는 .env ALERT_BINANCE_API_KEY / ALERT_BINANCE_API_SECRET 이 필요하다 (선물 거래 권한만, 출금 권한 없이)")
+    symbols = sorted({*BINANCE_SYMBOLS, *(s for spec in FOLLOW_SPECS for s in spec["symbols"])})
+    broker = BinanceFutures(BINANCE_API_KEY, BINANCE_API_SECRET)
+    try:
+        broker.sync_time()
+        broker.load_filters(symbols)
+        broker.setup(symbols, BINANCE_TRADE_EXCHANGE_LEV)
+        log.info("Binance live 준비: %s 격리 %d배 헤지 모드 · 가용 %.2f USDT", ", ".join(symbols), BINANCE_TRADE_EXCHANGE_LEV, broker.balance())
+    except BrokerError as e:
+        raise SystemExit(f"Binance live 준비 실패: {e}") from e
+    return broker
+
+
 def run(workers: list, trader=None):
     while True:
         for w in workers:
@@ -72,10 +91,17 @@ def main():
     body = [f"급락 매수 5분봉 {', '.join(BINANCE_SYMBOLS)}: 하락 ≥ 기준ATR×{CRASH_ATR_MULT:g} (직전 {CRASH_LOOKBACK}봉 고점 대비) "
             f"· RSI14 ≤ {CRASH_RSI_MAX:g} · 종가위치 ≥ {CRASH_CLOSE_POS_MIN:g} · 손절 참고 종가 -{CRASH_STOP_PCT:g}% · "
             f"보유 {CRASH_HOLD_HOURS}시간"] + [describe(s) for s in FOLLOW_SPECS]
-    trader = DryTrader(store, notifier) if BINANCE_TRADE_MODE == "dry" else None
-    if trader is not None:
-        body.append(f"자동매매 dry (가상 체결): 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 유효 배율 "
-                    + " · ".join(f"{k} {v:g}배" for k, v in BINANCE_TRADE_LEVERAGE.items()))
+    trader = None
+    if BINANCE_TRADE_MODE != "off":
+        broker = live_broker() if BINANCE_TRADE_MODE == "live" else None
+        trader = Trader(store, notifier, BINANCE_TRADE_MODE, broker)
+        levs = " · ".join(f"{k} {v:g}배" for k, v in BINANCE_TRADE_LEVERAGE.items())
+        if broker is None:
+            body.append(f"자동매매 dry (가상 체결): 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 유효 배율 {levs}")
+        else:
+            on = db.get_settings(store)["binance_trade_enabled"] == "1"
+            body.append(f"자동매매 LIVE (실제 주문): 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 유효 배율 {levs} · "
+                        f"심볼 격리 {BINANCE_TRADE_EXCHANGE_LEV}배 헤지 모드 · 가용 {broker.balance():,.0f} USDT · 킬 스위치 {'ON' if on else 'OFF'}")
     notifier.send(Signal("SYSTEM", "⚪ 시스템", "Binance 감시 시작", "\n".join(body)))
     run([CrashWorker(BINANCE_SYMBOLS, notifier, trader=trader)]
         + [FollowWorker(spec, notifier, trader=trader) for spec in FOLLOW_SPECS], trader)

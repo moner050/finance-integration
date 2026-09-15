@@ -49,8 +49,12 @@
 <tr><td colspan="13" class="muted">기록이 없다</td></tr>
 {% endfor %}
 </table>
-<h3>Binance 선물 자동매매 — 가상 포지션 (모드 {{ bn_mode }}, 최근 100건)</h3>
-<p class="muted">.env <code>ALERT_BINANCE_TRADE_MODE=dry</code> 일 때 run_binance.py 가 진입 후보를 가상 체결한다. 손절은 마크 가격, 종료는 보유 한도. live 는 아직 없다.</p>
+<h3>Binance 선물 자동매매 — 포지션 (모드 {{ bn_mode }}, 최근 100건)</h3>
+<p>모드(.env <code>ALERT_BINANCE_TRADE_MODE</code>): <strong>{{ bn_mode }}</strong>
+ {% if bn_mode == 'live' %}<span class="warn">— 실제 주문 모드.</span>{% elif bn_mode == 'dry' %}<span class="muted">— 가상 체결.</span>{% else %}<span class="muted">— 알림만.</span>{% endif %}
+ <br>Binance 킬 스위치(DB, live 진입에만 적용): <strong class="{{ 'ok' if settings.binance_trade_enabled == '1' else 'warn' }}">{{ 'ON' if settings.binance_trade_enabled == '1' else 'OFF' }}</strong>
+ <form class="inline" method="post" action="/trading/binance/toggle"><button>{{ '끄기' if settings.binance_trade_enabled == '1' else '켜기' }}</button></form>
+ <br><span class="muted">진입 후보 알림을 시장가로 체결하고 손절 알고 주문(마크 트리거)을 건다. 종료는 손절 체결 또는 보유 한도. 손익은 추정값이다.</span></p>
 <table>
 <tr><th>열림 (KST)</th><th>전략</th><th>심볼</th><th>방향</th><th>수량</th><th>진입가</th><th>명목 USDT</th><th>배율</th><th>손절</th><th>보유 한도 (KST)</th><th>상태</th><th>종료가 / 사유</th><th>펀딩</th><th>손익 USDT</th></tr>
 {% for p in bn_positions %}

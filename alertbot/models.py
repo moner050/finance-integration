@@ -44,6 +44,7 @@ KINDS = {
     "BN_ENTRY": ("action", "none"),
     "BN_EXIT": ("action", "none"),
     "BN_SKIP": ("review", "none"),
+    "BN_FAIL": ("action", "none"),        # live 주문 실패·손절 주문 실패·자동 차단
 }
 
 
