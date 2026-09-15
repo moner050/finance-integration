@@ -8,7 +8,8 @@
 |---|---|---|
 | 엔진 워커 | `python run_engine.py` | 30초 폴링 → 지표 → 상태기계 → 텔레그램 알림 → (자동매매) |
 | 백오피스 | `python run_backoffice.py` | http://127.0.0.1:8000 — 종목·상태·신호 이력·채널·자동매매 |
-| MySQL | 이미 쓰는 서버 | `alert_*` 테이블 5개. 두 프로세스가 공유하는 유일한 통로 |
+| Binance 워커 | `python run_binance.py` | 20초 폴링 → 5분봉 완성마다 급락 매수 후보 판정 → 텔레그램 (토스 엔진과 독립, 3.5절) |
+| MySQL | 이미 쓰는 서버 | `alert_*` 테이블 5개. 세 프로세스가 공유하는 유일한 통로 |
 
 ---
 
@@ -38,7 +39,7 @@
 
 | 등급 | 알림 | 쿨다운 |
 |---|---|---|
-| action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 | 15분 (주문 관련은 없음) |
+| action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 · 🔵 급락 매수 후보(Binance) | 15분 (주문 관련은 없음, Binance 는 60분) |
 | review | 🟡 절반/1/3 익절 검토 · ⚪ 매수 취소 · 🎉✅ 청산 완료 | 45분 / 15분 |
 | info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 오늘 성적 · ⚪ 시스템 | 없음 |
 
@@ -56,14 +57,15 @@ alertbot/
   market_hours.py    개장/휴장/조기폐장 판정 (캘린더 API, 실패 시 고정 시간)
   indicators.py      RVOL·VWAP(세션 누적)·EMA·RSI(Wilder)·ATR(True Range)
   engine.py          신호 엔진 (상태기계, 시황 요약, 워치리스트 핫리로드, 상태 저장·복원, 자동매매 훅)
+  binance_crash.py   Binance 선물 5분봉 급락 매수 알림 (공개 REST 폴링 · 판정 · 워커) — 별도 프로세스
   tracking.py        signal_tracking.csv(신호 뒤 15/30/60분 가격), trade_log.csv(청산 기록)
   models.py          Signal (종류·등급·쿨다운)
   notify/            Dispatcher(쿨다운·이력) + telegram 채널
   db.py              MySQL 저장소 (alert_watchlist / alert_engine_status / alert_signal_log / alert_settings / alert_orders)
   trading/           자동매매: broker(TossOrderClient·DryRunBroker) · policy(리스크 정책) · executor(실행기) · models
   backoffice/        FastAPI + Jinja2 + HTMX 화면
-run_engine.py        엔진 진입점          run_backoffice.py   백오피스 진입점
-Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest 67개
+run_engine.py        엔진 진입점          run_backoffice.py   백오피스 진입점      run_binance.py   Binance 워커 진입점
+Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest 74개
 ```
 
 ---
@@ -81,6 +83,7 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `MYSQL_HOST` `MYSQL_PORT` `MYSQL_DATABASE` `MYSQL_USER` `MYSQL_PASSWORD` | ✔ | 기존 MySQL. 테이블은 `alert_` 접두어로 자동 생성 | |
 | `ALERT_BACKOFFICE_HOST` / `ALERT_BACKOFFICE_PORT` | | 백오피스 바인드 주소·포트. 인증이 없으므로 로컬 전용 권장 | 127.0.0.1 / 8000 |
 | `ALERT_DATA_DIR` | | 로그·CSV 저장 폴더. Docker 는 `/data` | 프로젝트 루트 |
+| `ALERT_BINANCE_SYMBOLS` | | Binance 급락 매수 알림 심볼(쉼표, USDⓈ-M 무기한). 공개 API 라 키 불필요 | ETCUSDT |
 | `AUTOTRADE_MODE` | | 자동매매 모드 `off` / `dry` / `live` (4절) | off |
 | `AUTOTRADE_BUY_BUFFER_PCT` | | 매수 지정가 = 신호가 × (1 + 이 %) | 0.3 |
 | `AUTOTRADE_BUY_TTL_MIN` | | 매수 지정가가 이 분 안에 안 체결되면 취소 | 3 |
@@ -136,6 +139,27 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `max_order_amount_krw` / `_usd` | 1,000,000 / 1,000 | 1회 매수 금액 상한. `.env` 하드캡이 더 작으면 그쪽 |
 
 ---
+
+### 3.5 Binance 급락 매수 알림 (`run_binance.py`, `alertbot/binance_crash.py`)
+
+토스 엔진과 별개의 워커다. Binance USDⓈ-M 무기한 선물의 5분봉을 공개 REST 로 20초마다 받아(키 불필요)
+**완성봉마다 한 번** 판정하고, 같은 심볼은 60분 안에 다시 알리지 않는다. 신호는 텔레그램과 `alert_signal_log`
+(백오피스 '신호 이력', 종류 `CRASH_BUY`)에 남고, 로그는 `binance_signals.log` 다. 자동매매·보유 판단은 없다.
+
+| 조건 (모두 만족) | 값 | 상수 |
+|---|---|---|
+| 급락 | 직전 48봉(4시간) 고점 대비 종가 하락폭 ≥ 기준 ATR × 10 | `CRASH_LOOKBACK` / `CRASH_ATR_MULT` |
+| 과매도 | RSI14 ≤ 30 | `CRASH_RSI_MAX` |
+| 반전봉 | 신호봉 종가가 봉 범위의 상위 40% (종가 위치 ≥ 0.6) | `CRASH_CLOSE_POS_MIN` |
+
+기준 ATR 은 직전 3일(864봉) ATR14% 의 중앙값(`CRASH_BASE_ATR_BARS`)이라 급락 자체가 ATR 을 부풀리는 효과가 없다.
+ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지에는 판단 참고로 RVOL(직전 60봉 중앙값 대비), 아래꼬리, 테이커 매수비,
+같은 구간 BTC 하락폭(베타 1.35 보정 기여 ≥ 0.6 이면 "BTC 동반", < 0.25 면 "ETC 단독"), 직전 펀딩비, 그리고
+손절 참고선(신호봉 저가 − 2 기준 ATR)과 1차 목표(낙폭의 50% 되돌림)를 함께 싣는다.
+
+근거는 2026-09-15 분석(1분·5분·1시간봉, ETC·BTC 30~90일): 5분봉 ETC 에서 이 트리거가 수수료(왕복 0.1%) 뒤에도
+양(+)이었던 유일한 급락 매수 조건이다(37건, 승률 62%, ±8 기준 ATR 브래킷 순평균 +0.31%). 1분봉은 어느 조건도
+수수료를 못 넘겼고, 급등 숏은 전부 손실이라 만들지 않았다. 표본 국면이 상승장이었다는 한계가 있다.
 
 ## 4. `AUTOTRADE_MODE` 상세
 
@@ -203,7 +227,7 @@ python -m alertbot.db init
 python -m alertbot.db seed
 ```
 
-3. 콘솔 두 개로 실행:
+3. 콘솔 두 개로 실행 (Binance 급락 알림도 쓰면 세 번째 콘솔):
 
 ```powershell
 python run_engine.py
@@ -211,12 +235,15 @@ python run_engine.py
 ```powershell
 python run_backoffice.py
 ```
+```powershell
+python run_binance.py
+```
 
 4. 텔레그램에 `⚪ 시스템 | 감시 시작` 이 오면 정상. 백오피스 http://127.0.0.1:8000 의 '상태' 에 heartbeat 가 보인다.
 
 백그라운드 실행은 **작업 스케줄러**로 두 항목("로그온 시 시작", 프로그램 `...\.venv\Scripts\python.exe`, 인수 `run_engine.py`, 시작 위치 프로젝트 폴더; 백오피스도 같은 방식)을 만들면 된다. 콘솔 인코딩 문제로 이모지가 `?` 로 보여도 파일 로그와 텔레그램은 정상이다.
 
-산출물: `scalping_signals.log`, `signal_tracking.csv`, `trade_log.csv` (프로젝트 루트 또는 `ALERT_DATA_DIR`).
+산출물: `scalping_signals.log`, `signal_tracking.csv`, `trade_log.csv`, `binance_signals.log` (프로젝트 루트 또는 `ALERT_DATA_DIR`).
 업데이트: `git pull` → `pip install -r requirements.txt` → 두 프로세스 재시작. 스키마 변경은 기동 시 자동 반영된다.
 
 ---
@@ -231,6 +258,7 @@ cp /path/to/.env .env                 # 3.1 의 키. 파일 권한: chmod 600 .e
 mkdir -p data                         # 로그·CSV 볼륨
 docker compose up -d --build
 docker compose logs -f engine         # "감시 시작" 과 "장 운영 KR/US ... (캘린더)" 확인
+docker compose logs -f binance        # Binance 워커: "완성봉 1000개 확보" 와 "Binance 감시 시작" 확인
 ```
 
 - 토스 허용 IP 에 **서버의 공인 IP** 를 등록해야 한다. 등록 전엔 403 으로 엔진이 종료된다.
@@ -301,8 +329,9 @@ python -m pytest
 ```
 
 지표 골든값(원본 스크립트 기준), 세션 누적, 캘린더 파싱, 엔진 상태 전이·복원, 알림 쿨다운·채널 격리, DB, 백오피스,
-브로커(요청 페이로드·멱등키·호가 보정·오류 매핑), 정책 경계값, 실행기 시나리오(dry 체결·중복 방지·자동 차단)를 덮는다.
-실제 토스·텔레그램·MySQL 은 호출하지 않는다(DB 는 메모리 SQLite).
+브로커(요청 페이로드·멱등키·호가 보정·오류 매핑), 정책 경계값, 실행기 시나리오(dry 체결·중복 방지·자동 차단),
+Binance 급락 판정(합성 급락·반전봉 유무·BTC 동반·워커 쿨다운)을 덮는다.
+실제 토스·텔레그램·MySQL·Binance 는 호출하지 않는다(DB 는 메모리 SQLite).
 
 ---
 

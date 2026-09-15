@@ -8,7 +8,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY alertbot ./alertbot
-COPY run_engine.py run_backoffice.py ./
+COPY run_engine.py run_backoffice.py run_binance.py ./
 RUN mkdir -p /data
 
 # 기본은 엔진. 백오피스는 compose 에서 command 를 바꾼다.

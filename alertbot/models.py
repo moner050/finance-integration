@@ -14,6 +14,7 @@ SEVERITY_ORDER = {"info": 0, "review": 1, "action": 2}
 KINDS = {
     "ENTRY": ("action", "strong"),          # 매수 신호와 '아직 미진입' 반복은 같은 키를 쓴다
     "ENTRY_CANCEL": ("review", "strong"),
+    "CRASH_BUY": ("action", "strong"),      # Binance 5분봉 급락 매수 후보 (run_binance.py). 워커가 60분 쿨다운을 따로 건다
     "STOP": ("action", "strong"),
     "SELL": ("action", "strong"),
     "EXIT_FULL": ("action", "strong"),      # '익절하세요'/'정리하세요' 문구가 달라도 같은 청산 신호다

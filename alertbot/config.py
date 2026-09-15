@@ -199,6 +199,26 @@ DATA_DIR = Path(_CFG.get("ALERT_DATA_DIR") or os.getenv("ALERT_DATA_DIR") or BAS
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = DATA_DIR / "scalping_signals.log"
 
+# ---------------------------------------------------------------------------
+# Binance 무기한 선물 5분봉 급락 매수 알림 (run_binance.py, alertbot/binance_crash.py)
+# 공개 REST 라 API 키가 필요 없다. 임계값은 2026-09-15 분석(1분·5분·1시간봉, ETC·BTC)에서
+# 5분봉 ETC 에 수수료 뒤에도 우위가 확인된 'B +반전봉' 트리거 그대로다.
+# ---------------------------------------------------------------------------
+BINANCE_FAPI = "https://fapi.binance.com"
+BINANCE_SYMBOLS = [s.strip().upper() for s in (_CFG.get("ALERT_BINANCE_SYMBOLS") or "ETCUSDT").split(",") if s.strip()]
+BINANCE_INTERVAL = "5m"
+BINANCE_KLINES = 1000          # 한 번에 받는 봉 수. 기준 ATR(3일 = 864봉) 계산에 필요
+BINANCE_POLL_SEC = 20          # 5분봉이 완성되고 이 초 안에 판정한다
+CRASH_LOOKBACK = 48            # 직전 48봉(4시간) 고점 대비 하락폭
+CRASH_ATR_MULT = 10.0          # 하락폭 ≥ 기준 ATR × 10 (ETC 는 대략 -2% 이상)
+CRASH_RSI_MAX = 30.0           # RSI14 과매도
+CRASH_CLOSE_POS_MIN = 0.6      # 신호봉 종가가 봉 범위의 이 위치 이상 (반전봉)
+CRASH_BASE_ATR_BARS = 864      # 기준 ATR = 직전 3일 ATR14% 중앙값
+CRASH_RVOL_WINDOW = 60         # RVOL 분모: 직전 60봉 거래량 중앙값 (참고 표기)
+CRASH_BETA_BTC = 1.35          # BTC 동반 판정용 베타 (ETC 이동 ≈ BTC 이동 × 1.35)
+CRASH_COOLDOWN_MIN = 60        # 같은 심볼 재알림 간격
+BINANCE_LOG_PATH = DATA_DIR / "binance_signals.log"
+
 
 def setup_logging(path: Path = None):
     """엔진은 파일+콘솔, 백오피스는 콘솔만. 형식은 원본과 같다.

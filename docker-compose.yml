@@ -1,6 +1,6 @@
-# 우분투 배포: 엔진 + 백오피스. MySQL 은 이미 쓰는 외부 서버(.env 의 MYSQL_*)를 쓴다.
+# 우분투 배포: 엔진 + 백오피스 + Binance 급락 알림 워커. MySQL 은 이미 쓰는 외부 서버(.env 의 MYSQL_*)를 쓴다.
 #   docker compose up -d --build
-#   docker compose logs -f engine
+#   docker compose logs -f engine     (Binance 워커는 binance)
 services:
   engine:
     build: .
@@ -27,3 +27,14 @@ services:
       - ./data:/data
     restart: unless-stopped
     command: ["python", "run_backoffice.py"]
+
+  binance:
+    build: .
+    container_name: alertbot-binance
+    env_file: .env
+    environment:
+      ALERT_DATA_DIR: /data
+    volumes:
+      - ./data:/data                 # binance_signals.log
+    restart: unless-stopped
+    command: ["python", "run_binance.py"]
