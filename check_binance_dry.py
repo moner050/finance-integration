@@ -55,7 +55,10 @@ def main():
     trader = Trader(store, notifier, "dry")
     if a.strategy == "crash":
         feed = {"ETCUSDT": bars_until("ETCUSDT", "5m", open_ms, 1000), "BTCUSDT": bars_until("BTCUSDT", "5m", open_ms, 1000)}
-        worker, symbol = CrashWorker(["ETCUSDT"], notifier, fetch_bars=lambda s: feed[s], fetch_fund=fetch_funding, trader=trader), "ETCUSDT"
+        h4_open = (open_ms + MS["5m"]) // MS["4h"] * MS["4h"] - MS["4h"]                  # 신호봉 종료 전 마지막 완성 4시간봉
+        h4 = bars_until("ETCUSDT", "4h", h4_open, 120)
+        worker, symbol = CrashWorker(["ETCUSDT"], notifier, fetch_bars=lambda s: feed[s], fetch_fund=fetch_funding, trader=trader,
+                                     fetch_h4=lambda s: h4), "ETCUSDT"
     else:
         spec = SPECS[a.strategy]
         symbol = spec["symbols"][0]
@@ -65,7 +68,7 @@ def main():
             feed["1d"] = bars_until(symbol, "1d", day_open, 400)
         worker = FollowWorker(spec, notifier, fetch_bars=lambda s, iv, n: feed[iv], fetch_fund=fetch_funding, trader=trader)
     sent = worker.poll_once()
-    print("알림:", [s.kind for s in sent] or "없음 — 그 봉은 신호 조건이 아니다")
+    print("알림:", [s.kind for s in sent] or "없음 — 신호 조건이 아니거나 4시간봉 상승 배열로 보류됐다 (로그 참고)")
     rows = [r for r in db.binance_positions(store, status="open") if r["symbol"] == symbol and r["mode"] == "dry"]
     if not rows:
         print("dry 진입 없음 (알림이 관찰 단계이거나 한도·중복에 걸렸다 — 위 보류 알림 참고)")

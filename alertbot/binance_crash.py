@@ -12,6 +12,9 @@
 RVOL·꼬리·테이커·BTC 동반·펀딩은 조건이 아니라 판단 참고로 메시지에 싣는다.
 손절 참고선은 2026-09-15 레버리지 분석(마크 가격 봉 재생)에서 종가 -3% 재난 손절 + 5시간 보유 종료로 바꿨다 — 저가-2ATR(진입 대비 0.7%)은
 5분봉 스윕 깊이(p90 3.75 기준ATR) 안이라 45건 중 19건이 걸려 우위가 사라졌고, 50% 되돌림 목표도 평균을 낮춰 목표 지정가는 두지 않는다.
+4시간봉 필터·보유 8시간(2026-09-15 표본 확장, 1-1~9-15 257일 129건 「여덟 달의 급락」): 종가 -3%·5h 규칙은 전체 평균 -0.04% 로 우위가 없었다.
+4시간봉 EMA9 ≤ EMA21(하락 배열)의 급락은 항복 매도라 되돌아오고(8h +0.69%, t 3.1), 상승 배열 중의 급락은 추세 이탈의 시작이라
+진다(-0.41%, t -2.0). 그래서 하락 배열일 때만 알리고, 보유 한도는 8시간이다. 배열은 급락 조건이 성립한 때만 4시간봉을 받아 판정한다.
 """
 
 import logging
@@ -23,8 +26,9 @@ import requests
 
 from .config import (BINANCE_FAPI, BINANCE_INTERVAL, BINANCE_KLINES, CRASH_ATR_MULT,
                      CRASH_BASE_ATR_BARS, CRASH_BETA_BTC, CRASH_CLOSE_POS_MIN, CRASH_COOLDOWN_MIN,
-                     CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_RVOL_WINDOW, CRASH_STOP_PCT)
-from .indicators import compute_rsi
+                     CRASH_H4_FILTER, CRASH_H4_KLINES, CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX,
+                     CRASH_RVOL_WINDOW, CRASH_STOP_PCT)
+from .indicators import compute_ema, compute_rsi
 from .models import Signal
 
 log = logging.getLogger("binance")
@@ -123,6 +127,15 @@ def evaluate(bars: list, btc_bars: list = None, funding=None):
     return out
 
 
+def h4_regime(bars_4h: list):
+    """4시간봉 EMA9·EMA21 배열. {"down": EMA9 ≤ EMA21, "ema9", "ema21"}. 완성봉이 60개 미만이면 None(불명)."""
+    closes = [b["close"] for b in bars_4h or []]
+    if len(closes) < 60:
+        return None
+    e9, e21 = compute_ema(closes, 9), compute_ema(closes, 21)
+    return {"down": e9 <= e21, "ema9": e9, "ema21": e21}
+
+
 # -- 알림 ----------------------------------------------------------------------
 
 def fmt_price(x: float) -> str:
@@ -141,6 +154,10 @@ def build_signal(symbol: str, r: dict) -> Signal:
         lines.append(f"BTC 같은 구간 {r['btc_drop']:+.2f}% → {r['btc_label']} (기여 {r['btc_share']:.2f})")
     if r.get("funding") is not None:
         lines.append(f"펀딩 {r['funding'] * 100:+.4f}%/8h")
+    if "h4" in r:
+        reg = r["h4"]
+        lines.append(f"4시간봉 EMA9 {fmt_price(reg['ema9'])} ≤ EMA21 {fmt_price(reg['ema21'])} (하락 배열 — 급락 매수 허용)" if reg
+                     else "4시간봉 배열 불명 (조회 실패) — 상승 배열이면 지나간다")
     lines.append(f"참고: 손절 {fmt_price(r['stop'])} (종가 -{CRASH_STOP_PCT:g}%) · 보유 한도 {CRASH_HOLD_HOURS}시간 · "
                  f"목표 지정가 없음 · 50% 되돌림선 {fmt_price(r['retrace50'])}")
     return Signal("CRASH_BUY", "🔵 급락 매수 후보", f"{symbol} 5분봉", "\n".join(lines), symbol)
@@ -149,8 +166,9 @@ def build_signal(symbol: str, r: dict) -> Signal:
 class CrashWorker:
     """심볼별로 새 완성봉이 생길 때마다 한 번 판정한다. 같은 심볼은 CRASH_COOLDOWN_MIN 동안 한 번만 알린다."""
 
-    def __init__(self, symbols: list, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding, trader=None):
+    def __init__(self, symbols: list, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding, trader=None, fetch_h4=None):
         self.symbols = list(symbols)
+        self.fetch_h4 = fetch_h4 or (lambda s: fetch_klines(s, "4h", CRASH_H4_KLINES))
         self.trader = trader        # binance_trade.DryTrader — 진입 후보를 가상 체결한다. None 이면 알림만
         self.notify = notifier
         self.fetch_bars = fetch_bars
@@ -171,6 +189,13 @@ class CrashWorker:
             result = evaluate(bars, None if symbol == "BTCUSDT" else btc)
             if result is None:
                 continue
+            if CRASH_H4_FILTER:
+                reg = self._h4(symbol)
+                if reg is not None and not reg["down"]:
+                    log.info("%s 급락 조건 충족했지만 4시간봉 상승 배열(EMA9 %s > EMA21 %s)이라 보류", symbol,
+                             fmt_price(reg["ema9"]), fmt_price(reg["ema21"]))
+                    continue
+                result["h4"] = reg
             last = self.last_alert.get(symbol)
             if last and now - last < timedelta(minutes=CRASH_COOLDOWN_MIN):
                 log.info("%s 급락 조건 충족했지만 쿨다운 중 (마지막 알림 %s)", symbol, last.isoformat(timespec="minutes"))
@@ -186,3 +211,10 @@ class CrashWorker:
                 except Exception as e:          # 자동매매 오류가 알림을 막으면 안 된다
                     log.warning("%s 자동매매 진입 처리 실패: %s", symbol, e)
         return sent
+
+    def _h4(self, symbol):
+        try:
+            return h4_regime(self.fetch_h4(symbol))
+        except Exception as e:              # 조회 실패면 배열 불명 — 알림은 내되 본문에 표기한다
+            log.warning("%s 4시간봉 조회 실패: %s", symbol, e)
+            return None

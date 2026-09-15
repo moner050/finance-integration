@@ -138,14 +138,14 @@ class TraderStub:
 
 
 def test_workers_hand_entries_to_trader():
-    from tests.test_binance_crash import make_bars
+    from tests.test_binance_crash import make_bars, make_h4
     from tests.test_binance_follow import SPEC_1D_SHORT, daily_short
     st, rec = TraderStub(), Recorder()
     fetched = {"ETCUSDT": make_bars(crash_bars=20), "BTCUSDT": make_bars(close=78000)}
-    w = CrashWorker(["ETCUSDT"], rec, fetch_bars=lambda s: fetched[s], fetch_fund=lambda s: None, trader=st)
+    w = CrashWorker(["ETCUSDT"], rec, fetch_bars=lambda s: fetched[s], fetch_fund=lambda s: None, trader=st, fetch_h4=lambda s: make_h4())
     w.poll_once(T)
     assert len(rec.sent) == 1 and [c[:3] for c in st.calls] == [("CRASH_BUY", "ETCUSDT", "long")]
-    assert st.calls[0][3]["stop"] > 0 and st.calls[0][4] == 5 and st.calls[0][5] == T
+    assert st.calls[0][3]["stop"] > 0 and st.calls[0][4] == 8 and st.calls[0][5] == T
     bars = daily_short()
     ws = FollowWorker(SPEC_1D_SHORT, rec, fetch_bars=lambda s, iv, n: bars[:n_], fetch_fund=lambda s: None, trader=st)
     for n_ in range(401, len(bars) + 1):                                 # 관찰 알림은 넘기지 않고 진입만 넘긴다

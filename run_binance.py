@@ -19,7 +19,7 @@ from alertbot.binance_trade import Trader
 from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SYMBOLS, BINANCE_TRADE_CAPITAL,
                              BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TRADE_EXCHANGE_LEV, BINANCE_TRADE_LEVERAGE,
                              BINANCE_TRADE_MODE, CRASH_ATR_MULT,
-                             CRASH_CLOSE_POS_MIN, CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_STOP_PCT,
+                             CRASH_CLOSE_POS_MIN, CRASH_H4_KLINES, CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_STOP_PCT,
                              FOLLOW_KLINES, FOLLOW_SPECS, setup_logging)
 from alertbot.models import Signal
 from alertbot.notify import build_channels
@@ -30,7 +30,7 @@ log = logging.getLogger("binance")
 
 def check_symbols():
     """심볼이 틀리면 기동 때 멈춘다 — 매 사이클 400 오류를 내며 돌지 않는다."""
-    plan = [(s, "5m", None) for s in BINANCE_SYMBOLS]
+    plan = [(s, "5m", None) for s in BINANCE_SYMBOLS] + [(s, "4h", CRASH_H4_KLINES) for s in BINANCE_SYMBOLS]
     for spec in FOLLOW_SPECS:
         for s in spec["symbols"]:
             plan.append((s, spec["interval"], FOLLOW_KLINES))
@@ -90,7 +90,7 @@ def main():
     notifier = Dispatcher(build_channels(), record=lambda s, r: db.log_signal(store, s, r))
     body = [f"급락 매수 5분봉 {', '.join(BINANCE_SYMBOLS)}: 하락 ≥ 기준ATR×{CRASH_ATR_MULT:g} (직전 {CRASH_LOOKBACK}봉 고점 대비) "
             f"· RSI14 ≤ {CRASH_RSI_MAX:g} · 종가위치 ≥ {CRASH_CLOSE_POS_MIN:g} · 손절 참고 종가 -{CRASH_STOP_PCT:g}% · "
-            f"보유 {CRASH_HOLD_HOURS}시간"] + [describe(s) for s in FOLLOW_SPECS]
+            f"보유 {CRASH_HOLD_HOURS}시간 · 4시간봉 EMA9 ≤ EMA21(하락 배열)만"] + [describe(s) for s in FOLLOW_SPECS]
     trader = None
     if BINANCE_TRADE_MODE != "off":
         broker = live_broker() if BINANCE_TRADE_MODE == "live" else None

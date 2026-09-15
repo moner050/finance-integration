@@ -218,7 +218,9 @@ CRASH_RVOL_WINDOW = 60         # RVOL 분모: 직전 60봉 거래량 중앙값 (
 CRASH_BETA_BTC = 1.35          # BTC 동반 판정용 베타 (ETC 이동 ≈ BTC 이동 × 1.35)
 CRASH_COOLDOWN_MIN = 60        # 같은 심볼 재알림 간격
 CRASH_STOP_PCT = 3.0           # 손절 참고선: 신호봉 종가 -3% 재난 손절. 저가-2ATR(진입 대비 0.7%)은 5분봉 스윕 구간이라 폐기 (2026-09-15 레버리지 분석)
-CRASH_HOLD_HOURS = 5           # 보유 한도 참고. 목표 지정가는 없다 — 50% 되돌림 목표는 5시간 보유 종료보다 평균이 낮았다
+CRASH_HOLD_HOURS = 8           # 보유 한도. 목표 지정가는 없다. 5h → 8h (2026-09-15 표본 확장 257일: 8h 만 두 구간 모두 양수)
+CRASH_H4_FILTER = True         # 4시간봉 EMA9 ≤ EMA21(하락 배열)일 때만 알림·진입. 상승 배열 중 급락 -0.41%(t -2.0), 하락 배열 +0.69%(t 3.1)
+CRASH_H4_KLINES = 120          # 4시간봉 배열 판정용 봉 수 (20일). 급락 조건이 성립한 때만 조회한다
 BINANCE_LOG_PATH = DATA_DIR / "binance_signals.log"
 
 # 상위 봉 추종 알림 (alertbot/binance_follow.py). 같은 워커 프로세스가 사양(FOLLOW_SPECS)마다 워커 하나씩 돌린다.
