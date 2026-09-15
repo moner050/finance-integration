@@ -219,6 +219,24 @@ CRASH_BETA_BTC = 1.35          # BTC 동반 판정용 베타 (ETC 이동 ≈ BTC
 CRASH_COOLDOWN_MIN = 60        # 같은 심볼 재알림 간격
 BINANCE_LOG_PATH = DATA_DIR / "binance_signals.log"
 
+# 4시간봉 급등 추종 알림 (alertbot/binance_surge.py). 같은 워커 프로세스가 돌린다.
+# 스윙 분석 「스윙의 급등과 급락」의 4시간봉 BTC 'M2'(급등 뒤 첫 눌림에서 EMA9 재돌파) 트리거.
+# 급등 숏은 어느 봉에서도 손실이라 만들지 않는다.
+SURGE_SYMBOLS = [s.strip().upper() for s in (_CFG.get("ALERT_BINANCE_SURGE_SYMBOLS") or "BTCUSDT").split(",") if s.strip()]
+SURGE_INTERVAL = "4h"
+SURGE_KLINES = 400             # 기준 ATR(30일 = 180봉) + 룩백 + EMA9 계산에 충분한 봉 수
+SURGE_DAILY_KLINES = 400       # 국면(일봉 EMA200) 계산용
+SURGE_LOOKBACK = 30            # 직전 30봉(5일) 저점 대비 상승폭
+SURGE_ATR_MULT = 6.0           # 상승폭 ≥ 기준 ATR × 6 (BTC 는 대략 +9% 이상)
+SURGE_RSI_MIN = 70.0           # RSI14 과매수 — 스윙에서는 추종 근거
+SURGE_BASE_ATR_BARS = 180      # 기준 ATR = 직전 30일 ATR14% 중앙값
+SURGE_REENTRY_BARS = 10        # 급등 뒤 이 봉 안의 EMA9 재돌파만 진입 후보
+SURGE_RVOL_WINDOW = 60         # RVOL 분모 (참고 표기)
+SURGE_BRACKET_ATR = 8.0        # 손절·목표 참고선 ±8 기준 ATR (1:1, BTC 는 대략 ±12%)
+SURGE_HOLD_BARS = 42           # 보유 한도 7일. 단계별 재알림 간격도 같다
+SURGE_REQUIRE_BULL = True      # 일봉 종가가 EMA200 위일 때만 알린다 (약세 국면은 기대값 음수)
+SURGE_FUNDING_WARN = 0.0003    # 펀딩 > 3bp/8h(연 30%+)면 과열 표기
+
 
 def setup_logging(path: Path = None):
     """엔진은 파일+콘솔, 백오피스는 콘솔만. 형식은 원본과 같다.

@@ -1,6 +1,6 @@
 """Binance 무기한 선물 5분봉 급락 매수 알림 — 공개 REST(klines) 폴링 → 완성봉 판정 → 알림.
 
-토스 엔진(run_engine.py)과 별개 워커다. 코인 선물은 24시간이라 장 시간·보유·세션 개념이 없고
+토스 엔진(run_engine.py)과 별개 워커다(run_binance.py 가 4시간봉 급등 워커와 함께 돌린다). 코인 선물은 24시간이라 장 시간·보유·세션 개념이 없고
 데이터 소스도 다르므로 엔진 상태기계에 끼워 넣지 않는다. 공유하는 것은 알림 채널·쿨다운·
 신호 이력(MySQL alert_signal_log)뿐이다. API 키는 필요 없다 (공개 엔드포인트).
 
@@ -19,7 +19,7 @@ from statistics import median
 
 import requests
 
-from .config import (BINANCE_FAPI, BINANCE_INTERVAL, BINANCE_KLINES, BINANCE_POLL_SEC, CRASH_ATR_MULT,
+from .config import (BINANCE_FAPI, BINANCE_INTERVAL, BINANCE_KLINES, CRASH_ATR_MULT,
                      CRASH_BASE_ATR_BARS, CRASH_BETA_BTC, CRASH_CLOSE_POS_MIN, CRASH_COOLDOWN_MIN,
                      CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_RVOL_WINDOW)
 from .indicators import compute_rsi
@@ -44,10 +44,9 @@ def parse_klines(rows: list, now_ms: int) -> list:
     return out
 
 
-def fetch_klines(symbol: str, session=None) -> list:
+def fetch_klines(symbol: str, interval: str = BINANCE_INTERVAL, limit: int = BINANCE_KLINES, session=None) -> list:
     r = (session or requests).get(f"{BINANCE_FAPI}/fapi/v1/klines",
-                                  params={"symbol": symbol, "interval": BINANCE_INTERVAL, "limit": BINANCE_KLINES},
-                                  timeout=10)
+                                  params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
     r.raise_for_status()
     return parse_klines(r.json(), int(time.time() * 1000))
 
@@ -179,11 +178,3 @@ class CrashWorker:
             self.last_alert[symbol] = now
             sent.append(signal)
         return sent
-
-    def run(self):
-        while True:
-            try:
-                self.poll_once()
-            except Exception as e:      # 네트워크·파싱 오류는 다음 사이클에 다시 시도한다
-                log.warning("사이클 오류: %s", e)
-            time.sleep(BINANCE_POLL_SEC)

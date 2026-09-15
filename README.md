@@ -8,7 +8,7 @@
 |---|---|---|
 | 엔진 워커 | `python run_engine.py` | 30초 폴링 → 지표 → 상태기계 → 텔레그램 알림 → (자동매매) |
 | 백오피스 | `python run_backoffice.py` | http://127.0.0.1:8000 — 종목·상태·신호 이력·채널·자동매매 |
-| Binance 워커 | `python run_binance.py` | 20초 폴링 → 5분봉 완성마다 급락 매수 후보 판정 → 텔레그램 (토스 엔진과 독립, 3.5절) |
+| Binance 워커 | `python run_binance.py` | 20초 폴링 → 5분봉 ETC 급락 매수 후보 · 4시간봉 BTC 급등 추종 후보 → 텔레그램 (토스 엔진과 독립, 3.5절) |
 | MySQL | 이미 쓰는 서버 | `alert_*` 테이블 5개. 세 프로세스가 공유하는 유일한 통로 |
 
 ---
@@ -39,8 +39,8 @@
 
 | 등급 | 알림 | 쿨다운 |
 |---|---|---|
-| action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 · 🔵 급락 매수 후보(Binance) | 15분 (주문 관련은 없음, Binance 는 60분) |
-| review | 🟡 절반/1/3 익절 검토 · ⚪ 매수 취소 · 🎉✅ 청산 완료 | 45분 / 15분 |
+| action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 · 🔵 급락 매수 후보 · 🔵 눌림 재돌파 진입 후보(Binance) | 15분 (주문 관련은 없음, Binance 급락 60분 · 급등 7일) |
+| review | 🟡 절반/1/3 익절 검토 · ⚪ 매수 취소 · 🎉✅ 청산 완료 · 📈 급등 확인 관찰(Binance) | 45분 / 15분 (Binance 급등 7일) |
 | info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 오늘 성적 · ⚪ 시스템 | 없음 |
 
 쿨다운 키는 (신호 종류, 종목)이다. `TELEGRAM_MIN_SEVERITY` 로 받을 최소 등급을 정한다.
@@ -58,6 +58,7 @@ alertbot/
   indicators.py      RVOL·VWAP(세션 누적)·EMA·RSI(Wilder)·ATR(True Range)
   engine.py          신호 엔진 (상태기계, 시황 요약, 워치리스트 핫리로드, 상태 저장·복원, 자동매매 훅)
   binance_crash.py   Binance 선물 5분봉 급락 매수 알림 (공개 REST 폴링 · 판정 · 워커) — 별도 프로세스
+  binance_surge.py   Binance 선물 4시간봉 급등 추종 알림 (급등 관찰 → 눌림 재돌파 진입 후보, 일봉 EMA200 국면)
   tracking.py        signal_tracking.csv(신호 뒤 15/30/60분 가격), trade_log.csv(청산 기록)
   models.py          Signal (종류·등급·쿨다운)
   notify/            Dispatcher(쿨다운·이력) + telegram 채널
@@ -65,7 +66,7 @@ alertbot/
   trading/           자동매매: broker(TossOrderClient·DryRunBroker) · policy(리스크 정책) · executor(실행기) · models
   backoffice/        FastAPI + Jinja2 + HTMX 화면
 run_engine.py        엔진 진입점          run_backoffice.py   백오피스 진입점      run_binance.py   Binance 워커 진입점
-Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest 74개
+Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest 79개
 ```
 
 ---
@@ -83,7 +84,8 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `MYSQL_HOST` `MYSQL_PORT` `MYSQL_DATABASE` `MYSQL_USER` `MYSQL_PASSWORD` | ✔ | 기존 MySQL. 테이블은 `alert_` 접두어로 자동 생성 | |
 | `ALERT_BACKOFFICE_HOST` / `ALERT_BACKOFFICE_PORT` | | 백오피스 바인드 주소·포트. 인증이 없으므로 로컬 전용 권장 | 127.0.0.1 / 8000 |
 | `ALERT_DATA_DIR` | | 로그·CSV 저장 폴더. Docker 는 `/data` | 프로젝트 루트 |
-| `ALERT_BINANCE_SYMBOLS` | | Binance 급락 매수 알림 심볼(쉼표, USDⓈ-M 무기한). 공개 API 라 키 불필요 | ETCUSDT |
+| `ALERT_BINANCE_SYMBOLS` | | Binance 5분봉 급락 매수 알림 심볼(쉼표, USDⓈ-M 무기한). 공개 API 라 키 불필요 | ETCUSDT |
+| `ALERT_BINANCE_SURGE_SYMBOLS` | | Binance 4시간봉 급등 추종 알림 심볼(쉼표) | BTCUSDT |
 | `AUTOTRADE_MODE` | | 자동매매 모드 `off` / `dry` / `live` (4절) | off |
 | `AUTOTRADE_BUY_BUFFER_PCT` | | 매수 지정가 = 신호가 × (1 + 이 %) | 0.3 |
 | `AUTOTRADE_BUY_TTL_MIN` | | 매수 지정가가 이 분 안에 안 체결되면 취소 | 3 |
@@ -140,11 +142,13 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 
 ---
 
-### 3.5 Binance 급락 매수 알림 (`run_binance.py`, `alertbot/binance_crash.py`)
+### 3.5 Binance 알림 (`run_binance.py` — `binance_crash.py` 급락 매수 5분봉, `binance_surge.py` 급등 추종 4시간봉)
 
-토스 엔진과 별개의 워커다. Binance USDⓈ-M 무기한 선물의 5분봉을 공개 REST 로 20초마다 받아(키 불필요)
-**완성봉마다 한 번** 판정하고, 같은 심볼은 60분 안에 다시 알리지 않는다. 신호는 텔레그램과 `alert_signal_log`
-(백오피스 '신호 이력', 종류 `CRASH_BUY`)에 남고, 로그는 `binance_signals.log` 다. 자동매매·보유 판단은 없다.
+토스 엔진과 별개의 워커 한 프로세스가 두 알림을 돌린다. Binance USDⓈ-M 무기한 선물 봉을 공개 REST 로 20초마다 받아(키 불필요)
+**완성봉마다 한 번** 판정한다. 신호는 텔레그램과 `alert_signal_log`(백오피스 '신호 이력')에 남고, 로그는 `binance_signals.log` 다.
+자동매매·보유 판단은 없다.
+
+**급락 매수 (5분봉, 기본 ETCUSDT, 종류 `CRASH_BUY`, 같은 심볼 60분 쿨다운)**
 
 | 조건 (모두 만족) | 값 | 상수 |
 |---|---|---|
@@ -160,6 +164,21 @@ ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지에는 판단 참
 근거는 2026-09-15 분석(1분·5분·1시간봉, ETC·BTC 30~90일): 5분봉 ETC 에서 이 트리거가 수수료(왕복 0.1%) 뒤에도
 양(+)이었던 유일한 급락 매수 조건이다(37건, 승률 62%, ±8 기준 ATR 브래킷 순평균 +0.31%). 1분봉은 어느 조건도
 수수료를 못 넘겼고, 급등 숏은 전부 손실이라 만들지 않았다. 표본 국면이 상승장이었다는 한계가 있다.
+
+**급등 추종 (4시간봉, 기본 BTCUSDT, 두 단계, 단계별 7일 쿨다운)**
+
+| 단계 | 조건 | 알림 | 상수 |
+|---|---|---|---|
+| 급등 확인 | 직전 30봉(5일) 저점 대비 종가 상승폭 ≥ 기준 ATR × 6, RSI14 ≥ 70 이 **처음 성립한 봉** | 📈 관찰 (`SURGE_WATCH`, review) | `SURGE_LOOKBACK` / `SURGE_ATR_MULT` / `SURGE_RSI_MIN` |
+| 눌림 재돌파 | 급등 뒤 10봉 안에 종가가 EMA9 아래로 눌렸다가 다시 위로 마감 | 🔵 진입 후보 (`SURGE_ENTRY`, action) | `SURGE_REENTRY_BARS` |
+| 국면 | 마지막 완성 일봉 종가가 EMA200 위일 때만 (아래면 로그만 남기고 보류) | | `SURGE_REQUIRE_BULL` |
+
+기준 ATR 은 직전 30일(180봉) ATR14% 중앙값(`SURGE_BASE_ATR_BARS`)이고 BTC 는 대략 1.5% 라 급등 조건은 5일 저점 대비 +9% 안팎이다.
+메시지에는 RSI·RVOL·EMA9·눌림 저점·국면(일봉 종가/EMA200)·펀딩(3bp/8h 초과면 과열 표기)과 함께 손절·목표 참고선
+±8 기준 ATR(1:1, 대략 ±12%)과 보유 한도 7일을 싣는다. 급등 **숏** 알림은 만들지 않았다 — 스윙 분석에서 어느 봉이든 기대값이 음수였다.
+
+근거는 2026-09-15 스윙 분석(1시간·4시간·일·주봉, 상장 이후 전체): 4시간봉 BTC 에서 '급등 뒤 첫 눌림 재돌파(M2)' 가 펀딩·수수료 뒤
+순평균 +0.86%(승률 60%, 63건)였고, 강세 국면에 한정하면 +1.19%(51건), 약세 국면은 -0.58%(12건)였다.
 
 ## 4. `AUTOTRADE_MODE` 상세
 
@@ -330,7 +349,7 @@ python -m pytest
 
 지표 골든값(원본 스크립트 기준), 세션 누적, 캘린더 파싱, 엔진 상태 전이·복원, 알림 쿨다운·채널 격리, DB, 백오피스,
 브로커(요청 페이로드·멱등키·호가 보정·오류 매핑), 정책 경계값, 실행기 시나리오(dry 체결·중복 방지·자동 차단),
-Binance 급락 판정(합성 급락·반전봉 유무·BTC 동반·워커 쿨다운)을 덮는다.
+Binance 급락 판정(합성 급락·반전봉 유무·BTC 동반·워커 쿨다운), Binance 급등 추종(급등 첫 봉·눌림 재돌파·국면 게이트·쿨다운)을 덮는다.
 실제 토스·텔레그램·MySQL·Binance 는 호출하지 않는다(DB 는 메모리 SQLite).
 
 ---
