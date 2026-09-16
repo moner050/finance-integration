@@ -15,14 +15,16 @@ from datetime import datetime, timedelta, timezone
 from . import db
 from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, ALERT_COOLDOWN_MIN, CLOSE_WARN_MIN, DATA_DIR,
                      ENABLE_ADD_ON, ENABLE_AMBIGUOUS, ENABLE_EXIT_SIGNAL, ENABLE_TRACKING,
-                     ENTRY_MIN_PEAK_RATIO, ENTRY_PENDING_MAX_MIN, EXIT_GRACE_MIN, EXIT_PORTION_HALF,
-                     EXIT_PORTION_STRONG, EXIT_PORTION_THIRD, EXIT_REPEAT_MAX_MIN, FADE_MIN_PEAK,
-                     FADE_STRONG_RATIO, FADE_WEAK_RATIO, LEADER_GAP_PCT, LEADER_MOMENTUM_GATE,
-                     LEADER_MOMENTUM_MIN, POLL_INTERVAL_SEC, PROFILE_PAGES, REENTRY_BLOCK_MIN,
-                     RVOL_TRIGGER, RVOL_WINDOW, STATS_REPORT_MIN, STOP_LOSS_PCT, STOP_RECOVER_PCT,
-                     SUMMARY_INTERVAL_MIN, TRACK_FILE, TRADE_FILE, VWAP_BAND_PCT)
-from .indicators import (SessionState, build_volume_profile, compute_rsi, compute_rvol,
-                         effective_band, ema_alignment, is_regular_bar, strong_bar, vwap_position)
+                     ENTRY_MIN_PEAK_RATIO, ENTRY_PENDING_MAX_MIN, ENTRY_SKIP_BEAR_EMA, EXIT_GRACE_MIN,
+                     EXIT_PORTION_HALF, EXIT_PORTION_STRONG, EXIT_PORTION_THIRD, EXIT_REPEAT_MAX_MIN,
+                     FADE_BARS, FADE_MIN_PEAK, FADE_STRONG_RATIO, FADE_WEAK_RATIO, LEADER_GAP_PCT,
+                     LEADER_MOMENTUM_GATE, LEADER_MOMENTUM_MIN, OPEN_EXCLUDE_MIN, POLL_INTERVAL_SEC,
+                     PROFILE_PAGES, REENTRY_BLOCK_MIN, RVOL_TRIGGER, RVOL_WINDOW, STATS_REPORT_MIN,
+                     STOP_LOSS_PCT, STOP_RECOVER_PCT, SUMMARY_INTERVAL_MIN, TRACK_FILE, TRADE_FILE,
+                     TRAIL_MIN_PROFIT_PCT, VWAP_BAND_PCT)
+from .indicators import (SessionState, bar_minutes_from_open, build_volume_profile, compute_rsi,
+                         compute_rvol, effective_band, ema_alignment, is_regular_bar, rvol_at, strong_bar,
+                         vwap_position)
 from .market_hours import MarketHours
 from .models import Signal
 from .notify.dispatcher import Dispatcher
@@ -72,6 +74,7 @@ class SignalEngine:
         # 매수 신호봉의 저점. 이게 구조적 손절선이다.
         # 기준선 밴드 대신 이 선을 쓰면 '사자마자 살짝 눌림'에 안 흔들린다.
         self.stop_ref = {}
+        self.stop_src = {}          # ticker -> 손절선의 출처 문구 (매수 신호봉 / 보유 확인 봉 / 추가매수 봉)
         self.snapshots = {}         # 최근 지표. 시황 요약이 재계산 없이 쓴다
         # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 초기화한다.
         # 30분을 기다리면 '돌고 있는 건지' 확인이 늦어진다.
@@ -143,7 +146,7 @@ class SignalEngine:
         """감시에서 빠진 종목의 상태를 지운다. 보유 중이면 손절 알림이 더는 나가지 않으니 경고한다."""
         if ticker in self._last_holdings:
             log.warning("%s 보유 중인데 감시 목록에서 빠졌다 — 손절·매도 알림이 나가지 않는다", ticker)
-        for d in (self.state, self.pending, self.stop_ref, self.entry_at, self.exit_at, self.addon_count,
+        for d in (self.state, self.pending, self.stop_ref, self.stop_src, self.entry_at, self.exit_at, self.addon_count,
                   self.last_seen, self.last_bar, self.sessions, self.volume_profile, self.profile_date,
                   self.snapshots, self.stats):
             d.pop(ticker, None)
@@ -162,6 +165,7 @@ class SignalEngine:
                 "state": self.state.get(t, "관망"),
                 "pending": self.pending.get(t),
                 "stop_ref": self.stop_ref.get(t),
+                "stop_src": self.stop_src.get(t),
                 "entry_at": self.entry_at[t].isoformat() if t in self.entry_at else None,
                 "exit_at": self.exit_at[t].isoformat() if t in self.exit_at else None,
                 "addon_count": self.addon_count.get(t, 0),
@@ -201,6 +205,8 @@ class SignalEngine:
                 self.pending[t] = item["pending"]
             if item.get("stop_ref"):
                 self.stop_ref[t] = float(item["stop_ref"])
+            if item.get("stop_src"):
+                self.stop_src[t] = item["stop_src"]
             for key, target in (("entry_at", self.entry_at), ("exit_at", self.exit_at)):
                 if item.get(key):
                     try:
@@ -374,6 +380,17 @@ class SignalEngine:
         else:
             strength, direction_ok, momentum = None, True, None
 
+        strong, regular = strong_bar(candles[-1]), is_regular_bar(candles[-1], market)
+        # 거래량 돌파: 직전봉 아래 → 현재봉 위로 교차. 매수와 불타기가 같은 기준을 쓴다 —
+        # 정규장 강봉이어야 하고, 오늘 정점이 있었다면 그 근처여야 '새 추세'다.
+        breakout = rvol_method != "혼합" and prev_rvol < RVOL_TRIGGER <= rvol
+        if breakout and ss.peak >= FADE_MIN_PEAK and rvol < ss.peak * ENTRY_MIN_PEAK_RATIO:
+            breakout = False
+        # 소진 판정용 최근 거래량: 1분봉 하나는 시끄러워 조용한 1분에 '전량 정리' 가 뜬다. 최근 몇 봉 평균을 쓴다.
+        recent = [rvol_at(candles, i, market, prof) for i in range(len(candles) - FADE_BARS, len(candles))]
+        recent = [r for r, m in recent if m != "부족"] or [rvol]
+        rvol_recent = round(sum(recent) / len(recent), 2)
+
         return {
             "cfg": cfg, "market": market, "label": cfg.get("name") or ticker,
             "candles": candles, "bar_key": candles[-1].get("timestamp"),
@@ -383,9 +400,10 @@ class SignalEngine:
             # 봉에서도 순간 위로 튈 수 있고, 같은 봉은 다시 판정하지 않아 되돌릴 수 없다.
             "pos_close": vwap_position(close, vwap, band),
             "last_low": float(candles[-1].get("lowPrice") or 0),
-            "strong": strong_bar(candles[-1]),
-            "regular": is_regular_bar(candles[-1], market),
+            "strong": strong, "regular": regular,
+            "since_open": bar_minutes_from_open(candles[-1], market),
             "prev_rvol": prev_rvol, "rvol": rvol, "rvol_method": rvol_method,
+            "rvol_recent": rvol_recent, "breakout": breakout and strong and regular,
             "peak": ss.peak,
             "strength": strength, "direction_ok": direction_ok, "momentum": momentum,
         }
@@ -405,12 +423,19 @@ class SignalEngine:
         if has_pos and st in ("관망", "진입대기"):
             st = "보유"                     # 매수 실행됨
             self.entry_at[ticker] = datetime.now(timezone.utc)
+            if ticker not in self.stop_ref:
+                # 우리 신호 없이 산 포지션. 밴드 하단을 곧바로 매도선으로 쓰면 '사자마자 팔라' 가 되므로
+                # 신호봉 저점과 같은 역할을 보유를 처음 확인한 봉의 저점에 맡긴다.
+                low = self.snapshots.get(ticker, {}).get("last_low", 0)
+                if low > 0:
+                    self.stop_ref[ticker], self.stop_src[ticker] = low, "보유 확인 봉 저점"
         elif not has_pos and st in ("보유", "청산대기"):
             st = "관망"                     # 청산 실행됨
             self.exit_at[ticker] = datetime.now(timezone.utc)
             self.addon_count.pop(ticker, None)
             self.pending.pop(ticker, None)
             self.stop_ref.pop(ticker, None)
+            self.stop_src.pop(ticker, None)
             self._closing_note(ticker)
         self.state[ticker] = st
         return st
@@ -435,9 +460,8 @@ class SignalEngine:
             # 청산 뒤에는 보유 정보가 사라지므로, 매 사이클 마지막 값을 남겨둔다
             self.last_seen[ticker] = {"avg": held["avg"], "price": price, "qty": held["qty"]}
             ctx = {"ema": ema_alignment(snap["candles"]), "rsi": compute_rsi(snap["candles"])}
-            rvol_breakout = snap["rvol_method"] != "혼합" and prev_rvol < RVOL_TRIGGER <= rvol
             self._check_holding(ticker, label, market, price, vwap, pos,
-                                rvol, prev_rvol, rvol_breakout, held, ctx, peak)
+                                rvol, prev_rvol, snap["breakout"], held, ctx, peak)
             return
 
         # ---- 진입 대기: 아직 안 샀다. 조건이 살아있으면 다시 알린다 ----
@@ -448,12 +472,13 @@ class SignalEngine:
             at = sig.get("at")
             stale = bool(at) and (datetime.now(timezone.utc) - datetime.fromisoformat(at)
                                   >= timedelta(minutes=ENTRY_PENDING_MAX_MIN))
-            if pos == "below":
-                # 근거가 무너졌으면 기다릴 이유가 없다
+            if pos_close == "below":
+                # 근거가 무너졌으면 기다릴 이유가 없다. 판정은 완성봉 종가 — 현재가 틱 하나로 취소하면
+                # 매수 알림 2분 뒤 취소, 반복 알림 33초 뒤 취소 같은 왕복이 생긴다.
                 self.state[ticker] = "관망"
                 self.pending.pop(ticker, None)
                 self._emit("ENTRY_CANCEL", "⚪ 매수 취소", label, ticker,
-                                 f"현재가 {price}가 기준선 {vwap} 아래로 내려감\n"
+                                 f"종가 {snap['close']}가 기준선 {vwap} 아래로 내려감\n"
                                  f"진입 근거 소멸 — 관망으로 전환")
             elif stale or not snap["regular"]:
                 self.state[ticker] = "관망"
@@ -476,6 +501,13 @@ class SignalEngine:
         if not snap["regular"]:
             # 매수 신호는 정규장 봉에서만. 마감 뒤 10분 여유 구간이나 프리마켓의 시간외 봉은
             # 유동성이 얇아 거래량 배수가 튀고, 기준선(정규장 VWAP)과 비교할 대상도 아니다.
+            return
+        if snap["since_open"] < OPEN_EXCLUDE_MIN:
+            # 세션 VWAP 이 봉 한두 개로 만들어진 구간. '기준선 위' 가 자기 봉 typical price 와의
+            # 비교가 되어 강봉 필터와 다를 게 없다. 정점 계산과 같은 개장 구간을 뺀다.
+            return
+        if self.hours.near_close(market):
+            # 마감 CLOSE_WARN_MIN 분 안의 진입은 곧바로 '마감 전 정리' 를 받는 자기모순이다.
             return
         exited = self.exit_at.get(ticker)
         if exited and datetime.now(timezone.utc) - exited < timedelta(minutes=REENTRY_BLOCK_MIN):
@@ -511,11 +543,16 @@ class SignalEngine:
         if rvol_breakout and not snap["strong"]:
             log.debug("%s 돌파했으나 신호봉이 약함(윗꼬리) — 보류", ticker)
             rvol_breakout = False
+        # 역배열(EMA 9<20<50)에서의 돌파는 하락 추세 속 반등이다. 추적된 신호 중 역배열·혼조 진입이
+        # 모두 음수였다 (표본이 작아 ENTRY_SKIP_BEAR_EMA 로 켜고 끈다).
+        align = ema_alignment(snap["candles"])
+        if rvol_breakout and ENTRY_SKIP_BEAR_EMA and align == "역배열":
+            log.debug("%s 돌파했으나 EMA 역배열 — 보류", ticker)
+            rvol_breakout = False
 
         if direction_ok and rvol_breakout and pos_close == "above":
             self.bump(ticker, "all")
-            self.stop_ref[ticker] = snap["last_low"]
-            align = ema_alignment(snap["candles"])
+            self.stop_ref[ticker], self.stop_src[ticker] = snap["last_low"], "매수 신호봉 저점"
             rsi_prev, rsi_now = compute_rsi(snap["candles"])
             slope = "상승" if rsi_now > rsi_prev else "하락"
             self.state[ticker] = "진입대기"
@@ -641,18 +678,28 @@ class SignalEngine:
         """
         avg = held["avg"]
         pnl = round((price - avg) / avg * 100, 2) if avg > 0 else 0.0
+        snap = self.snapshots.get(ticker, {})
+        close, band = snap.get("close", price), snap.get("band", VWAP_BAND_PCT)
+        if not snap.get("regular", True) and pnl > STOP_LOSS_PCT:
+            # 정규장 봉이 아니면(마감 뒤 여유 구간, 시간외) 손절 한도 외의 판단은 하지 않는다.
+            # 시간외 가격은 얇고, 기준선(정규장 VWAP)과 비교할 대상도 아니다.
+            return
 
-        # 매도 기준선. 우리 신호로 산 포지션이면 신호봉 저점, 아니면 기준선 밴드.
+        # 매도 기준선. 신호봉(또는 보유를 처음 확인한 봉) 저점, 없으면 기준선 밴드.
         # 신호봉 저점은 '이 봉이 무너지면 진입 근거가 깨진 것'이라는 뜻이라
         # 밴드보다 종목 상황에 밀착돼 있다. 사자마자 살짝 눌리는 정도로는 안 걸린다.
+        # 판정은 완성봉 종가로 한다 — 현재가 틱 하나로 팔라고 하면 3배 상품 꼬리에 청산대기가 걸린다.
         stop_ref = self.stop_ref.get(ticker, 0)
-        band = self.snapshots.get(ticker, {}).get("band", VWAP_BAND_PCT)
         band_low = round(vwap * (1 - band / 100), 4) if vwap > 0 else 0
         if stop_ref > 0:
-            sell_line, sell_why = stop_ref, "매수 신호봉 저점"
+            sell_line, sell_why = stop_ref, self.stop_src.get(ticker, "기준봉 저점")
+            if pnl >= TRAIL_MIN_PROFIT_PCT and band_low > stop_ref:
+                # 수익이 붙었고 기준선이 저점 위로 올라왔으면 매도선도 따라 올린다. 첫 저점에 두면
+                # 불타기로 커진 물량까지 처음 위험으로 되돌아간다.
+                sell_line, sell_why = band_low, f"기준선 밴드 하단 (VWAP -{band}%, 저점 {stop_ref} 에서 상향)"
         else:
             sell_line, sell_why = band_low, f"기준선 밴드 하단 (VWAP -{band}%)"
-        broke = sell_line > 0 and price < sell_line
+        broke = sell_line > 0 and close < sell_line
 
         # 이미 청산 신호를 낸 상태면 사유를 바꾸지 않는다.
         # 매 사이클 조건을 다시 평가하면 '매도하세요 → 익절하세요 → 1/3 익절'처럼
@@ -662,7 +709,7 @@ class SignalEngine:
             first = self.pending.setdefault(ticker, {})
             # 근거가 사라졌으면 보유로 돌아간다. 포지션이 없어질 때까지 반복하면
             # 가격이 회복한 뒤에도 '이탈했다'고 계속 말하는 꼴이다.
-            recovered = self._exit_recovered(first, pnl, price, pos_now, sell_line, band)
+            recovered = self._exit_recovered(first, pnl, close, snap.get("pos_close", pos_now), sell_line, band)
             if recovered:
                 self.state[ticker] = "보유"
                 self.pending.pop(ticker, None)
@@ -693,7 +740,8 @@ class SignalEngine:
         # 거래량 소진도: 세션 정점 대비 현재 비율.
         # 정점이 충분히 높아야(FADE_MIN_PEAK) '한 번 터진 추세'로 인정한다.
         # 애초에 거래가 안 붙었던 종목에는 소진 개념이 성립하지 않는다.
-        faded = rvol / rvol_peak if rvol_peak >= FADE_MIN_PEAK and rvol_peak > 0 else None
+        rvol_recent = snap.get("rvol_recent", rvol)
+        faded = rvol_recent / rvol_peak if rvol_peak >= FADE_MIN_PEAK and rvol_peak > 0 else None
 
         # 매수 직후에는 익절 알림을 막는다.
         # 거래량이 한 봉만 튀고 식으면 정점 대비 비율이 곧바로 무너져
@@ -739,7 +787,7 @@ class SignalEngine:
             self._emit("SELL", "🔴 매도하세요", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"{flavor}\n"
-                             f"{sell_why} {sell_line} 아래로 내려감")
+                             f"종가 {close}가 {sell_why} {sell_line} 아래로 내려감")
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
               and faded <= FADE_STRONG_RATIO):
             # 발동 조건은 순수 시장 기준(거래량 소진)이다. 손익은 표시용이고
@@ -755,26 +803,32 @@ class SignalEngine:
             self._emit("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"보유 {qty:g}주 → {EXIT_PORTION_STRONG} 정리 권장\n"
-                             f"거래량이 오늘 정점 {rvol_peak}배 → 현재 {rvol}배 "
+                             f"거래량이 오늘 정점 {rvol_peak}배 → 최근 {FADE_BARS}봉 평균 {rvol_recent}배 "
                              f"({round(faded * 100)}% 수준)\n"
                              f"상승 연료 소진 — 더 오를 힘이 남지 않음")
         elif (ENABLE_ADD_ON and pos_now == "above" and rvol_breakout
               and pnl >= ADDON_MIN_PROFIT_PCT
               and self.addon_count.get(ticker, 0) < ADDON_MAX_COUNT):
             # 불타기: 진입 근거(VWAP 위)가 유지되고 새 거래량이 붙었으며 이미 수익 중.
-            # 손실 중에는 절대 발동하지 않는다 — 물타기는 이 시스템이 다루지 않는다.
+            # 돌파 기준은 매수와 같다(정규장 강봉·정점 근접). 손실 중에는 절대 발동하지 않는다 —
+            # 물타기는 이 시스템이 다루지 않는다. 물량이 늘었으니 손절선도 이 봉 저점으로 올린다.
             self.addon_count[ticker] = self.addon_count.get(ticker, 0) + 1
+            low = snap.get("last_low", 0)
+            if low > self.stop_ref.get(ticker, 0):
+                self.stop_ref[ticker], self.stop_src[ticker] = low, "추가매수 봉 저점"
             self._emit("ADDON", "🔵 추가매수 검토", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"거래량 {prev_rvol}→{rvol}배 재돌파, 추세 살아있음\n"
+                             f"매도선 {self.stop_ref.get(ticker)} 로 상향 (이 봉 저점)\n"
                              f"⚠ 물량 늘리면 손절 시 손실도 같은 배로 커짐")
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
               and faded <= FADE_WEAK_RATIO):
             qty = held["qty"]
-            self._emit("EXIT_HALF", f"🟡 {EXIT_PORTION_HALF} 익절 검토", label, ticker,
+            verb = "익절" if pnl > 0 else "정리"
+            self._emit("EXIT_HALF", f"🟡 {EXIT_PORTION_HALF} {verb} 검토", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"보유 {qty:g}주 → {qty / 2:g}주 정리, {qty / 2:g}주 유지\n"
-                             f"거래량이 오늘 정점 {rvol_peak}배 → 현재 {rvol}배 "
+                             f"거래량이 오늘 정점 {rvol_peak}배 → 최근 {FADE_BARS}봉 평균 {rvol_recent}배 "
                              f"({round(faded * 100)}% 수준)\n"
                              f"둔화 시작. 절반 덜어내고 나머지로 추세 확인")
         elif ENABLE_AMBIGUOUS and not in_grace and self._ambiguous(pos_now, ctx):
@@ -782,7 +836,8 @@ class SignalEngine:
             # 다른 알림이 하나도 안 걸려 방치되기 쉬운 사각지대다.
             qty = held["qty"]
             part = round(qty / 3, 1)
-            self._emit("EXIT_THIRD", f"🟡 {EXIT_PORTION_THIRD} 익절 검토", label, ticker,
+            verb = "익절" if pnl > 0 else "정리"
+            self._emit("EXIT_THIRD", f"🟡 {EXIT_PORTION_THIRD} {verb} 검토", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"보유 {qty:g}주 → {part:g}주 정리, {qty - part:g}주 유지\n"
                              f"흐려진 근거: {self._ambiguous_reason(pos_now, ctx)}\n"
@@ -825,7 +880,7 @@ class SignalEngine:
                     # 거래량이 줄어도 기준선 위면 눌림목일 수 있다. 청산 알림은
                     # 안 나가지만 상태는 알려준다.
                     peak = snap["peak"]
-                    faded = snap["rvol"] / peak if peak >= FADE_MIN_PEAK and peak > 0 else None
+                    faded = snap["rvol_recent"] / peak if peak >= FADE_MIN_PEAK and peak > 0 else None
                     tail = ("거래량 줄었으나 기준선 위 — 눌림목 가능"
                             if faded is not None and faded <= FADE_WEAK_RATIO
                             else "기준선 위 유지")

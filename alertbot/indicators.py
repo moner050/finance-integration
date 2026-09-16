@@ -42,6 +42,12 @@ def _minutes_from_open(hhmm: str, market: str) -> int:
         return -1
 
 
+def bar_minutes_from_open(candle: dict, market: str) -> int:
+    """이 봉이 정규장 개장 후 몇 분째인지. 개장 전이면 음수, 시각을 못 읽으면 -1."""
+    b = _bucket(candle, market)
+    return _minutes_from_open(b[1], market) if b else -1
+
+
 def is_regular_bar(candle: dict, market: str) -> bool:
     """이 봉이 정규장 봉인지. 프리마켓·시간외(NXT 포함) 봉이면 False."""
     b = _bucket(candle, market)

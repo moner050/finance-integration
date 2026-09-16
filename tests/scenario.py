@@ -76,12 +76,22 @@ STEPS = [
     (100.8, {}),                                   # 돌파 → 🔵 매수하세요
     (100.85, {}),                                  # 아직 미진입 → 🔵 매수하세요 (조건 유지)
     (100.9, {"AAA": {"qty": 10.0, "avg": 100.8}}), # 보유 전환. 유예 중이라 알림 없음
-    (100.2, {"AAA": {"qty": 10.0, "avg": 100.8}}), # 신호봉 저점 100.3 이탈 → 🔴 매도하세요
+    (100.2, {"AAA": {"qty": 10.0, "avg": 100.8}}), # 10:02 봉 종가 100.2 가 신호봉 저점 100.3 이탈 → 🔴 매도하세요
     (100.2, {}),                                   # 청산됨 → ✅ 손절 완료
 ]
+# 매도·취소 판정은 완성봉 종가라 4단계 전에 하락 봉이 하나 필요하다. run_steps 가 해당 단계 직전에 붙인다.
+STEP_BARS = {3: bar(datetime(2026, 3, 25, 10, 2, tzinfo=TZ["KR"]), 100.2, 1000, high=100.75, low=100.1)}
+
+
+def run_steps(engine, indexes=None, symbol="AAA"):
+    """STEPS 를 순서대로 evaluate 한다. indexes 를 주면 그 단계만."""
+    for i in (range(len(STEPS)) if indexes is None else indexes):
+        if i in STEP_BARS:
+            engine.client.candles = engine.client.candles + [STEP_BARS[i]]
+        price, holdings = STEPS[i]
+        engine.evaluate(symbol, {symbol: price}, holdings)
 
 
 def drive(engine, notifier) -> list:
-    for price, holdings in STEPS:
-        engine.evaluate("AAA", {"AAA": price}, holdings)
+    run_steps(engine)
     return notifier.sent

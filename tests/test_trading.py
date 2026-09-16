@@ -194,8 +194,7 @@ def test_engine_hooks_pass_signals_and_fill_prices(monkeypatch, tmp_path):
     assert [s.kind for s in rec.got] == ["ORDER_SENT"]
     eng._reconcile_orders()
     assert rec.got[-1].kind == "ORDER_FILLED"
-    for price, holdings in sc.STEPS[2:4]:                          # 보유 → 매도 신호
-        eng.evaluate("AAA", {"AAA": price}, holdings)
+    sc.run_steps(eng, [2, 3])                                      # 보유 → 매도 신호
     assert rec.got[-1].kind == "ORDER_SENT" and rec.got[-1].body.startswith("[DRY] SELL")
     eng._reconcile_orders()                                        # 체결가가 청산 메시지에 반영된다
     assert eng.last_seen["AAA"]["actual"] is True and eng.last_seen["AAA"]["price"] == 100.2

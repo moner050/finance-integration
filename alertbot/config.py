@@ -103,15 +103,17 @@ ENABLE_EXIT_SIGNAL = True      # 거래량 소진 기반 익절 알림. 끄려�
 SEED_WATCHLIST = {
     # 반도체: 신호는 1배 ETF(SOXX)에서 낸다. 3배 상품은 1분봉이 너무 튀어
     # 지표가 지저분하다. SOXX 에서 매수 신호가 뜨면 사람이 SOXL 을 산다.
+    # 페어: SOXS(인버스)를 들고 있으면 SOXX 매수 신호를 내지 않는다. 페어 검사는 매수 신호에서만 돌므로
+    # 매수 신호가 없는 hold_only 상품(SOXL)에 걸어 두면 아무 일도 안 한다.
     "SOXX":   {"market": "US", "leaders": ["NVDA", "AVGO", "TSM", "MU"],
-               "inverse": False, "pair": None,
+               "inverse": False, "pair": "SOXS",
                "note": "레버리지 진입 시 SOXL"},
     # 3배 상품은 보유 중일 때만 감시한다 (매수 신호는 안 낸다).
     # 손절·익절은 자기 캔들로 판단해야 3배 변동폭이 반영된다.
     "SOXL":   {"market": "US", "leaders": None, "inverse": False,
-               "pair": "SOXS", "hold_only": True, "day_trade": True},
+               "pair": None, "hold_only": True, "day_trade": True},
     "SOXS":   {"market": "US", "leaders": None, "inverse": True,
-               "pair": "SOXL", "hold_only": True, "day_trade": True},
+               "pair": "SOXX", "hold_only": True, "day_trade": True},
     "KORU":   {"market": "US", "leaders": ["EWY"],
                "inverse": False, "pair": None, "day_trade": True},
     "BITX":   {"market": "US", "leaders": ["IBIT"],
@@ -149,7 +151,10 @@ STOP_LOSS_PCT = -5.0           # 고정 손절 한도
 FADE_STRONG_RATIO = 0.4        # 세션 정점 대비 이 아래면 연료 소진 — 익절 신호
 FADE_WEAK_RATIO = 0.6          # 이 아래면 둔화 시작 — 일부 익절 검토
 FADE_MIN_PEAK = 2.5            # 정점이 이 배수는 넘어야 '터졌다'고 본다
-OPEN_EXCLUDE_MIN = 10          # 개장 후 이 분 동안의 봉은 정점 계산에서 제외
+OPEN_EXCLUDE_MIN = 10          # 개장 후 이 분 동안의 봉은 정점 계산에서 제외하고 매수 신호도 내지 않는다 (VWAP 이 아직 봉 한두 개)
+FADE_BARS = 3                  # 거래량 소진 판정에 쓰는 최근 완성봉 수. 1분봉 하나는 조용한 1분에 '전량 정리' 를 만든다
+TRAIL_MIN_PROFIT_PCT = 1.0     # 이 수익률 이상이면 매도선을 기준봉 저점과 밴드 하단 중 높은 쪽으로 (수익 반납 축소)
+ENTRY_SKIP_BEAR_EMA = True     # EMA 역배열(9<20<50)에서는 매수 신호를 내지 않는다. 추적 7건 중 역배열·혼조 진입이 모두 음수 — 표본이 쌓이면 재검토
 
 # 신호 강도에 따른 익절 비중 제안.
 # "애매하다"고만 하면 판단이 그대로 남지만, 비중을 제시하면 행동이 가능해진다.
