@@ -10,17 +10,18 @@ live 면 .env ALERT_BINANCE_API_KEY/SECRET 로 실제 주문을 낸다 — 기�
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 from alertbot import db
 from alertbot.binance_crash import CrashWorker, fetch_klines
-from alertbot.binance_follow import BAR_HOURS, FollowWorker, stop_text
+from alertbot.binance_follow import FollowWorker
 from alertbot.binance_broker import BinanceFutures, BrokerError
+from alertbot.binance_summary import summary_signal
 from alertbot.binance_trade import Trader
 from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SYMBOLS, BINANCE_TRADE_CAPITAL,
-                             BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TRADE_EXCHANGE_LEV, BINANCE_TRADE_LEVERAGE,
-                             BINANCE_TRADE_MODE, CRASH_ATR_MULT,
-                             CRASH_CLOSE_POS_MIN, CRASH_H4_KLINES, CRASH_HOLD_HOURS, CRASH_LOOKBACK, CRASH_RSI_MAX, CRASH_STOP_PCT,
-                             FOLLOW_KLINES, FOLLOW_SPECS, setup_logging)
+                             BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TRADE_EXCHANGE_LEV,
+                             BINANCE_TRADE_MODE, CRASH_H4_KLINES, FOLLOW_KLINES, FOLLOW_SPECS, SUMMARY_INTERVAL_MIN,
+                             setup_logging)
 from alertbot.models import Signal
 from alertbot.notify import build_channels
 from alertbot.notify.dispatcher import Dispatcher
@@ -44,12 +45,10 @@ def check_symbols():
         log.info("%s %s 완성봉 %d개 확보 (마지막 종가 %s)", symbol, interval, len(bars), bars[-1]["close"] if bars else "-")
 
 
-def describe(spec: dict) -> str:
-    long = spec["side"] == "long"
-    return (f"{spec['name']} {spec['label']} {', '.join(spec['symbols'])}: {spec['lookback']}봉 {'저점' if long else '고점'} 대비 "
-            f"≥ 기준ATR×{spec['atr_mult']:g} · RSI14 {'≥' if long else '≤'} {spec['rsi']:g} · "
-            f"{'눌림 뒤 EMA9 재돌파' if long else '반등 뒤 EMA9 재이탈'} · 일봉 EMA200 {'위' if spec['regime'] == 'bull' else '아래'} · "
-            f"손절 참고 {stop_text(spec)} · 보유 {spec['hold_bars'] * BAR_HOURS[spec['interval']] / 24:g}일")
+def watch_list() -> list:
+    """시작 알림용 — 전략별 감시 심볼. 판정 조건은 코드·README 에 있으니 알림에는 싣지 않는다."""
+    return [f"급락 매수 5분봉: {', '.join(BINANCE_SYMBOLS)}"] + \
+           [f"{spec['name']} {spec['label']}: {', '.join(spec['symbols'])}" for spec in FOLLOW_SPECS]
 
 
 def live_broker():
@@ -68,7 +67,9 @@ def live_broker():
     return broker
 
 
-def run(workers: list, trader=None):
+def run(workers: list, trader=None, notifier=None):
+    # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 시작한다 — 30분을 기다리면 '돌고 있는 건지' 확인이 늦다
+    last_summary = datetime.now(timezone.utc) - timedelta(minutes=SUMMARY_INTERVAL_MIN)
     while True:
         for w in workers:
             try:
@@ -80,6 +81,15 @@ def run(workers: list, trader=None):
                 trader.poll()           # 열린 가상 포지션의 손절·보유 한도·펀딩
             except Exception as e:
                 log.warning("자동매매 감시 오류: %s", e)
+        now = datetime.now(timezone.utc)
+        if notifier is not None and now - last_summary >= timedelta(minutes=SUMMARY_INTERVAL_MIN):
+            last_summary = now
+            try:
+                signal = summary_signal(workers, trader, now)
+                if signal is not None:
+                    notifier.send(signal)
+            except Exception as e:
+                log.warning("시황 요약 오류: %s", e)
         time.sleep(BINANCE_POLL_SEC)
 
 
@@ -88,23 +98,23 @@ def main():
     store = db.connect()            # 신호 이력은 토스 엔진과 같은 alert_signal_log 에 남긴다
     check_symbols()
     notifier = Dispatcher(build_channels(), record=lambda s, r: db.log_signal(store, s, r))
-    body = [f"급락 매수 5분봉 {', '.join(BINANCE_SYMBOLS)}: 하락 ≥ 기준ATR×{CRASH_ATR_MULT:g} (직전 {CRASH_LOOKBACK}봉 고점 대비) "
-            f"· RSI14 ≤ {CRASH_RSI_MAX:g} · 종가위치 ≥ {CRASH_CLOSE_POS_MIN:g} · 손절 참고 종가 -{CRASH_STOP_PCT:g}% · "
-            f"보유 {CRASH_HOLD_HOURS}시간 · 4시간봉 EMA9 ≤ EMA21(하락 배열)만"] + [describe(s) for s in FOLLOW_SPECS]
+    body = watch_list()
     trader = None
-    if BINANCE_TRADE_MODE != "off":
+    if BINANCE_TRADE_MODE == "off":
+        body.append("자동매매: off")
+    else:
         broker = live_broker() if BINANCE_TRADE_MODE == "live" else None
         trader = Trader(store, notifier, BINANCE_TRADE_MODE, broker)
-        levs = " · ".join(f"{k} {v:g}배" for k, v in BINANCE_TRADE_LEVERAGE.items())
         if broker is None:
-            body.append(f"자동매매 dry (가상 체결): 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 유효 배율 {levs}")
+            body.append(f"자동매매: dry (가상 체결, 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT)")
         else:
             on = db.get_settings(store)["binance_trade_enabled"] == "1"
-            body.append(f"자동매매 LIVE (실제 주문): 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 유효 배율 {levs} · "
-                        f"심볼 격리 {BINANCE_TRADE_EXCHANGE_LEV}배 헤지 모드 · 가용 {broker.balance():,.0f} USDT · 킬 스위치 {'ON' if on else 'OFF'}")
+            body.append(f"자동매매: LIVE (전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 격리 {BINANCE_TRADE_EXCHANGE_LEV}배 · "
+                        f"가용 {broker.balance():,.0f} USDT · 킬 스위치 {'ON' if on else 'OFF'})")
+    body.append(f"시황 요약 {SUMMARY_INTERVAL_MIN}분마다")
     notifier.send(Signal("SYSTEM", "⚪ 시스템", "Binance 감시 시작", "\n".join(body)))
     run([CrashWorker(BINANCE_SYMBOLS, notifier, trader=trader)]
-        + [FollowWorker(spec, notifier, trader=trader) for spec in FOLLOW_SPECS], trader)
+        + [FollowWorker(spec, notifier, trader=trader) for spec in FOLLOW_SPECS], trader, notifier)
 
 
 if __name__ == "__main__":

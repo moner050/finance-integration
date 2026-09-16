@@ -150,6 +150,24 @@ class Trader:
             return f"오늘 실현손익 {loss:+,.0f} USDT 가 한도 -{limit:,.0f} 아래"
         return None
 
+    def open_lines(self) -> list:
+        """시황 요약용 — 이 모드의 열린 포지션마다 한 줄 (마크 가격 대비 손익, 보유 한도)."""
+        out = []
+        for p in db.binance_positions(self.store, status="open"):
+            if p["mode"] != self.mode:
+                continue
+            sgn = 1 if p["side"] == "long" else -1
+            try:
+                mark = self.fetch_premium(p["symbol"])["mark"]
+                pnl = f"마크 {fmt_price(mark)} ({sgn * (mark / p['entry_price'] - 1) * 100:+.2f}%)"
+            except Exception as e:                                      # 시세 실패면 손익 없이 표기
+                pnl = f"마크 조회 실패 ({e})"
+            deadline = datetime.fromisoformat(p["deadline"]).astimezone(KST)
+            out.append(f"📥 {self.tag.strip()} {p['symbol']} {p['strategy']} {'롱' if p['side'] == 'long' else '숏'} "
+                       f"{p['qty']:g} @ {fmt_price(p['entry_price'])} · {pnl} · 손절 {fmt_price(p['stop'])} · "
+                       f"한도 {deadline:%m-%d %H:%M} KST")
+        return out
+
     # -- 감시 -------------------------------------------------------------------
     def poll(self, now: datetime = None) -> list:
         """열린 포지션마다 펀딩 정산 → (dry) 마크 손절·보유 한도 / (live) 손절 체결·수동 종료·보유 한도. 종료 행 목록."""

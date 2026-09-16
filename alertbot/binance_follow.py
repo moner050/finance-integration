@@ -184,6 +184,45 @@ class FollowWorker:
         self.fetch_fund = fetch_fund
         self.last_bar = {}          # symbol -> 마지막으로 판정한 완성봉 open_time
         self.last_alert = {}        # (symbol, stage) -> 마지막 알림 시각
+        self.status = {}            # symbol -> 마지막 완성봉의 급변 지표·국면 (시황 요약용)
+
+    def _status(self, bars: list, reg_bars: list):
+        base = base_atr_pct(bars, self.spec["base_bars"])
+        m = move_metrics(bars, base, self.spec) if base > 0 else None
+        if m is None:
+            return None
+        reg = regime(reg_bars)
+        return {**m, "close": bars[-1]["close"], "bull": reg[0] if reg else None}
+
+    def status_lines(self, now: datetime = None) -> list:
+        """시황 요약 한 줄씩. 급변 조건이 어디까지 찼는지, 관찰(눌림·반등 대기) 중인지, 국면이 맞는지."""
+        now = now or datetime.now(timezone.utc)
+        spec, long, out = self.spec, self.spec["side"] == "long", []
+        head = f"{spec['name']} {spec['label']}"
+        for symbol in spec["symbols"]:
+            m = self.status.get(symbol)
+            if not m:
+                out.append(f"{head} {symbol}  데이터 부족")
+                continue
+            reg = "국면 불명" if m["bull"] is None else ("강세" if m["bull"] else "약세")
+            want = spec.get("regime")
+            if want and m["bull"] is not None and m["bull"] != (want == "bull"):
+                tail = f"국면 불일치 — 보류 (필요: {'강세' if want == 'bull' else '약세'})"
+            else:
+                watched = self.last_alert.get((symbol, "watch"))
+                window = timedelta(hours=BAR_HOURS[spec["interval"]] * spec["reentry_bars"])
+                if watched and now - watched < window:
+                    tail = f"관찰 중 — {'눌림 뒤 EMA9 재돌파' if long else '반등 뒤 EMA9 재이탈'} 대기"
+                elif m["hit"]:
+                    tail = f"{'급등' if long else '급락'} 성립 — 다음 봉부터 {'눌림' if long else '반등'} 확인"
+                else:
+                    rsi_ok = m["rsi"] >= spec["rsi"] if long else m["rsi"] <= spec["rsi"]
+                    miss = [n for n, ok in (("변동폭", m["mult"] >= spec["atr_mult"]), ("RSI", rsi_ok)) if not ok]
+                    tail = f"{'급등' if long else '급락'} 조건 {2 - len(miss)}/2 (부족: {', '.join(miss)})"
+            out.append(f"{head} {symbol}  {fmt_price(m['close'])} · {spec['lookback']}봉 {'저점' if long else '고점'} 대비 "
+                       f"{'+' if long else '-'}{m['move']:.2f}% (기준ATR {m['mult']:.1f}/{spec['atr_mult']:g}배) · "
+                       f"RSI {m['rsi']:.1f} · {reg} | {tail}")
+        return out
 
     def poll_once(self, now: datetime = None) -> list:
         now = now or datetime.now(timezone.utc)
@@ -194,6 +233,7 @@ class FollowWorker:
                 continue
             self.last_bar[symbol] = bars[-1]["open_time"]
             reg_bars = bars if spec["interval"] == "1d" else self.fetch_bars(symbol, "1d", FOLLOW_KLINES)
+            self.status[symbol] = self._status(bars, reg_bars)
             result = evaluate(bars, spec, reg_bars)
             if result is None:
                 continue

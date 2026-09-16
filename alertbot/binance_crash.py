@@ -90,8 +90,8 @@ def base_atr_pct(bars: list) -> float:
     return median(series)
 
 
-def evaluate(bars: list, btc_bars: list = None, funding=None):
-    """마지막 완성봉을 신호봉으로 판정. 조건을 만족하면 메시지에 쓸 값들을 dict 로, 아니면 None."""
+def crash_metrics(bars: list):
+    """마지막 완성봉의 급락 지표 — 조건 충족 여부와 무관하게 낸다 (판정과 시황 요약이 같은 값을 쓴다). 표본 부족이면 None."""
     if len(bars) < CRASH_LOOKBACK + 2:
         return None
     base = base_atr_pct(bars)
@@ -100,12 +100,21 @@ def evaluate(bars: list, btc_bars: list = None, funding=None):
     sig = bars[-1]
     ref_high = max(b["high"] for b in bars[-1 - CRASH_LOOKBACK:-1])
     drop = (sig["close"] / ref_high - 1) * 100
-    mult = -drop / base
     _, rsi = compute_rsi([{"closePrice": b["close"]} for b in bars])
     rng = sig["high"] - sig["low"]
-    close_pos = (sig["close"] - sig["low"]) / rng if rng > 0 else 1.0
+    return {"close": sig["close"], "ref_high": ref_high, "drop": drop, "mult": -drop / base, "base": base, "rsi": rsi,
+            "close_pos": (sig["close"] - sig["low"]) / rng if rng > 0 else 1.0}
+
+
+def evaluate(bars: list, btc_bars: list = None, funding=None):
+    """마지막 완성봉을 신호봉으로 판정. 조건을 만족하면 메시지에 쓸 값들을 dict 로, 아니면 None."""
+    m = crash_metrics(bars)
+    if m is None:
+        return None
+    sig, ref_high, drop, mult, base, rsi, close_pos = bars[-1], m["ref_high"], m["drop"], m["mult"], m["base"], m["rsi"], m["close_pos"]
     if mult < CRASH_ATR_MULT or rsi > CRASH_RSI_MAX or close_pos < CRASH_CLOSE_POS_MIN:
         return None
+    rng = sig["high"] - sig["low"]
     vol_med = median(b["volume"] for b in bars[-1 - CRASH_RVOL_WINDOW:-1])
     out = {
         "open_time": sig["open_time"], "close": sig["close"], "low": sig["low"], "ref_high": ref_high,
@@ -175,6 +184,27 @@ class CrashWorker:
         self.fetch_fund = fetch_fund
         self.last_bar = {}          # symbol -> 마지막으로 판정한 완성봉 open_time
         self.last_alert = {}        # symbol -> 마지막 알림 시각
+        self.status = {}            # symbol -> 마지막 완성봉의 급락 지표 (시황 요약용)
+
+    def status_lines(self, now: datetime = None) -> list:
+        """시황 요약 한 줄씩. 조건 3개(낙폭·RSI·반전봉) 중 몇 개가 찼는지 보여준다 — 행동 신호는 개별 알림뿐이다."""
+        now = now or datetime.now(timezone.utc)
+        out = []
+        for symbol in self.symbols:
+            m = self.status.get(symbol)
+            if not m:
+                out.append(f"급락 매수 5분봉 {symbol}  데이터 부족")
+                continue
+            checks = [("낙폭", m["mult"] >= CRASH_ATR_MULT), ("RSI", m["rsi"] <= CRASH_RSI_MAX),
+                      ("반전봉", m["close_pos"] >= CRASH_CLOSE_POS_MIN)]
+            miss = ", ".join(n for n, ok in checks if not ok)
+            tail = f"{sum(ok for _, ok in checks)}/3" + (f" (부족: {miss})" if miss else " — 조건 충족")
+            last = self.last_alert.get(symbol)
+            if last and now - last < timedelta(minutes=CRASH_COOLDOWN_MIN):
+                tail += " · 알림 쿨다운 중"
+            out.append(f"급락 매수 5분봉 {symbol}  {fmt_price(m['close'])} · 4시간 고점 대비 {m['drop']:+.2f}% "
+                       f"(기준ATR {m['mult']:.1f}/{CRASH_ATR_MULT:g}배) · RSI {m['rsi']:.1f} | {tail}")
+        return out
 
     def poll_once(self, now: datetime = None) -> list:
         """한 사이클. 보낸 Signal 목록을 돌려준다 (테스트용)."""
@@ -186,6 +216,7 @@ class CrashWorker:
             if not bars or bars[-1]["open_time"] == self.last_bar.get(symbol):
                 continue
             self.last_bar[symbol] = bars[-1]["open_time"]
+            self.status[symbol] = crash_metrics(bars)
             result = evaluate(bars, None if symbol == "BTCUSDT" else btc)
             if result is None:
                 continue
