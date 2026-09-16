@@ -6,6 +6,7 @@ FastAPI + Jinja2 + HTMX. 로컬 전용(인증 없음)이라 기본 127.0.0.1 에
 
 import html
 import logging
+import re
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -212,7 +213,10 @@ def parse_summary(body: str) -> dict:
         if not detail:                                  # 형식 밖의 줄은 그대로 보여 준다
             mark, name, detail = "", head, ""
         cond = detail.rsplit(" | ", 1)[1] if " | " in detail else detail
-        items[name] = {"mark": mark, "detail": detail, "cond": cond}
+        # 칸에는 핵심만: '2/3' 같은 충족 개수, 아니면 조건 문구의 앞부분. 부족 항목·수치는 마우스 오버(detail)로 본다.
+        frac = re.search(r"\d/\d", cond)
+        short = frac.group(0) if frac else cond.split(" — ")[0].split(" (")[0]
+        items[name] = {"mark": mark, "detail": detail, "cond": cond, "short": short}
     return {"items": items, "mine": mine}
 
 

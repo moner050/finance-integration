@@ -23,7 +23,7 @@
    {% for n in [8, 16, 32, 64, 96] %}<option value="{{ n }}" {{ 'selected' if limit == n else '' }}>{{ n }}회 (약 {{ n // 2 }}시간)</option>{% endfor %}
   </select>
  </label>
- <span class="muted">30분마다 저장된 시황을 종목 × 시각으로 펼친다. 칸에 마우스를 올리면 그 시각의 상세가 보인다. 왼쪽이 과거, 오른쪽이 최신.</span>
+ <span class="muted">30분마다 저장된 시황을 종목 × 시각으로 펼친다. 칸은 매수 조건 충족 개수(예: 2/3), 마우스를 올리면 부족 항목과 수치. 왼쪽이 과거, 오른쪽이 최신.</span>
 </form>
 
 {% macro series_table(s, title) %}
@@ -39,8 +39,9 @@
  <td>{{ sym }}</td>
  {% for c in s.cells[sym] %}
  {% if c %}
- {% set cls = 'm-buy' if c.mark == '🔵' else ('m-up' if c.mark in ['▲', '🟢'] else ('m-down' if c.mark in ['▼', '🔴'] else ('m-pre' if c.mark == '🌙' else 'm-flat'))) %}
- <td class="c {{ cls }}" title="{{ c.detail }}">{{ c.mark }} {{ c.cond }}</td>
+ {% set hot = c.mark == '🔵' or (not c.mark and ('성립' in c.cond or '관찰 중' in c.cond or '조건 충족' in c.cond)) %}
+ {% set cls = 'm-buy' if hot else ('m-up' if c.mark in ['▲', '🟢'] else ('m-down' if c.mark in ['▼', '🔴'] else ('m-pre' if c.mark == '🌙' else 'm-flat'))) %}
+ <td class="c {{ cls }}" title="{{ c.detail }}">{{ c.mark }} {{ c.short }}</td>
  {% else %}
  <td class="none">·</td>
  {% endif %}

@@ -49,8 +49,10 @@ def test_summary_page_builds_time_series(client):
                                  "급락 매수 5분봉 ETCUSDT  7.162 · 4시간 고점 대비 -1.34% (기준ATR 5.3/10배) · RSI 41.4 | 1/3 (부족: 낙폭, RSI)\n\n※ 참고용"),
                    {"telegram": "ok"})
     parsed = A.parse_summary(body2)
-    assert parsed["items"]["삼성전자"] == {"mark": "🔵", "detail": "매수 알림 발생 — 아직 미진입", "cond": "매수 알림 발생 — 아직 미진입"}
-    assert parsed["items"]["SK하이닉스"]["cond"] == "조건 근접 (돌파 알림 대기)" and parsed["mine"] == ["🔴 속쓰  보유 380주 -31.38% | 청산 대기"]
+    assert parsed["items"]["삼성전자"] == {"mark": "🔵", "detail": "매수 알림 발생 — 아직 미진입",
+                                        "cond": "매수 알림 발생 — 아직 미진입", "short": "매수 알림 발생"}
+    assert parsed["items"]["SK하이닉스"]["short"] == "조건 근접" and parsed["mine"] == ["🔴 속쓰  보유 380주 -31.38% | 청산 대기"]
+    assert A.parse_summary(body1)["items"]["SK하이닉스"]["short"] == "0/3"
     r = c.get("/summary")
     assert r.status_code == 200
     # 종목 행은 최신 시황 순서(삼성전자, SK하이닉스), 열은 두 시각. 코인 표엔 ETCUSDT 행과 조건 칸.
