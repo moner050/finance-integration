@@ -195,7 +195,7 @@ STOP_RECOVER_PCT = 2.0
 ENTRY_MIN_PEAK_RATIO = 0.6
 CLOSE_WARN_MIN = 30
 STATS_REPORT_MIN = 60
-SUMMARY_INTERVAL_MIN = 10      # 전 종목 시황 요약 발송 주기 (주식·코인 공통)
+SUMMARY_INTERVAL_MIN = 30      # 전 종목 시황 요약 발송 주기 (주식·코인 공통)
 
 # 불타기(추세 지속 확인 후 추가 매수) 알림
 ENABLE_ADD_ON = True

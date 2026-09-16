@@ -41,7 +41,7 @@
 |---|---|---|
 | action | 🔵 매수 · 🔴 손절/매도 · 🟢 전량 익절 · 🔵 추가매수 · 🟠 마감 정리 · 📤✅🚫⛔ 주문 관련 · 🔵 급락 매수 후보 · 🔵 눌림 재돌파 진입 후보 · 🔴 반등 실패 숏 후보 · 📥📤 가상 포지션 진입/종료(Binance) | 15분 (주문 관련은 없음, Binance 급락 매수 60분 · 추종은 보유 한도 7일/20일) |
 | review | 🟡 절반/1/3 익절 검토 · ⚪ 매수 취소 · 🎉✅ 청산 완료 · 📈 급등 확인 관찰 · 📉 급락 확인 관찰(Binance) | 45분 / 15분 (Binance 추종은 7일/20일) |
-| info | 📊 시황(10분) · 🔔🔕 장 시작/마감 · 📈 오늘 성적 · ⚪ 시스템 | 없음 |
+| info | 📊 시황(30분) · 🔔🔕 장 시작/마감 · 📈 오늘 성적 · ⚪ 시스템 | 없음 |
 
 쿨다운 키는 (신호 종류, 종목)이다. `TELEGRAM_MIN_SEVERITY` 로 받을 최소 등급을 정한다.
 
@@ -119,7 +119,7 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `ALERT_COOLDOWN_MIN` / `WEAK_COOLDOWN_MIN` | 15 / 45 | 강한/약한 알림 재발송 간격 |
 | `REENTRY_BLOCK_MIN` / `EXIT_GRACE_MIN` | 60 / 20 | 매도 알림 뒤 매수 차단 / 매수 뒤 익절 알림 유예 |
 | `ENTRY_MIN_PEAK_RATIO` | 0.6 | 매수 신호 RVOL 이 그날 정점의 이 비율 이상이어야 함 |
-| `CLOSE_WARN_MIN` / `SUMMARY_INTERVAL_MIN` | 30 / 10 | 마감 전 정리 알림 / 시황 요약 주기 |
+| `CLOSE_WARN_MIN` / `SUMMARY_INTERVAL_MIN` | 30 / 30 | 마감 전 정리 알림 / 시황 요약 주기 |
 | `ENABLE_ADD_ON` `ADDON_MIN_PROFIT_PCT` `ADDON_MAX_COUNT` | True / 2.0 / 1 | 불타기 알림 |
 | `PROFILE_PAGES` / `MIN_PROFILE_SESSIONS` | 16 / 3 | 거래량 프로파일 이력(200봉×16) / 시각당 최소 표본 |
 | `WATCH_HOLDINGS` | True | 보유 조회. False 면 매수 알림만 |

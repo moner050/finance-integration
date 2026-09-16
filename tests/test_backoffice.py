@@ -37,6 +37,29 @@ def test_status_with_engine(client):
     assert 'hx-get="/partials/status"' in r.text
 
 
+def test_summary_page_builds_time_series(client):
+    c, store = client
+    assert "저장된 시황이 없다" in c.get("/summary").text
+    body1 = "▲ 삼성전자  기준선 위 | 2/3 (부족: 거래량)\n▼ SK하이닉스  기준선 아래 | 0/3 (부족: 방향, 거래량, 기준선)\n\n※ 참고용"
+    body2 = ("🔵 삼성전자  매수 알림 발생 — 아직 미진입\n▲ SK하이닉스  기준선 위 | 조건 근접 (돌파 알림 대기)\n\n※ 참고용\n"
+             "\n내 보유\n🔴 속쓰  보유 380주 -31.38% | 청산 대기")
+    DBM.log_signal(store, Signal("SUMMARY", "📊 시황", "10:00", body1), {"telegram": "ok"})
+    DBM.log_signal(store, Signal("SUMMARY", "📊 시황", "10:30", body2), {"telegram": "ok"})
+    DBM.log_signal(store, Signal("SUMMARY", "📊 코인 시황", "10:30",
+                                 "급락 매수 5분봉 ETCUSDT  7.162 · 4시간 고점 대비 -1.34% (기준ATR 5.3/10배) · RSI 41.4 | 1/3 (부족: 낙폭, RSI)\n\n※ 참고용"),
+                   {"telegram": "ok"})
+    parsed = A.parse_summary(body2)
+    assert parsed["items"]["삼성전자"] == {"mark": "🔵", "detail": "매수 알림 발생 — 아직 미진입", "cond": "매수 알림 발생 — 아직 미진입"}
+    assert parsed["items"]["SK하이닉스"]["cond"] == "조건 근접 (돌파 알림 대기)" and parsed["mine"] == ["🔴 속쓰  보유 380주 -31.38% | 청산 대기"]
+    r = c.get("/summary")
+    assert r.status_code == 200
+    # 종목 행은 최신 시황 순서(삼성전자, SK하이닉스), 열은 두 시각. 코인 표엔 ETCUSDT 행과 조건 칸.
+    assert r.text.index("<td>삼성전자</td>") < r.text.index("<td>SK하이닉스</td>")
+    assert 'class="c m-buy"' in r.text and 'class="c m-down"' in r.text and "0/3 (부족: 방향, 거래량, 기준선)" in r.text
+    assert "<td>급락 매수 5분봉 ETCUSDT</td>" in r.text and "1/3 (부족: 낙폭, RSI)" in r.text
+    assert "보유 380주" in r.text and "내 보유</h4>" not in r.text.split("코인 (Binance 워커)")[1]   # 보유 현황은 주식 쪽 카드에만
+
+
 def test_watchlist_crud(client):
     c, store = client
     r = c.get("/watchlist")

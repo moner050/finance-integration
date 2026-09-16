@@ -407,7 +407,7 @@ def log_signal(db: DB, signal, results: dict):
          json.dumps(results, ensure_ascii=False)))
 
 
-def recent_signals(db: DB, limit: int = 200, symbol: str = None, severity: str = None) -> list:
+def recent_signals(db: DB, limit: int = 200, symbol: str = None, severity: str = None, kind: str = None) -> list:
     sql, params, conds = "SELECT * FROM alert_signal_log", [], []
     if symbol:
         conds.append("symbol = %s")
@@ -415,6 +415,9 @@ def recent_signals(db: DB, limit: int = 200, symbol: str = None, severity: str =
     if severity:
         conds.append("severity = %s")
         params.append(severity)
+    if kind:
+        conds.append("kind = %s")
+        params.append(kind)
     if conds:
         sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY id DESC LIMIT %s"

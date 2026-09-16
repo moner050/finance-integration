@@ -186,6 +186,68 @@ def signals_page(request: Request, symbol: str = "", severity: str = "", limit: 
     return render(request, "signals.html", rows=rows, symbol=symbol, severity=severity)
 
 
+# -- 시황 시계열 -----------------------------------------------------------------
+
+def parse_summary(body: str) -> dict:
+    """시황 본문(30분마다 저장되는 SUMMARY 신호) → 종목별 상태.
+
+    줄 형식은 엔진·Binance 워커가 만든 그대로다: '<표시> <이름>  <상세> | <조건>'. 이름과 상세는 공백 두 개로 나뉜다.
+    '내 보유'/'내 포지션' 아래 줄은 계좌 현황이라 따로 모은다. 각주(※)와 빈 줄은 버린다.
+    """
+    items, mine, section = {}, [], "market"
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("※"):
+            continue
+        if line in ("내 보유", "내 포지션"):
+            section = "mine"
+            continue
+        if section == "mine":
+            mine.append(line)
+            continue
+        head, _, detail = line.partition("  ")
+        mark, _, name = head.partition(" ")
+        if not mark or any(ch.isalnum() for ch in mark):      # 기호(▲▼－🔵🌙…)가 아니면 이름의 일부다 (코인: '급락 매수 5분봉 ETCUSDT')
+            mark, name = "", head
+        if not detail:                                  # 형식 밖의 줄은 그대로 보여 준다
+            mark, name, detail = "", head, ""
+        cond = detail.rsplit(" | ", 1)[1] if " | " in detail else detail
+        items[name] = {"mark": mark, "detail": detail, "cond": cond}
+    return {"items": items, "mine": mine}
+
+
+def summary_series(rows: list) -> dict:
+    """SUMMARY 행(최신순) → {"times": [...], "symbols": [...], "cells": {symbol: [cell|None, ...]}, "latest": row}.
+
+    열은 시각(오래된 것부터), 행은 종목. 종목 순서는 가장 최근 시황에 나온 순서, 그 뒤 나머지.
+    """
+    if not rows:
+        return {"times": [], "symbols": [], "cells": {}, "latest": None, "mine": []}
+    parsed = [(r, parse_summary(r["body"])) for r in reversed(rows)]        # 오래된 것부터
+    order = list(parsed[-1][1]["items"])
+    for _, p in parsed:
+        order += [s for s in p["items"] if s not in order]
+    times = []
+    for r, _ in parsed:
+        t = to_local(datetime.fromisoformat(str(r["sent_at"])), "KR")
+        times.append({"clock": t.strftime("%H:%M"), "day": t.strftime("%m-%d")})
+    cells = {s: [p["items"].get(s) for _, p in parsed] for s in order}
+    return {"times": times, "symbols": order, "cells": cells, "latest": parsed[-1][0], "mine": parsed[-1][1]["mine"]}
+
+
+def summary_context(limit: int) -> dict:
+    with get_db() as d:
+        rows = db.recent_signals(d, limit=limit * 2, kind="SUMMARY")
+    stock = [r for r in rows if r["title"] == "📊 시황"][:limit]
+    coin = [r for r in rows if r["title"] == "📊 코인 시황"][:limit]
+    return {"stock": summary_series(stock), "coin": summary_series(coin), "limit": limit}
+
+
+@app.get("/summary", response_class=HTMLResponse)
+def summary_page(request: Request, limit: int = 16):
+    return render(request, "summary.html", **summary_context(min(max(limit, 2), 96)))
+
+
 # -- 자동매매 ------------------------------------------------------------------
 
 def trading_context(message: str = None) -> dict:
