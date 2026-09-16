@@ -48,6 +48,16 @@ def test_engine_scenario_matches_original(monkeypatch, tmp_path):
     assert _mask_rsi(sent) == _mask_rsi(GOLDEN)
 
 
+def test_holding_alerts_keep_account_lines_separate(monkeypatch, tmp_path):
+    """보유 중 알림의 손익·평단·수량은 account 로 분리된다 — 공개 채널에는 시장 근거(body)만 간다."""
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    sc.run_steps(eng, range(4))
+    sell = cap.signals[-1]
+    assert sell.kind == "SELL" and "손익" not in sell.body and sell.account == "손익 -0.6%  (평단 100.8 → 현재 100.2)"
+    entry = cap.signals[0]
+    assert entry.kind == "ENTRY" and entry.account is None                # 매수 신호는 시장 근거뿐
+
+
 def test_engine_state_transitions(monkeypatch, tmp_path):
     eng, cap = make_engine(monkeypatch, tmp_path)
     states = []

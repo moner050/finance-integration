@@ -73,6 +73,31 @@ def test_channel_isolation_and_severity_filter():
     assert d.send(sig(symbol="CCC"))["strict"] == "skip"
 
 
+def test_public_channel_gets_market_signals_without_account_lines(monkeypatch):
+    """공개 채널은 PUBLIC_KINDS 만 받고 본문의 계좌 줄(account)을 뺀다. 내 채널은 전부, 계좌 줄까지 받는다."""
+    calls = []
+
+    def fake_post(url, json=None, timeout=None, **kw):
+        calls.append((url, json["text"]))
+        return FakeResp(body={"ok": True})
+    monkeypatch.setattr(T.requests, "post", fake_post)
+    mine, pub = T.TelegramChannel("MINE", ["1"]), T.TelegramChannel("PUB", ["9"], public=True)
+    assert (mine.name, pub.name) == ("telegram", "telegram_public")
+    d = D.Dispatcher([mine, pub])
+    sell = Signal("SELL", "🔴 매도하세요", "테스트", "종가 100.2가 매수 신호봉 저점 100.3 아래로 내려감", "AAA",
+                  account="손익 -0.6%  (평단 100.8 → 현재 100.2)")
+    assert d.send(sell) == {"telegram": "ok", "telegram_public": "ok"}
+    assert calls[0][0].startswith("https://api.telegram.org/botMINE/") and "손익 -0.6%" in calls[0][1]
+    assert calls[1][0].startswith("https://api.telegram.org/botPUB/") and "손익" not in calls[1][1] and "저점 100.3" in calls[1][1]
+    assert sell.full_body().endswith("손익 -0.6%  (평단 100.8 → 현재 100.2)")
+    # 계좌 정보만 담는 종류는 공개 채널이 받지 않는다
+    for kind, title in (("STOP", "🔴 손절하세요"), ("CLOSED", "✅ 손절 완료"), ("SUMMARY", "📊 시황"),
+                        ("ORDER_SENT", "📤 주문 접수"), ("BN_ENTRY", "📥 진입")):
+        r = d.send(Signal(kind, title, "x", "b", "BBB"))
+        assert r["telegram"] == "ok" and r["telegram_public"] == "skip", kind
+    assert d.send(Signal("CRASH_BUY", "🔵 급락 매수 후보", "ETCUSDT 5분봉", "b", "ETCUSDT"))["telegram_public"] == "ok"
+
+
 def test_record_failure_does_not_break_send():
     def boom(s, r):
         raise RuntimeError("db down")

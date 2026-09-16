@@ -49,13 +49,23 @@ KINDS = {
 }
 
 
+# 공개 채널(TELEGRAM_PUBLIC_*)이 받는 종류 — 시장 데이터만으로 성립하는 매수·매도 신호.
+# 손절 한도(내 평단 기준), 청산 완료, 시황(보유 현황 포함), 주문·포지션 사건, 성적표는 계좌 정보라 보내지 않는다.
+# 본문에서도 계좌 줄(Signal.account)은 공개 채널에 빠진다.
+PUBLIC_KINDS = {
+    "ENTRY", "ENTRY_CANCEL", "SELL", "EXIT_FULL", "EXIT_HALF", "EXIT_THIRD", "EXIT_CANCEL", "ADDON", "CLOSE_WARN",
+    "CRASH_BUY", "SURGE_WATCH", "SURGE_ENTRY", "SURGE_WATCH_1D", "SURGE_ENTRY_1D", "CRASH_WATCH_1D", "CRASH_SHORT_1D",
+}
+
+
 @dataclass
 class Signal:
     kind: str
     title: str              # 알림 제목 (이모지 포함). 예: "🔵 매수하세요"
     label: str              # 종목 표시명, 또는 시장/시각
-    body: str
+    body: str               # 시장 근거 — 공개 채널에도 나간다
     symbol: str = None      # 종목 코드. 쿨다운 키와 이력 조회에 쓴다
+    account: str = None     # 계좌 줄(손익·평단·보유 수량). 내 채널·로그·이력에만 붙는다
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -73,6 +83,10 @@ class Signal:
     def key(self) -> str:
         return f"{self.kind}:{self.symbol or self.label}"
 
-    def text(self) -> str:
-        """텔레그램·로그에 쓰는 원본 형식."""
-        return f"{self.title} | {self.label}\n{self.body}"
+    def full_body(self) -> str:
+        """계좌 줄까지 붙인 본문 (내 채널·이력용)."""
+        return f"{self.body}\n{self.account}" if self.account else self.body
+
+    def text(self, public: bool = False) -> str:
+        """텔레그램·로그에 쓰는 원본 형식. public 이면 계좌 줄을 뺀다."""
+        return f"{self.title} | {self.label}\n{self.body if public else self.full_body()}"

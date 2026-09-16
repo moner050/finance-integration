@@ -403,7 +403,7 @@ def log_signal(db: DB, signal, results: dict):
     db.execute(
         "INSERT INTO alert_signal_log (sent_at, kind, severity, symbol, label, title, body, results) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (_now(), signal.kind, signal.severity, signal.symbol, signal.label, signal.title, signal.body,
+        (_now(), signal.kind, signal.severity, signal.symbol, signal.label, signal.title, signal.full_body(),
          json.dumps(results, ensure_ascii=False)))
 
 

@@ -8,22 +8,30 @@ import logging
 
 import requests
 
+from ..models import PUBLIC_KINDS
 from .base import Channel
 
 log = logging.getLogger("scalper")
 
 
 class TelegramChannel(Channel):
+    """내 채널(기본)은 전부 받는다. public 채널은 시장 신호(PUBLIC_KINDS)만, 본문의 계좌 줄을 빼고 받는다."""
     name = "telegram"
 
-    def __init__(self, token: str, chat_ids: list, min_severity: str = "info", timeout: int = 5):
+    def __init__(self, token: str, chat_ids: list, min_severity: str = "info", timeout: int = 5, public: bool = False):
         super().__init__(min_severity)
         self.token = token
         self.chat_ids = list(chat_ids)
         self.timeout = timeout
+        self.public = public
+        if public:
+            self.name = "telegram_public"
+
+    def accepts(self, signal) -> bool:
+        return super().accepts(signal) and (not self.public or signal.kind in PUBLIC_KINDS)
 
     def send(self, signal) -> str:
-        text = signal.text()
+        text = signal.text(public=self.public)
         ok, errors = 0, []
         # 한 명에게 실패해도 나머지에게는 보내야 한다.
         for chat in self.chat_ids:

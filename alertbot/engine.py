@@ -89,14 +89,15 @@ class SignalEngine:
         return list(self.watchlist.keys())
 
     # -- 알림 ---------------------------------------------------------------
-    def _emit(self, kind: str, title: str, label: str, symbol, body: str):
+    def _emit(self, kind: str, title: str, label: str, symbol, body: str, account: str = None):
         """알림 한 건. 채널 선택·쿨다운·이력 기록은 Dispatcher 가 맡는다. 발송 결과를 돌려준다 (억제되면 None).
 
+        body 는 시장 근거, account 는 손익·평단·보유 수량처럼 내 계좌에서만 나오는 줄이다 — 공개 채널에는 body 만 간다.
         자동매매가 켜져 있으면 실제로 발송된 신호만 실행기에도 넘긴다. 쿨다운에 억제된 반복까지 넘기면
         진입대기·청산대기 동안 30초마다 주문 의도가 생긴다. 실행기 오류가 알림을 막으면 안 되므로
         알림을 먼저 보내고, 실행기 예외는 잡아서 로그만 남긴다.
         """
-        signal = Signal(kind, title, label, body, symbol)
+        signal = Signal(kind, title, label, body, symbol, account)
         sent = self.notify.send(signal)
         if sent is not None and self.executor is not None and symbol:
             try:
@@ -714,9 +715,9 @@ class SignalEngine:
                 self.state[ticker] = "보유"
                 self.pending.pop(ticker, None)
                 self._emit("EXIT_CANCEL", "⚪ 청산 신호 해제", label, ticker,
-                                 f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                                  f"{recovered}\n"
-                                 f"청산 근거 소멸 — 보유로 전환")
+                                 f"청산 근거 소멸 — 보유로 전환",
+                                 account=f"손익 {pnl}%  (평단 {avg} → 현재 {price})")
                 return
             if pnl <= STOP_LOSS_PCT and first.get("kind") != "STOP":
                 first = self.pending[ticker] = self._exit_pending("STOP", "🔴 손절하세요",
@@ -730,9 +731,9 @@ class SignalEngine:
             n = first.get("repeats", 0) + 1
             gap = min(ALERT_COOLDOWN_MIN * 2 ** n, EXIT_REPEAT_MAX_MIN)
             sent = self._emit(first.get("kind", "SELL"), first.get("level", "🔴 매도하세요"), label, ticker,
-                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
-                              f"아직 미청산 — {first.get('why', '청산 신호 유지')}\n"
-                              f"{held['qty']:g}주 보유 중 · 다음 알림 {gap}분 뒤")
+                              f"{first.get('why', '청산 신호 유지')} — 청산 신호 유지 중\n"
+                              f"다음 알림 {gap}분 뒤",
+                              account=f"손익 {pnl}%  (평단 {avg} → 현재 {price}) · 아직 미청산, {held['qty']:g}주 보유 중")
             if sent is not None:            # 알림기 쿨다운에 걸렸으면 다음 사이클에 다시 시도한다
                 first["repeats"], first["next_at"] = n, (now + timedelta(minutes=gap)).isoformat()
             return
@@ -785,9 +786,9 @@ class SignalEngine:
             self.state[ticker] = "청산대기"
             self.pending[ticker] = self._exit_pending("SELL", "🔴 매도하세요", f"{sell_why} {sell_line} 이탈")
             self._emit("SELL", "🔴 매도하세요", label, ticker,
-                             f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"{flavor}\n"
-                             f"종가 {close}가 {sell_why} {sell_line} 아래로 내려감")
+                             f"종가 {close}가 {sell_why} {sell_line} 아래로 내려감",
+                             account=f"손익 {pnl}%  (평단 {avg} → 현재 {price})")
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
               and faded <= FADE_STRONG_RATIO):
             # 발동 조건은 순수 시장 기준(거래량 소진)이다. 손익은 표시용이고
@@ -801,11 +802,11 @@ class SignalEngine:
             self.pending[ticker] = self._exit_pending("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}",
                                                       f"거래량 정점 {rvol_peak}배 대비 {round(faded * 100)}% 로 소진")
             self._emit("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}", label, ticker,
-                             f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
-                             f"보유 {qty:g}주 → {EXIT_PORTION_STRONG} 정리 권장\n"
+                             f"{EXIT_PORTION_STRONG} 정리 권장\n"
                              f"거래량이 오늘 정점 {rvol_peak}배 → 최근 {FADE_BARS}봉 평균 {rvol_recent}배 "
                              f"({round(faded * 100)}% 수준)\n"
-                             f"상승 연료 소진 — 더 오를 힘이 남지 않음")
+                             f"상승 연료 소진 — 더 오를 힘이 남지 않음",
+                             account=f"손익 {pnl}%  (평단 {avg} → 현재 {price}) · 보유 {qty:g}주")
         elif (ENABLE_ADD_ON and pos_now == "above" and rvol_breakout
               and pnl >= ADDON_MIN_PROFIT_PCT
               and self.addon_count.get(ticker, 0) < ADDON_MAX_COUNT):
@@ -817,20 +818,19 @@ class SignalEngine:
             if low > self.stop_ref.get(ticker, 0):
                 self.stop_ref[ticker], self.stop_src[ticker] = low, "추가매수 봉 저점"
             self._emit("ADDON", "🔵 추가매수 검토", label, ticker,
-                             f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"거래량 {prev_rvol}→{rvol}배 재돌파, 추세 살아있음\n"
                              f"매도선 {self.stop_ref.get(ticker)} 로 상향 (이 봉 저점)\n"
-                             f"⚠ 물량 늘리면 손절 시 손실도 같은 배로 커짐")
+                             f"⚠ 물량 늘리면 손절 시 손실도 같은 배로 커짐",
+                             account=f"손익 {pnl}%  (평단 {avg} → 현재 {price})")
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
               and faded <= FADE_WEAK_RATIO):
             qty = held["qty"]
             verb = "익절" if pnl > 0 else "정리"
             self._emit("EXIT_HALF", f"🟡 {EXIT_PORTION_HALF} {verb} 검토", label, ticker,
-                             f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
-                             f"보유 {qty:g}주 → {qty / 2:g}주 정리, {qty / 2:g}주 유지\n"
                              f"거래량이 오늘 정점 {rvol_peak}배 → 최근 {FADE_BARS}봉 평균 {rvol_recent}배 "
                              f"({round(faded * 100)}% 수준)\n"
-                             f"둔화 시작. 절반 덜어내고 나머지로 추세 확인")
+                             f"둔화 시작. 절반 덜어내고 나머지로 추세 확인",
+                             account=f"손익 {pnl}%  (평단 {avg} → 현재 {price}) · 보유 {qty:g}주 → {qty / 2:g}주 정리, {qty / 2:g}주 유지")
         elif ENABLE_AMBIGUOUS and not in_grace and self._ambiguous(pos_now, ctx):
             # 판단 애매: 근거가 흐려졌지만 아직 이탈은 아닌 구간.
             # 다른 알림이 하나도 안 걸려 방치되기 쉬운 사각지대다.
@@ -838,15 +838,14 @@ class SignalEngine:
             part = round(qty / 3, 1)
             verb = "익절" if pnl > 0 else "정리"
             self._emit("EXIT_THIRD", f"🟡 {EXIT_PORTION_THIRD} {verb} 검토", label, ticker,
-                             f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
-                             f"보유 {qty:g}주 → {part:g}주 정리, {qty - part:g}주 유지\n"
                              f"흐려진 근거: {self._ambiguous_reason(pos_now, ctx)}\n"
-                             f"급하지 않음. 조금 덜어내고 지켜봐도 되는 구간")
+                             f"급하지 않음. 조금 덜어내고 지켜봐도 되는 구간",
+                             account=f"손익 {pnl}%  (평단 {avg} → 현재 {price}) · 보유 {qty:g}주 → {part:g}주 정리, {qty - part:g}주 유지")
         elif self.watchlist[ticker].get("day_trade") and self.hours.near_close(market):
             # 당일 청산 종목만. 오버나잇이 전제인 종목에 마감 정리를 말하면(자동매매면 전량 매도) 사고다.
             self._emit("CLOSE_WARN", "🟠 마감 전 정리", label, ticker,
-                             f"손익 {pnl}%  ({held['qty']:g}주 보유)\n"
-                             f"마감 {CLOSE_WARN_MIN}분 전 — 당일 청산 종목, 오버나잇 금지")
+                             f"마감 {CLOSE_WARN_MIN}분 전 — 당일 청산 종목, 오버나잇 금지",
+                             account=f"손익 {pnl}%  ({held['qty']:g}주 보유)")
 
     def market_summary(self, active: list, holdings: dict, pre: list = None):
         """30분마다 전 종목 상태를 한 번에 보낸다.

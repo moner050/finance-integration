@@ -84,6 +84,7 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `TELEGRAM_BOT_TOKEN` | ✔ | BotFather 가 주는 `1234567890:AA...` 전체 | |
 | `TELEGRAM_CHAT_ID` | ✔ | **받는 사람** 채팅의 숫자 ID (봇 ID 아님). 여러 명은 쉼표. 각 수신자는 봇에게 먼저 `/start` | |
 | `TELEGRAM_MIN_SEVERITY` | | 받을 최소 등급 `info` / `review` / `action` | info |
+| `TELEGRAM_PUBLIC_BOT_TOKEN` / `TELEGRAM_PUBLIC_CHAT_ID` | | 공개 채널. 시장 신호(매수·취소·매도선 이탈·익절·불타기·마감 정리·코인 신호)만 보내고 손익·평단·보유 수량·손절 한도·청산 완료·시황·주문은 보내지 않는다 (`models.PUBLIC_KINDS`) | 없음 |
 | `MYSQL_HOST` `MYSQL_PORT` `MYSQL_DATABASE` `MYSQL_USER` `MYSQL_PASSWORD` | ✔ | 기존 MySQL. 테이블은 `alert_` 접두어로 자동 생성 | |
 | `ALERT_BACKOFFICE_HOST` / `ALERT_BACKOFFICE_PORT` | | 백오피스 바인드 주소·포트. 인증이 없으므로 로컬 전용 권장 | 127.0.0.1 / 8000 |
 | `ALERT_DATA_DIR` | | 로그·CSV 저장 폴더. Docker 는 `/data` | 프로젝트 루트 |

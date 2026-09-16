@@ -65,9 +65,11 @@ class FakeClient:
 class CaptureNotifier:
     def __init__(self):
         self.sent = []
+        self.signals = []           # Signal 원본 (account 줄 확인용)
 
     def send(self, signal, force=False):
         self.sent.append([signal.title, signal.label, signal.body])
+        self.signals.append(signal)
         return {"capture": "ok"}
 
 

@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import db
 from ..config import (AUTOTRADE_HARD_MAX_AMOUNT_KRW, AUTOTRADE_HARD_MAX_AMOUNT_USD, AUTOTRADE_MODE,
-                      CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_TOKEN)
+                      CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_PUBLIC_CHATS, TG_PUBLIC_TOKEN, TG_TOKEN)
 from ..config import BINANCE_TRADE_MODE
 from ..models import Signal
 from ..notify import build_channels
@@ -284,6 +284,8 @@ def channel_rows() -> list:
     return [
         {"name": "telegram", "configured": bool(TG_TOKEN and TG_CHATS), "recipients": len(TG_CHATS),
          "min_severity": TG_MIN_SEVERITY, "detail": "Bot API sendMessage"},
+        {"name": "telegram_public", "configured": bool(TG_PUBLIC_TOKEN and TG_PUBLIC_CHATS), "recipients": len(TG_PUBLIC_CHATS),
+         "min_severity": "info", "detail": "시장 신호만 (매수·매도·코인), 계좌 줄 제외"},
     ]
 
 
