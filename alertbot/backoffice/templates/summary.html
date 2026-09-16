@@ -2,29 +2,31 @@
 {% set nav = "summary" %}
 {% block content %}
 <style>
- .series{overflow-x:auto;background:#fff;border:1px solid #e4e7eb;margin-bottom:1.2rem}
- .series table{width:auto;min-width:100%;font-size:.82rem}
- .series th,.series td{white-space:nowrap;padding:.35rem .5rem;text-align:center}
- .series th:first-child,.series td:first-child{text-align:left;position:sticky;left:0;background:#fff;font-weight:600;z-index:1;border-right:1px solid #e4e7eb}
- .series th:first-child{background:#f0f3f5}
- .series th small{display:block;font-weight:400;color:#7b8794}
- .series td.c{cursor:default}
- .m-up{background:#e3f6e8}.m-down{background:#fde2e2}.m-flat{background:#f0f3f5}.m-buy{background:#dbe9ff;font-weight:600}.m-pre{background:#efe9ff}
- .series td.none{color:#cbd2d9}
- .latest{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.6rem}
- .latest .card{background:#fff;border:1px solid #e4e7eb;padding:.8rem 1rem}
- .latest h4{margin:0 0 .4rem;font-size:.9rem;color:#52606d}
+ .series{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:16px}
+ .series table{width:auto;min-width:100%;font-size:12.5px}
+ .series th,.series td{white-space:nowrap;padding:8px 10px;text-align:center}
+ .series th:first-child,.series td:first-child{text-align:left;position:sticky;left:0;background:var(--surface);font-weight:650;z-index:2;border-right:1px solid var(--line)}
+ .series th:first-child{background:var(--surface-2);z-index:3}
+ .series th small{display:block;font-weight:500;color:var(--muted);text-transform:none;letter-spacing:0}
+ .series tr:hover td{background:inherit}
+ .series td.c{cursor:default;border-left:1px solid #fff;font-weight:500}
+ .m-up{background:#e3f5ea;color:#116b45}.m-down{background:#fde6e8;color:#a32633}.m-flat{background:#f1f2f5;color:var(--text-2)}.m-buy{background:#e4e7ff;color:#3644c9;font-weight:650}.m-pre{background:#efe9ff;color:#5b3fb5}
+ .series td.none{color:var(--line-strong)}
+ .latest{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:32px}
+ .latest .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 18px}
+ .latest h4{margin:0 0 8px;font-size:11.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
  @media (max-width:900px){.latest{grid-template-columns:1fr}}
 </style>
-<h2>시황 시계열</h2>
-<form method="get" action="/summary" style="margin:.6rem 0;display:flex;gap:.6rem;align-items:center">
- <label>표시 개수
-  <select name="limit" onchange="this.form.submit()">
-   {% for n in [8, 16, 32, 64, 96] %}<option value="{{ n }}" {{ 'selected' if limit == n else '' }}>{{ n }}회 (약 {{ n // 2 }}시간)</option>{% endfor %}
-  </select>
- </label>
- <span class="muted">30분마다 저장된 시황을 종목 × 시각으로 펼친다. 칸은 매수 조건 충족 개수(예: 2/3), 마우스를 올리면 부족 항목과 수치. 왼쪽이 과거, 오른쪽이 최신.</span>
-</form>
+<div class="page-head">
+ <div><h2>시황 시계열</h2><p>30분마다 저장된 시황을 종목 × 시각으로 펼친다. 칸은 매수 조건 충족 개수(예: 2/3), 마우스를 올리면 부족 항목과 수치. 왼쪽이 과거, 오른쪽이 최신.</p></div>
+ <form class="toolbar" method="get" action="/summary" style="margin:0">
+  <label>표시 개수
+   <select name="limit" onchange="this.form.submit()">
+    {% for n in [8, 16, 32, 64, 96] %}<option value="{{ n }}" {{ 'selected' if limit == n else '' }}>{{ n }}회 (약 {{ n // 2 }}시간)</option>{% endfor %}
+   </select>
+  </label>
+ </form>
+</div>
 
 {% macro series_table(s, title) %}
 <h3>{{ title }}</h3>
@@ -52,7 +54,7 @@
 </div>
 <div class="latest">
  <div class="card"><h4>가장 최근 시황 · {{ s.latest.sent_at|kst }} KST</h4><pre>{{ s.latest.body.split('\n내 보유')[0].split('\n내 포지션')[0] }}</pre></div>
- <div class="card"><h4>{{ '내 포지션' if title.startswith('코인') else '내 보유' }} (계좌 현황 — 공개 채널에는 가지 않음)</h4>
+ <div class="card"><h4>{{ '내 포지션' if title.startswith('코인') else '내 보유' }} · 계좌 현황 (공개 채널에는 가지 않음)</h4>
   {% if s.mine %}<pre>{{ s.mine|join('\n') }}</pre>{% else %}<span class="muted">없음</span>{% endif %}</div>
 </div>
 {% endif %}

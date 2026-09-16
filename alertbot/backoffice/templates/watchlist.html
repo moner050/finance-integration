@@ -1,8 +1,7 @@
 {% extends "base.html" %}
 {% set nav = "watchlist" %}
 {% block content %}
-<h2>감시 종목</h2>
-<p class="muted">저장하면 엔진이 다음 사이클(30초 안)에 반영한다. 삭제보다 '중지'를 권장한다 — 이력이 남는다.</p>
+<div class="page-head"><div><h2>감시 종목</h2><p>저장하면 엔진이 다음 사이클(30초 안)에 반영한다. 삭제보다 '중지'를 권장한다 — 이력이 남는다.</p></div></div>
 {% if error %}<p class="warn">{{ error }}</p>{% endif %}
 <form class="card" method="post" action="/watchlist">
  <label>심볼 <input type="text" name="symbol" value="{{ edit.symbol if edit else '' }}" required {{ 'readonly' if edit else '' }} placeholder="SOXX / 005930"></label>
@@ -16,12 +15,12 @@
  <label>선행 바스켓 (쉼표) <input type="text" name="leaders" value="{{ edit.leaders|join(',') if edit else '' }}" placeholder="NVDA,AVGO"></label>
  <label>페어 (동시 진입 차단) <input type="text" name="pair" value="{{ (edit.pair or '') if edit else '' }}"></label>
  <label>메모 <input type="text" name="note" value="{{ (edit.note or '') if edit else '' }}"></label>
+ <label>1회 매수 금액 (KRW / USD) <input type="text" name="auto_amount" value="{{ (edit.auto_amount or 0)|int if edit else 0 }}"></label>
+ <label><span><input type="checkbox" name="enabled" value="1" {{ 'checked' if (edit.enabled if edit else True) else '' }}> 활성</span></label>
  <label><span><input type="checkbox" name="inverse" value="1" {{ 'checked' if edit and edit.inverse else '' }}> 인버스 (선행 방향 반전)</span></label>
  <label><span><input type="checkbox" name="hold_only" value="1" {{ 'checked' if edit and edit.hold_only else '' }}> 보유 중에만 감시 (매수 신호 없음)</span></label>
  <label><span><input type="checkbox" name="day_trade" value="1" {{ 'checked' if edit and edit.day_trade else '' }}> 당일 청산 (마감 30분 전 정리 알림 · 자동매매면 전량 매도)</span></label>
- <label><span><input type="checkbox" name="enabled" value="1" {{ 'checked' if (edit.enabled if edit else True) else '' }}> 활성</span></label>
  <label><span><input type="checkbox" name="auto_trade" value="1" {{ 'checked' if edit and edit.auto_trade else '' }}> 자동매매 대상 (모드·킬 스위치도 켜져야 함)</span></label>
- <label>1회 매수 금액 (KRW / USD) <input type="text" name="auto_amount" value="{{ (edit.auto_amount or 0)|int if edit else 0 }}"></label>
  <div class="full">
   <button type="submit" class="primary">{{ '수정 저장' if edit else '추가' }}</button>
   <button type="button" hx-post="/watchlist/validate" hx-include="closest form" hx-target="#validate-result">심볼 검증 (토스 현재가 조회)</button>
@@ -29,6 +28,7 @@
   {% if edit %}<a href="/watchlist">취소</a>{% endif %}
  </div>
 </form>
+<div class="panel">
 <table>
 <tr><th>심볼</th><th>시장</th><th>표시명</th><th>선행</th><th>인버스</th><th>페어</th><th>보유시만</th><th>당일청산</th><th>자동매매</th><th>메모</th><th>상태</th><th>수정</th><th></th></tr>
 {% for r in rows %}
@@ -43,9 +43,9 @@
  <td>{{ '✔' if r.day_trade else '' }}</td>
  <td>{% if r.auto_trade %}🤖 {{ '{:,.0f}'.format(r.auto_amount or 0) }}{% endif %}</td>
  <td>{{ r.note or '' }}</td>
- <td>{{ '활성' if r.enabled else '중지' }}</td>
- <td>{{ r.updated_at|kst }}</td>
- <td>
+ <td><span class="badge {{ 'ok-badge' if r.enabled else '' }}">{{ '활성' if r.enabled else '중지' }}</span></td>
+ <td style="white-space:nowrap">{{ r.updated_at|kst }}</td>
+ <td style="white-space:nowrap">
   <a href="/watchlist?edit={{ r.symbol }}">편집</a>
   <form class="inline" method="post" action="/watchlist/{{ r.symbol }}/toggle"><button>{{ '중지' if r.enabled else '재개' }}</button></form>
   <form class="inline" method="post" action="/watchlist/{{ r.symbol }}/delete" onsubmit="return confirm('{{ r.symbol }} 을 삭제할까요? 중지를 권장합니다.')"><button class="danger">삭제</button></form>
@@ -55,4 +55,5 @@
 <tr><td colspan="13" class="muted">종목이 없다</td></tr>
 {% endfor %}
 </table>
+</div>
 {% endblock %}

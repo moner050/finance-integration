@@ -1,15 +1,20 @@
 {% if not status %}
-<p class="warn">엔진 상태 기록이 없다. run_engine.py 가 한 번도 돌지 않았다.</p>
+<div class="stat alert"><div class="k">엔진</div><div class="v warn">엔진 상태 기록이 없다</div><p class="sub" style="margin:6px 0 0">run_engine.py 가 한 번도 돌지 않았다.</p></div>
 {% else %}
-<p>
- 마지막 사이클 <strong>{{ status.heartbeat_at|kst }}</strong>
- {% if stale %}<span class="warn">({{ age if age is not none else '?' }}초 전 — 엔진이 멈췄을 수 있다)</span>
- {% else %}<span class="ok">({{ age }}초 전)</span>{% endif %}
- · 감시 중: {{ status.active|join(', ') or '없음' }}
- {% if status.pre %}· 프리마켓: {{ status.pre|join(', ') }}{% endif %}
- · 종목 {{ enabled_count }}/{{ watch_count }} 활성
- {% if status.last_error %}<br><span class="warn">마지막 오류: {{ status.last_error }}</span>{% endif %}
-</p>
+<div class="stats">
+ <div class="stat {{ 'alert' if stale else '' }}">
+  <div class="k">마지막 사이클</div>
+  <div class="v">{{ status.heartbeat_at|kst }}
+   {% if stale %}<small class="warn">({{ age if age is not none else '?' }}초 전 — 엔진이 멈췄을 수 있다)</small>
+   {% else %}<small class="ok">({{ age }}초 전)</small>{% endif %}
+  </div>
+ </div>
+ <div class="stat"><div class="k">감시 중</div><div class="v">{{ status.active|join(', ') or '없음' }}</div></div>
+ {% if status.pre %}<div class="stat"><div class="k">프리마켓</div><div class="v">{{ status.pre|join(', ') }}</div></div>{% endif %}
+ <div class="stat"><div class="k">활성 종목</div><div class="v">{{ enabled_count }}<small>/ {{ watch_count }}</small></div></div>
+ {% if status.last_error %}<div class="stat alert"><div class="k">마지막 오류</div><div class="v warn" style="font-size:13px">{{ status.last_error }}</div></div>{% endif %}
+</div>
+<div class="panel">
 <table>
 <tr><th>종목</th><th>시장</th><th>상태</th><th>현재가</th><th>종가</th><th>VWAP (밴드)</th><th>위치 현재/종가</th><th>RVOL</th><th>정점</th><th>선행</th><th>손절선</th><th>갱신</th></tr>
 {% for t in tickers %}
@@ -31,4 +36,5 @@
 <tr><td colspan="12" class="muted">아직 지표가 없다 (장 밖이거나 첫 사이클 전)</td></tr>
 {% endfor %}
 </table>
+</div>
 {% endif %}

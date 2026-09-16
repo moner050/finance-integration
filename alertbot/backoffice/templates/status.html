@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% set nav = "status" %}
 {% block content %}
-<h2>엔진 상태</h2>
+<div class="page-head"><div><h2>엔진 상태</h2><p>30초마다 자동 갱신 · 토스 엔진 지표</p></div></div>
 <div id="status" hx-get="/partials/status" hx-trigger="every 30s" hx-swap="innerHTML">
 {% include "_status.html" %}
 </div>

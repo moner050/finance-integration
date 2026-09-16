@@ -4,42 +4,126 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}단타 알림 백오피스{% endblock %}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js"></script>
 <style>
- body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Malgun Gothic",sans-serif;margin:0;background:#f6f7f9;color:#1f2933}
- header{background:#1f2933;color:#fff;padding:.6rem 1.2rem;display:flex;gap:1.2rem;align-items:center}
- header a{color:#cbd2d9;text-decoration:none}
- header a.active,header a:hover{color:#fff}
- main{padding:1.2rem;max-width:1280px;margin:0 auto}
- h2{margin:.2rem 0 .8rem}
- table{border-collapse:collapse;width:100%;background:#fff;font-size:.9rem}
- th,td{border-bottom:1px solid #e4e7eb;padding:.45rem .6rem;text-align:left;vertical-align:top}
- th{background:#f0f3f5;font-weight:600;white-space:nowrap}
- .badge{display:inline-block;padding:.1rem .45rem;border-radius:.6rem;font-size:.78rem;background:#e4e7eb}
- .action{background:#ffd8d8}.review{background:#fff2c2}.info{background:#dbe9ff}
- .ok{color:#137333}.warn{color:#b3261e;font-weight:600}.muted{color:#7b8794}
- form.card{background:#fff;padding:1rem;border:1px solid #e4e7eb;margin:1rem 0;display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem .9rem}
- form.card label{display:flex;flex-direction:column;font-size:.85rem;gap:.2rem}
- form.card .full{grid-column:1/-1;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
- input[type=text],select{padding:.35rem;border:1px solid #cbd2d9;border-radius:.3rem;font:inherit}
- button{padding:.35rem .8rem;border:1px solid #9aa5b1;background:#fff;border-radius:.3rem;cursor:pointer;font:inherit}
- button.primary{background:#1f2933;color:#fff;border-color:#1f2933}
- button.danger{color:#b3261e}
- pre{white-space:pre-wrap;margin:0;font-family:inherit}
+ :root{
+  --bg:#f3f4f7;--surface:#fff;--surface-2:#f8f9fb;--line:#e6e8ee;--line-strong:#d6dae3;
+  --text:#14161c;--text-2:#4b5262;--muted:#8a91a0;
+  --brand:#0b1020;--brand-2:#121a33;--accent:#5b6cff;--accent-soft:#eceefe;
+  --ok:#0f9d6a;--ok-soft:#e4f6ee;--danger:#d93d4a;--danger-soft:#fdecee;--warn:#d98a1a;--warn-soft:#fff4e0;--info:#3b7ddd;--info-soft:#e6effc;
+  --radius:12px;--shadow:0 1px 2px rgba(16,20,40,.04),0 4px 16px rgba(16,20,40,.05);
+ }
+ *{box-sizing:border-box}
+ html{-webkit-text-size-adjust:100%}
+ body{margin:0;background:var(--bg);color:var(--text);font-family:"Pretendard Variable",Pretendard,-apple-system,"Segoe UI",Roboto,"Malgun Gothic",sans-serif;font-size:14px;line-height:1.5;letter-spacing:-.01em;-webkit-font-smoothing:antialiased}
+ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+ .layout{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+ /* 사이드바 */
+ aside{background:linear-gradient(180deg,var(--brand) 0%,var(--brand-2) 100%);color:#c9cfe2;padding:20px 14px;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+ .brand{display:flex;align-items:center;gap:10px;padding:6px 10px 22px;color:#fff}
+ .brand .mark{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,#6f7dff,#37c8ff);display:grid;place-items:center;font-weight:800;font-size:13px;color:#fff;box-shadow:0 4px 14px rgba(91,108,255,.45)}
+ .brand b{font-size:15px;font-weight:700;letter-spacing:-.02em;display:block;line-height:1.1}
+ .brand small{font-size:11px;color:#8b93b0;font-weight:500}
+ nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;color:#aab2cc;font-weight:500;font-size:13.5px;transition:background .15s,color .15s}
+ nav a:hover{background:rgba(255,255,255,.06);color:#fff;text-decoration:none}
+ nav a.active{background:rgba(255,255,255,.1);color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}
+ nav a svg{width:16px;height:16px;flex:none;opacity:.85}
+ nav a.active svg{opacity:1;color:#8f9bff}
+ .side-foot{margin-top:auto;padding:12px 10px 0;border-top:1px solid rgba(255,255,255,.07);font-size:11.5px;color:#7d859f;display:flex;justify-content:space-between}
+ .side-foot b{color:#c9cfe2;font-variant-numeric:tabular-nums;font-weight:600}
+ /* 본문 */
+ main{padding:28px 36px 48px;min-width:0}
+ .page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+ h2{margin:0;font-size:22px;font-weight:700;letter-spacing:-.03em}
+ .page-head p{margin:4px 0 0;color:var(--muted);font-size:13px}
+ h3{margin:28px 0 10px;font-size:15px;font-weight:700;letter-spacing:-.02em}
+ h3:first-child{margin-top:0}
+ .sub{color:var(--muted);font-size:13px;margin:0 0 14px}
+ /* 패널·표 */
+ .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:auto}
+ .panel+.panel,.panel+h3{margin-top:20px}
+ table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+ th,td{padding:10px 14px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+ tr:last-child td{border-bottom:0}
+ th{background:var(--surface-2);color:var(--text-2);font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;position:sticky;top:0;z-index:1}
+ tbody tr:hover td,tr:hover td{background:#fafbfd}
+ td strong{font-weight:650}
+ .badge{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:#eef0f4;color:var(--text-2);white-space:nowrap}
+ .badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.7}
+ .badge.action{background:var(--danger-soft);color:#b42733}
+ .badge.review{background:var(--warn-soft);color:#a3660a}
+ .badge.info{background:var(--info-soft);color:#2a62b8}
+ .badge.ok-badge{background:var(--ok-soft);color:#0b7a52}
+ .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 20px;margin-bottom:20px}
+ .kv dt{margin:0;font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap}
+ .kv dd{margin:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ .kv dd strong{font-weight:700}
+ .ok{color:var(--ok);font-weight:600}.warn{color:var(--danger);font-weight:600}.muted{color:var(--muted)}
+ tr.muted td{color:var(--muted)}
+ pre{white-space:pre-wrap;margin:0;font-family:inherit;font-size:12.5px;line-height:1.55}
+ code{background:#eef0f4;padding:1px 6px;border-radius:5px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+ /* 통계 카드 */
+ .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
+ .stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px}
+ .stat .k{font-size:11.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+ .stat .v{margin-top:6px;font-size:17px;font-weight:700;letter-spacing:-.02em;word-break:break-all}
+ .stat .v small{font-size:12px;font-weight:500;color:var(--muted);margin-left:6px}
+ .stat.alert{border-color:#f3c2c7;background:#fff8f8}
+ /* 폼 */
+ form.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px 20px;margin:0 0 20px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px 18px}
+ form.card label input[type=text],form.card label select{width:100%}
+ form.card label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--text-2)}
+ form.card label>span{font-weight:500;color:var(--text);display:flex;align-items:center;gap:8px;padding-top:22px}
+ form.card .full{grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-top:4px;border-top:1px solid var(--line);margin-top:4px}
+ form.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 16px}
+ form.toolbar label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2)}
+ input[type=text],select{padding:8px 10px;border:1px solid var(--line-strong);border-radius:8px;font:inherit;font-size:13px;background:#fff;color:var(--text);transition:border-color .15s,box-shadow .15s;min-width:0}
+ input[type=text]:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+ input[type=text][readonly]{background:var(--surface-2);color:var(--muted)}
+ input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
+ button{padding:7px 14px;border:1px solid var(--line-strong);background:#fff;color:var(--text);border-radius:8px;cursor:pointer;font:inherit;font-size:13px;font-weight:600;transition:background .15s,border-color .15s,box-shadow .15s}
+ button:hover{background:var(--surface-2);border-color:#b9bfcc}
+ button.primary{background:var(--accent);color:#fff;border-color:var(--accent);box-shadow:0 2px 8px rgba(91,108,255,.3)}
+ button.primary:hover{background:#4a5bf0}
+ button.danger{color:var(--danger)}button.danger:hover{background:var(--danger-soft);border-color:#f0b4ba}
+ td button{padding:4px 10px;font-size:12px}
  .inline{display:inline}
- code{background:#eef1f4;padding:.05rem .3rem;border-radius:.2rem}
+ td .inline{margin-left:4px}
+ /* 채널 등급 목록 */
+ ul.legend{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+ ul.legend li{display:flex;align-items:center;gap:10px;color:var(--text-2)}
+ @media (max-width:900px){
+  .layout{grid-template-columns:1fr}
+  aside{position:static;height:auto;padding:12px 14px}
+  .brand{padding-bottom:10px}
+  nav{display:flex;gap:4px;overflow-x:auto}
+  nav a{white-space:nowrap;padding:7px 10px}
+  .side-foot{display:none}
+  main{padding:18px 16px 40px}
+  form.card{grid-template-columns:minmax(0,1fr)}
+  form.card label>span{padding-top:0}
+ }
 </style>
 </head>
 <body>
-<header>
- <strong>단타 알림</strong>
- <a href="/" class="{{ 'active' if nav == 'status' else '' }}">상태</a>
- <a href="/watchlist" class="{{ 'active' if nav == 'watchlist' else '' }}">종목</a>
- <a href="/summary" class="{{ 'active' if nav == 'summary' else '' }}">시황</a>
- <a href="/signals" class="{{ 'active' if nav == 'signals' else '' }}">신호 이력</a>
- <a href="/channels" class="{{ 'active' if nav == 'channels' else '' }}">채널</a>
- <a href="/trading" class="{{ 'active' if nav == 'trading' else '' }}">자동매매</a>
-</header>
+<div class="layout">
+<aside>
+ <div class="brand"><div class="mark">단</div><div><b>단타 알림</b><small>Backoffice</small></div></div>
+ <nav>
+  <a href="/" class="{{ 'active' if nav == 'status' else '' }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>상태</a>
+  <a href="/watchlist" class="{{ 'active' if nav == 'watchlist' else '' }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>종목</a>
+  <a href="/summary" class="{{ 'active' if nav == 'summary' else '' }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19V5M4 19h16M8 15l4-5 3 3 5-7"/></svg>시황</a>
+  <a href="/signals" class="{{ 'active' if nav == 'signals' else '' }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4"/></svg>신호 이력</a>
+  <a href="/channels" class="{{ 'active' if nav == 'channels' else '' }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg>채널</a>
+  <a href="/trading" class="{{ 'active' if nav == 'trading' else '' }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12h8M12 8v8"/></svg>자동매매</a>
+ </nav>
+ <div class="side-foot"><span>KST</span><b id="clock">--:--:--</b></div>
+</aside>
 <main>{% block content %}{% endblock %}</main>
+</div>
+<script>
+ (function(){var el=document.getElementById('clock');function tick(){el.textContent=new Date().toLocaleTimeString('ko-KR',{timeZone:'Asia/Seoul',hour12:false});}tick();setInterval(tick,1000);})();
+</script>
 </body>
 </html>
