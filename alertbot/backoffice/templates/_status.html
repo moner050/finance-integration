@@ -9,8 +9,8 @@
    {% else %}<small class="ok">({{ age }}초 전)</small>{% endif %}
   </div>
  </div>
- <div class="stat"><div class="k">감시 중</div><div class="v">{{ status.active|join(', ') or '없음' }}</div></div>
- {% if status.pre %}<div class="stat"><div class="k">프리마켓</div><div class="v">{{ status.pre|join(', ') }}</div></div>{% endif %}
+ <div class="stat"><div class="k">감시 중</div><div class="v">{{ status.active|map('kname', names)|join(', ') or '없음' }}</div></div>
+ {% if status.pre %}<div class="stat"><div class="k">프리마켓</div><div class="v">{{ status.pre|map('kname', names)|join(', ') }}</div></div>{% endif %}
  <div class="stat"><div class="k">활성 종목</div><div class="v">{{ enabled_count }}<small>/ {{ watch_count }}</small></div></div>
  {% if status.last_error %}<div class="stat alert"><div class="k">마지막 오류</div><div class="v warn" style="font-size:13px">{{ status.last_error }}</div></div>{% endif %}
 </div>

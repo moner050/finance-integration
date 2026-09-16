@@ -203,7 +203,7 @@ def test_engine_hooks_pass_signals_and_fill_prices(monkeypatch, tmp_path):
 
 
 def test_engine_repeat_entry_does_not_reorder(monkeypatch, tmp_path):
-    """진입대기 반복은 원래 신호봉으로 실행기에 가고, 쿨다운에 억제된 반복은 실행기에 가지도 않는다."""
+    """확정 신호는 한 번만 실행기에 간다(반복이 없다). 대기 신호는 승격될 때 원래 대기 신호봉으로 한 번 간다."""
     store = DBM.DB.sqlite().init_schema()
     DBM.seed_watchlist(store, {"AAA": {**CFG, "name": "테스트"}})
     DBM.set_setting(store, "autotrade_enabled", 1)
@@ -220,13 +220,65 @@ def test_engine_repeat_entry_does_not_reorder(monkeypatch, tmp_path):
     client.candles = client.candles + [bar(last + timedelta(minutes=1), 100.9, 1000, high=100.95, low=100.8)]
     eng.evaluate("AAA", {"AAA": 100.9}, {})                               # 다음 봉, 쿨다운 안 → 알림도 실행기도 침묵
     assert len(DBM.recent_orders(store)) == 1 and len(engine_rec.got) == 1
-    # 미체결 매수가 TTL 로 취소된 뒤 반복 알림이 나가도, 같은 신호봉이라 다시 사지 않는다
+    # 미체결 매수가 TTL 로 취소돼도 확정 신호는 반복 알림이 없으니 다시 사지 않는다 — 신호 포지션(보유)으로 관리만 이어진다
     intent_id = DBM.recent_orders(store)[0]["intent_id"]
     DBM.update_order(store, intent_id, created_at=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds"))
     eng._reconcile_orders()
     assert DBM.get_order(store, intent_id)["status"] == "canceled"
     eng.notify.last_sent.clear()                                          # 15분이 지난 것으로
-    eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
     eng.evaluate("AAA", {"AAA": 100.9}, {})
-    assert engine_rec.got[-1].kind == "ENTRY_WATCH" and "아직 미진입" in engine_rec.got[-1].body   # 반복은 review, 실행기 대상 아님
-    assert len(DBM.recent_orders(store)) == 1                             # 새 주문 없음
+    assert len(engine_rec.got) == 1 and len(DBM.recent_orders(store)) == 1 and eng.state["AAA"] == "보유"
+    # 대기 신호는 실행기 대상이 아니고, 승격될 때 한 번 산다 — 의도의 신호봉은 원래 대기 신호봉(10:01)이다
+    store2 = DBM.DB.sqlite().init_schema()
+    DBM.seed_watchlist(store2, {"AAA": {**CFG, "name": "테스트"}})
+    DBM.set_setting(store2, "autotrade_enabled", 1)
+    weak = sc.scenario_candles()
+    weak[-1] = bar(datetime.fromisoformat(weak[-1]["timestamp"]), 100.8, 2500, high=100.85, low=100.3)
+    client2, rec2 = sc.FakeClient(weak), Recorder("engine")
+    eng2 = E.SignalEngine(client2, Dispatcher([rec2]), True, DBM.load_watchlist(store2), store2,
+                          X.Executor(store2, SlowBroker(), "dry", Dispatcher([Recorder("telegram")])))
+    eng2.evaluate("AAA", {"AAA": 100.8}, {})
+    assert rec2.got[-1].kind == "ENTRY_WATCH" and DBM.recent_orders(store2) == []
+    client2.candles = weak + [bar(datetime.fromisoformat(weak[-1]["timestamp"]) + timedelta(minutes=1), 100.9, 4000,
+                                  high=100.95, low=100.8)]
+    eng2.evaluate("AAA", {"AAA": 100.9}, {})
+    assert rec2.got[-1].kind == "ENTRY" and [o["bar_key"][11:16] for o in DBM.recent_orders(store2)] == ["10:01"]
+
+
+def test_dry_fills_become_holdings_and_round_trip_to_report(monkeypatch, tmp_path):
+    """dry 는 진짜 모의매매다: 가상 매수 체결이 엔진 보유로 잡혀 매도 신호에 전량 모의 매도가 나가고, 청산 완료·거래 기록·성적표까지 이어진다."""
+    store = DBM.DB.sqlite().init_schema()
+    DBM.seed_watchlist(store, {"AAA": {**CFG, "name": "테스트"}})
+    DBM.set_setting(store, "autotrade_enabled", 1)
+    rec = Recorder("telegram")
+    ex = X.Executor(store, DryRunBroker(), "dry", Dispatcher([rec]))
+    for mod in (E, MH, X):
+        monkeypatch.setattr(mod, "now_local", sc.fixed_now_local)
+    monkeypatch.setattr(E, "DATA_DIR", tmp_path)
+    cap = sc.CaptureNotifier()
+    eng = E.SignalEngine(sc.FakeClient(sc.scenario_candles()), cap, True, DBM.load_watchlist(store), store, ex)
+    assert eng._with_dry({}) == {} and ex.dry_holdings() == {}
+    eng.evaluate("AAA", {"AAA": 100.8}, {})                               # 매수하세요 → dry 지정가 매수 (다음 사이클에 체결)
+    assert ex.dry_holdings() == {} and eng._with_dry({}) == {}
+    eng._reconcile_orders()
+    order = DBM.recent_orders(store)[0]
+    held = eng._with_dry({})
+    assert order["status"] == "filled" and held == {"AAA": {"qty": order["quantity"], "avg": order["price"], "market": "KR"}}
+    assert held["AAA"]["qty"] >= 1 and held["AAA"]["avg"] > 100.8      # 수량 = 50만 ÷ 지정가(신호가 +0.3%)
+    assert eng._with_dry({"BBB": {"qty": 1.0, "avg": 5.0}}) == {"BBB": {"qty": 1.0, "avg": 5.0}, **held}   # 실제 보유와 합친다
+    eng.evaluate("AAA", {"AAA": 100.9}, held)                             # 보유로 관리 — 내 평단은 모의 체결가
+    assert eng.state["AAA"] == "보유" and eng.last_seen["AAA"]["avg"] == order["price"]
+    eng.client.candles = eng.client.candles + [sc.STEP_BARS[3]]
+    eng.evaluate("AAA", {"AAA": 100.2}, eng._with_dry({}))               # 매도선 이탈 → 매도하세요 → dry 전량 시장가 매도
+    sell = next(o for o in DBM.recent_orders(store) if o["side"] == "SELL")     # 매수와 같은 초에 생겨 정렬이 섞일 수 있다
+    assert sell["quantity"] == held["AAA"]["qty"] and cap.signals[-1].kind == "SELL"
+    assert cap.signals[-1].account.startswith("손익 ") and f"평단 {order['price']}" in cap.signals[-1].account
+    eng._reconcile_orders()
+    assert DBM.get_order(store, sell["intent_id"])["status"] == "filled" and ex.dry_holdings() == {}
+    assert eng.last_seen["AAA"]["actual"] is True and eng.last_seen["AAA"]["price"] == 100.2
+    eng.evaluate("AAA", {"AAA": 100.2}, eng._with_dry({}))               # 모의 보유가 사라짐 → 관망 + 청산 완료 + 거래 기록
+    assert eng.state["AAA"] == "관망" and cap.sent[-1][0] == "✅ 손절 완료" and "자동매매 체결가 기준" in cap.sent[-1][2]
+    assert eng.trades.daily_summary("KR").startswith("0익절 1손절 (승률 0%)")
+    # live 실행기는 보유를 건드리지 않는다
+    eng.executor = X.Executor(store, DryRunBroker(), "live", Dispatcher([rec]))
+    assert eng._with_dry({"CCC": {"qty": 2.0, "avg": 1.0}}) == {"CCC": {"qty": 2.0, "avg": 1.0}}

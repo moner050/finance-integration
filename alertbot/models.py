@@ -12,9 +12,9 @@ SEVERITY_ORDER = {"info": 0, "review": 1, "action": 2}
 # WEAK_COOLDOWN_MIN(weak) 이고 none 은 정기 발송이라 쿨다운이 없다.
 # 검토 권유가 15분마다 오면 정작 손절 알림이 왔을 때도 흘려보게 되므로 weak 는 더 길다.
 KINDS = {
-    "ENTRY": ("action", "strong"),          # 매수 신호와 '아직 미진입' 반복은 같은 키를 쓴다
-    "ENTRY_CANCEL": ("review", "strong"),   # 매수 취소·매수 신호 만료
-    "ENTRY_WATCH": ("review", "strong"),    # 매수 대기 — 요건은 찼지만 확인 항목이 모자란 신호, 그리고 미진입 반복. 자동매매 대상 아님
+    "ENTRY": ("action", "strong"),          # 확정 매수 신호 — 곧바로 신호 포지션(보유)이라 반복이 없다. 대기 신호의 승격도 여기
+    "ENTRY_CANCEL": ("review", "strong"),   # 매수 대기 취소·만료 (확정 신호에는 없다)
+    "ENTRY_WATCH": ("review", "strong"),    # 매수 대기 — 요건은 찼지만 확인 항목이 모자란 신호, 그리고 그 반복. 자동매매 대상 아님
     "EXIT_CANCEL": ("review", "strong"),    # 청산 신호 해제 — 근거가 사라져 보유로 복귀
     "EXIT_WATCH": ("review", "strong"),     # 매도·익절 대기 — 이탈이 얕거나 소진이 아직 확실하지 않은 신호. 자동매매 대상 아님
     "CRASH_BUY": ("action", "strong"),      # Binance 5분봉 급락 매수 후보 (run_binance.py). 워커가 60분 쿨다운을 따로 건다
@@ -35,6 +35,7 @@ KINDS = {
     "MARKET_OPEN": ("info", "none"),
     "MARKET_CLOSE": ("info", "none"),
     "DAILY_REPORT": ("info", "none"),
+    "SIGNAL_REPORT": ("info", "none"),    # 신호 포지션 모의 성적표 (장 마감 · 코인은 자정 KST). 공개 채널로 보내려면 PUBLIC_KINDS 에 넣는다
     "SUMMARY": ("info", "none"),
     "SYSTEM": ("info", "none"),
     # 자동매매. 주문 관련은 쿨다운 없이 매번 보낸다 — 같은 종목의 연속 주문도 각각 알아야 한다.
@@ -70,6 +71,9 @@ class Signal:
     body: str               # 시장 근거 — 공개 채널에도 나간다
     symbol: str = None      # 종목 코드. 쿨다운 키와 이력 조회에 쓴다
     account: str = None     # 계좌 줄(손익·평단·보유 수량). 내 채널·로그·이력에만 붙는다
+    # 종류는 공개 대상이어도 이 건은 내 계좌 일일 때 — 확정 청산 뒤 내 보유가 남아 반복되는 '매도 대기'·'청산 신호 해제'.
+    # 독자의 신호는 이미 끝났으니 공개 채널에는 가지 않는다.
+    private: bool = False
 
     def __post_init__(self):
         if self.kind not in KINDS:

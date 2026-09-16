@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% set nav = "results" %}
+{% block content %}
+<style>
+ .res td.num,.res th.num{text-align:right;white-space:nowrap}
+ .res .pos{color:#116b45;font-weight:600}.res .neg{color:#a32633;font-weight:600}
+ .res h3{margin-top:30px}
+ .res h3 small{font-weight:500;color:var(--muted);margin-left:8px}
+</style>
+<div class="page-head"><div><h2>매매 결과</h2><p>위는 실전(live) 체결, 아래는 dry 모의매매 체결, 맨 아래는 신호 포지션의 모의 성적. 일별 시계열은 오래된 날부터, 건별은 최신순.</p></div></div>
+<div class="res">
+
+{% macro order_results(r, title, note) %}
+<h3>{{ title }}<small>{{ note }}</small></h3>
+<div class="stats">
+ <div class="stat"><div class="k">청산</div><div class="v">{{ r.n }}건<small>{{ r.wins }}익절 {{ r.n - r.wins }}손절·본전</small></div></div>
+ <div class="stat"><div class="k">승률</div><div class="v">{{ r.rate }}%</div></div>
+ <div class="stat"><div class="k">누적 손익 KRW</div><div class="v {{ 'pos' if r.pnl.KRW > 0 else ('neg' if r.pnl.KRW < 0 else '') }}">{{ '{:+,.0f}'.format(r.pnl.KRW) }}</div></div>
+ <div class="stat"><div class="k">누적 손익 USD</div><div class="v {{ 'pos' if r.pnl.USD > 0 else ('neg' if r.pnl.USD < 0 else '') }}">{{ '{:+,.2f}'.format(r.pnl.USD) }}</div></div>
+</div>
+{% if r.days %}
+<div class="panel">
+<table>
+<tr><th>날짜 (KST)</th><th class="num">청산</th><th class="num">익절</th><th class="num">손익 KRW</th><th class="num">손익 USD</th><th class="num">누적 KRW</th><th class="num">누적 USD</th></tr>
+{% for d in r.days %}
+<tr><td>{{ d.day }}</td><td class="num">{{ d.n }}</td><td class="num">{{ d.wins }}</td>
+ <td class="num {{ 'pos' if d.pnl.KRW > 0 else ('neg' if d.pnl.KRW < 0 else '') }}">{{ '{:+,.0f}'.format(d.pnl.KRW) }}</td>
+ <td class="num {{ 'pos' if d.pnl.USD > 0 else ('neg' if d.pnl.USD < 0 else '') }}">{{ '{:+,.2f}'.format(d.pnl.USD) }}</td>
+ <td class="num">{{ '{:+,.0f}'.format(d.cum.KRW) }}</td><td class="num">{{ '{:+,.2f}'.format(d.cum.USD) }}</td></tr>
+{% endfor %}
+</table>
+</div>
+<div class="panel">
+<table>
+<tr><th>청산 시각 (KST)</th><th>종목</th><th>신호</th><th class="num">수량</th><th class="num">평단</th><th class="num">체결가</th><th class="num">수익률</th><th class="num">손익</th></tr>
+{% for t in r.trades %}
+<tr><td style="white-space:nowrap">{{ t.created_at|kst }}</td><td><strong>{{ t.symbol|kname(names) }}</strong> <span class="muted">{{ t.symbol }}</span></td><td>{{ t.kind }}</td>
+ <td class="num">{{ '{:g}'.format(t.filled_qty or t.quantity) }}</td><td class="num">{{ t.ref_avg }}</td><td class="num">{{ t.avg_price }}</td>
+ <td class="num {{ 'pos' if t.pct and t.pct > 0 else ('neg' if t.pct and t.pct < 0 else '') }}">{% if t.pct is not none %}{{ '{:+.2f}'.format(t.pct) }}%{% endif %}</td>
+ <td class="num {{ 'pos' if t.pnl > 0 else ('neg' if t.pnl < 0 else '') }}">{{ '{:+,.2f}'.format(t.pnl) if t.ccy == 'USD' else '{:+,.0f}'.format(t.pnl) }} {{ t.ccy }}</td></tr>
+{% endfor %}
+</table>
+</div>
+{% else %}
+<p class="muted">청산된 체결이 없다</p>
+{% endif %}
+{% endmacro %}
+
+{{ order_results(live, '실전 매매 (live)', '실제 주문의 체결 기록 — 실현손익은 체결가 기준') }}
+
+{{ order_results(dry, '모의 매매 (dry)', '가상 체결 — 수수료·슬리피지 없음. 지금 모드: ' ~ mode) }}
+{% if dry_positions %}
+<p><strong>모의 보유 중</strong>
+{% for sym, p in dry_positions.items() %}<span class="badge">{{ sym|kname(names) }} · {{ '{:g}'.format(p.qty) }}주 @ {{ p.avg }}</span> {% endfor %}</p>
+{% endif %}
+
+<h3>신호 모의 성적<small>확정 매수 신호 → 확정 청산 신호, 신호가 기준 · 건당 같은 금액 · 체결·수수료 없음 (주식 + 코인)</small></h3>
+<div class="stats">
+ <div class="stat"><div class="k">청산</div><div class="v">{{ signals.n }}건<small>{{ signals.wins }}익절</small></div></div>
+ <div class="stat"><div class="k">승률</div><div class="v">{{ signals.rate }}%</div></div>
+ <div class="stat"><div class="k">누적 수익률</div><div class="v {{ 'pos' if signals.pnl > 0 else ('neg' if signals.pnl < 0 else '') }}">{{ '{:+.2f}'.format(signals.pnl) }}%</div></div>
+</div>
+{% if signals.days %}
+<div class="panel">
+<table>
+<tr><th>날짜</th><th class="num">청산</th><th class="num">익절</th><th class="num">합계 수익률</th><th class="num">누적 수익률</th></tr>
+{% for d in signals.days %}
+<tr><td>{{ d.day }}</td><td class="num">{{ d.n }}</td><td class="num">{{ d.wins }}</td>
+ <td class="num {{ 'pos' if d.pnl > 0 else ('neg' if d.pnl < 0 else '') }}">{{ '{:+.2f}'.format(d.pnl) }}%</td><td class="num">{{ '{:+.2f}'.format(d.cum) }}%</td></tr>
+{% endfor %}
+</table>
+</div>
+<div class="panel">
+<table>
+<tr><th>청산 시각 (현지)</th><th>종목</th><th>시장</th><th class="num">신호가</th><th class="num">청산가</th><th class="num">수익률</th><th>사유</th><th class="num">보유</th></tr>
+{% for t in signals.trades %}
+<tr><td style="white-space:nowrap">{{ t.closed.strftime('%m-%d %H:%M') }}</td><td><strong>{{ t.label }}</strong> <span class="muted">{{ t.ticker }}</span></td><td>{{ t.market }}</td>
+ <td class="num">{{ t.entry }}</td><td class="num">{{ t.exit }}</td>
+ <td class="num {{ 'pos' if t.pnl > 0 else ('neg' if t.pnl < 0 else '') }}">{{ '{:+.2f}'.format(t.pnl) }}%</td><td>{{ t.reason }}</td>
+ <td class="num">{{ '{:g}'.format(t.hold_min) }}분</td></tr>
+{% endfor %}
+</table>
+</div>
+{% else %}
+<p class="muted">닫힌 신호가 없다</p>
+{% endif %}
+</div>
+{% endblock %}

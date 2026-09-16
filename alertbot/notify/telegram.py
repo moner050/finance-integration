@@ -15,7 +15,8 @@ log = logging.getLogger("scalper")
 
 
 class TelegramChannel(Channel):
-    """내 채널(기본)은 전부 받는다. public 채널은 시장 신호(PUBLIC_KINDS)만, 본문의 계좌 줄을 빼고 받는다."""
+    """내 채널(기본)은 전부 받는다. public 채널은 시장 신호(PUBLIC_KINDS)만, 그중 내 계좌 일(Signal.private)은 빼고,
+    본문의 계좌 줄을 빼고 받는다."""
     name = "telegram"
 
     def __init__(self, token: str, chat_ids: list, min_severity: str = "info", timeout: int = 5, public: bool = False):
@@ -28,7 +29,7 @@ class TelegramChannel(Channel):
             self.name = "telegram_public"
 
     def accepts(self, signal) -> bool:
-        return super().accepts(signal) and (not self.public or signal.kind in PUBLIC_KINDS)
+        return super().accepts(signal) and (not self.public or (signal.kind in PUBLIC_KINDS and not signal.private))
 
     def send(self, signal) -> str:
         text = signal.text(public=self.public)

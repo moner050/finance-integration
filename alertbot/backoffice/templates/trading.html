@@ -7,13 +7,17 @@
  <dt>모드 <code>AUTOTRADE_MODE</code></dt>
  <dd><strong>{{ mode }}</strong>
   {% if mode == 'off' %}<span class="muted">실행기 없음. 알림만 보낸다.</span>
-  {% elif mode == 'dry' %}<span class="muted">정책·의도 기록은 실제와 같고 주문은 가상 체결.</span>
+  {% elif mode == 'dry' %}<span class="muted">정책·의도 기록은 실제와 같고 주문은 가상 체결. 가상 체결은 엔진 보유에 합쳐져 매도·성적표까지 이어진다.</span>
   {% else %}<span class="warn">실제 주문 모드.</span>{% endif %}</dd>
  <dt>킬 스위치 (DB)</dt>
  <dd><span class="badge {{ 'ok-badge' if settings.autotrade_enabled == '1' else 'action' }}">{{ 'ON' if settings.autotrade_enabled == '1' else 'OFF' }}</span>
   <form class="inline" method="post" action="/trading/toggle"><button>{{ '끄기' if settings.autotrade_enabled == '1' else '켜기' }}</button></form></dd>
  <dt>자동매매 종목</dt>
  <dd>{% if auto_rows %}{% for r in auto_rows %}<span class="badge">{{ r.symbol }} · {{ '{:,.0f}'.format(r.auto_amount or 0) }}</span>{% endfor %}{% else %}<span class="muted">없음 — 종목 화면에서 지정</span>{% endif %}</dd>
+ {% if mode == 'dry' %}
+ <dt>모의 보유 (dry)</dt>
+ <dd>{% if dry_positions %}{% for sym, p in dry_positions.items() %}<span class="badge">{{ sym }} · {{ '{:g}'.format(p.qty) }}주 @ {{ p.avg }}</span>{% endfor %}{% else %}<span class="muted">없음</span>{% endif %}</dd>
+ {% endif %}
  <dt>실제 주문 조건</dt>
  <dd>{% if live_ready %}<span class="warn">충족 (모드 live + 킬 스위치 ON + 자동 종목 있음)</span>{% else %}<span class="ok">미충족 — 주문이 나가지 않는다</span>{% endif %}</dd>
  <dt>주문 권한</dt>

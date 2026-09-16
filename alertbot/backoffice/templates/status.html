@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% set nav = "status" %}
 {% block content %}
-<div class="page-head"><div><h2>엔진 상태</h2><p>30초마다 자동 갱신 · 토스 엔진 지표</p></div></div>
+<div class="page-head"><div><h2>엔진 상태</h2><p>30초마다 자동 갱신 · 토스 엔진 지표. 아래는 30분마다 저장된 시황 시계열.</p></div></div>
 <div id="status" hx-get="/partials/status" hx-trigger="every 30s" hx-swap="innerHTML">
 {% include "_status.html" %}
 </div>
+{% include "_summary.html" %}
 {% endblock %}

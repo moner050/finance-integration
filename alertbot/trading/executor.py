@@ -39,6 +39,10 @@ class Executor:
         log.info("자동매매 실행기 준비: 모드 %s, 브로커 %s (킬 스위치·종목별 auto_trade 가 켜져야 주문이 나간다)",
                  mode, getattr(broker, "name", type(broker).__name__))
 
+    def dry_holdings(self) -> dict:
+        """dry 모드의 모의 보유 (가상 체결 누적). 엔진이 실제 보유에 합쳐 매도·청산 완료·성적표까지 이어지게 한다. live 면 빈 dict."""
+        return db.dry_positions(self.store) if self.mode == "dry" else {}
+
     # -- 신호 → 의도 ------------------------------------------------------------
     def on_signal(self, signal: Signal, snap: dict, holdings: dict):
         if signal.kind not in BUY_KINDS + SELL_KINDS or not snap:

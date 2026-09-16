@@ -33,7 +33,7 @@ def test_signal_model():
     with pytest.raises(ValueError):
         Signal("NOPE", "x", "y", "z")
     assert {k for k, (sev, _) in KINDS.items() if sev == "info"} == {
-        "MARKET_OPEN", "MARKET_CLOSE", "DAILY_REPORT", "SUMMARY", "SYSTEM"}
+        "MARKET_OPEN", "MARKET_CLOSE", "DAILY_REPORT", "SIGNAL_REPORT", "SUMMARY", "SYSTEM"}
 
 
 def test_cooldown_by_kind_and_symbol():
@@ -96,6 +96,9 @@ def test_public_channel_gets_market_signals_without_account_lines(monkeypatch):
         r = d.send(Signal(kind, title, "x", "b", "BBB"))
         assert r["telegram"] == "ok" and r["telegram_public"] == "skip", kind
     assert d.send(Signal("CRASH_BUY", "🔵 급락 매수 후보", "ETCUSDT 5분봉", "b", "ETCUSDT"))["telegram_public"] == "ok"
+    # 공개 종류여도 내 계좌 일(private)이면 공개 채널은 받지 않는다 — 확정 청산 뒤 내 보유 때문에 나가는 반복·해제
+    r = d.send(Signal("EXIT_CANCEL", "⚪ 청산 신호 해제", "테스트", "b", "CCC", private=True))
+    assert r == {"telegram": "ok", "telegram_public": "skip"}
     # 장 시작·시황은 공개로 가지만 시황의 보유 현황(account)은 빠진다
     assert d.send(Signal("MARKET_OPEN", "🔔 장 시작", "한국", "감시 시작"))["telegram_public"] == "ok"
     r = d.send(Signal("SUMMARY", "📊 시황", "10:00", "▲ 삼성전자  기준선 위 | 2/3", account="\n내 보유\n🔴 속쓰  보유 380주 -31%"))

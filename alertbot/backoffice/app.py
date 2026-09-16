@@ -19,12 +19,13 @@ from fastapi.templating import Jinja2Templates
 from .. import db
 from ..config import (AUTOTRADE_HARD_MAX_AMOUNT_KRW, AUTOTRADE_HARD_MAX_AMOUNT_USD, AUTOTRADE_MODE,
                       CLIENT_ID, CLIENT_SECRET, TG_CHATS, TG_MIN_SEVERITY, TG_PUBLIC_CHATS, TG_PUBLIC_TOKEN, TG_TOKEN)
-from ..config import BINANCE_TRADE_MODE
+from ..config import BINANCE_SIGNAL_TRADE_FILE, BINANCE_TRADE_MODE, DATA_DIR, SIGNAL_TRADE_FILE
 from ..models import Signal
 from ..notify import build_channels
 from ..notify.dispatcher import Dispatcher
 from ..timeutil import to_local
 from ..toss_client import TossReadOnlyClient
+from ..tracking import SignalTradeLog
 
 log = logging.getLogger("scalper")
 app = FastAPI(title="단타 알림 백오피스")
@@ -65,6 +66,7 @@ def age_sec(value):
 
 
 templates.env.filters["kst"] = kst
+templates.env.filters["kname"] = lambda sym, names: names.get(sym, sym)   # 심볼 → 표시명
 
 
 def render(request: Request, name: str, status_code: int = 200, **ctx):
@@ -85,14 +87,16 @@ def status_context() -> dict:
             tickers.append({"symbol": sym, **snap, "state": s.get("state", "관망"),
                             "stop_ref": s.get("stop_ref"), "pending": s.get("pending")})
     age = age_sec(st["heartbeat_at"]) if st else None
-    return {"status": st, "tickers": tickers, "age": age,
+    names = {r["symbol"]: r["name"] or r["symbol"] for r in rows}
+    return {"status": st, "tickers": tickers, "age": age, "names": names,
             "stale": age is None or age > HEARTBEAT_WARN_SEC,
             "watch_count": len(rows), "enabled_count": sum(1 for r in rows if r["enabled"])}
 
 
 @app.get("/", response_class=HTMLResponse)
-def status_page(request: Request):
-    return render(request, "status.html", **status_context())
+def status_page(request: Request, limit: int = 16):
+    """상태 탭 = 지금 지표(30초 갱신) + 시황 시계열. 둘 다 '시장이 어디까지 왔나' 라 한 화면이다."""
+    return render(request, "status.html", **(summary_context(min(max(limit, 2), 96)) | status_context()))
 
 
 @app.get("/partials/status", response_class=HTMLResponse)
@@ -184,7 +188,7 @@ def signals_page(request: Request, symbol: str = "", severity: str = "", limit: 
     with get_db() as d:
         rows = db.recent_signals(d, limit=min(max(limit, 1), 1000), symbol=symbol.strip().upper() or None,
                                  severity=severity or None)
-    return render(request, "signals.html", rows=rows, symbol=symbol, severity=severity)
+    return render(request, "signals.html", rows=rows, symbol=symbol, severity=severity, channels=channel_rows())
 
 
 # -- 시황 시계열 -----------------------------------------------------------------
@@ -242,14 +246,72 @@ def summary_series(rows: list) -> dict:
 def summary_context(limit: int) -> dict:
     with get_db() as d:
         rows = db.recent_signals(d, limit=limit * 2, kind="SUMMARY")
+        names = {r["symbol"]: r["name"] or r["symbol"] for r in db.list_watch_rows(d)}
     stock = [r for r in rows if r["title"] == "📊 시황"][:limit]
     coin = [r for r in rows if r["title"] == "📊 코인 시황"][:limit]
-    return {"stock": summary_series(stock), "coin": summary_series(coin), "limit": limit}
+    return {"stock": summary_series(stock), "coin": summary_series(coin), "limit": limit, "names": names}
 
 
-@app.get("/summary", response_class=HTMLResponse)
-def summary_page(request: Request, limit: int = 16):
-    return render(request, "summary.html", **summary_context(min(max(limit, 2), 96)))
+@app.get("/summary")
+def summary_page(limit: int = 16):
+    """옛 주소 — 시황 시계열은 상태 탭으로 합쳤다."""
+    return RedirectResponse(f"/?limit={limit}", status_code=303)
+
+
+# -- 매매 결과 -------------------------------------------------------------------
+
+def build_results(rows: list) -> dict:
+    """체결된 매도(alert_orders) → 건별(최신순, 평단 대비 수익률)과 일별 시계열(오래된 순, 통화별 손익·누적). 시장이 섞이므로 통화별로 따로 더한다."""
+    trades, days, cum = [], {}, {"KRW": 0.0, "USD": 0.0}
+    for o in rows:
+        ccy = "KRW" if o["market"] == "KR" else "USD"
+        ref, price = o.get("ref_avg"), o.get("avg_price")
+        pct = round((price - ref) / ref * 100, 2) if ref and price else None
+        day = to_local(datetime.fromisoformat(str(o["created_at"])), "KR").strftime("%m-%d")
+        d = days.setdefault(day, {"day": day, "n": 0, "wins": 0, "pnl": {"KRW": 0.0, "USD": 0.0}, "cum": None})
+        d["n"] += 1
+        d["wins"] += o["pnl"] > 0
+        d["pnl"][ccy] += o["pnl"]
+        cum[ccy] += o["pnl"]
+        d["cum"] = dict(cum)
+        trades.append({**o, "ccy": ccy, "pct": pct, "day": day})
+    n, wins = len(trades), sum(1 for t in trades if t["pnl"] > 0)
+    return {"trades": trades[::-1], "days": list(days.values()), "n": n, "wins": wins,
+            "rate": round(wins / n * 100) if n else 0, "pnl": cum}
+
+
+def build_signal_results(rows: list) -> dict:
+    """신호 포지션 모의 성적(CSV) → 건별(최신순)과 일별 시계열(수익률 합·누적, 건당 같은 금액 기준)."""
+    days, cum = {}, 0.0
+    for r in rows:
+        day = r["closed"].strftime("%m-%d")
+        d = days.setdefault(day, {"day": day, "n": 0, "wins": 0, "pnl": 0.0, "cum": 0.0})
+        d["n"] += 1
+        d["wins"] += r["pnl"] > 0
+        d["pnl"] = round(d["pnl"] + r["pnl"], 2)
+        cum = round(cum + r["pnl"], 2)
+        d["cum"] = cum
+    n, wins = len(rows), sum(1 for r in rows if r["pnl"] > 0)
+    return {"trades": rows[::-1], "days": list(days.values()), "n": n, "wins": wins,
+            "rate": round(wins / n * 100) if n else 0, "pnl": cum}
+
+
+def results_context() -> dict:
+    with get_db() as d:
+        rows = db.trade_rows(d)
+        names = {r["symbol"]: r["name"] or r["symbol"] for r in db.list_watch_rows(d)}
+        dry_pos = db.dry_positions(d)
+    signals = SignalTradeLog(DATA_DIR / SIGNAL_TRADE_FILE).all_rows() + SignalTradeLog(DATA_DIR / BINANCE_SIGNAL_TRADE_FILE).all_rows()
+    signals.sort(key=lambda r: r["closed"])
+    return {"live": build_results([o for o in rows if o["mode"] == "live"]),
+            "dry": build_results([o for o in rows if o["mode"] == "dry"]),
+            "signals": build_signal_results(signals), "dry_positions": dry_pos, "names": names,
+            "mode": AUTOTRADE_MODE}
+
+
+@app.get("/results", response_class=HTMLResponse)
+def results_page(request: Request):
+    return render(request, "results.html", **results_context())
 
 
 # -- 자동매매 ------------------------------------------------------------------
@@ -260,9 +322,10 @@ def trading_context(message: str = None) -> dict:
         orders = db.recent_orders(d, 200)
         rows = db.list_watch_rows(d)
         bn = db.binance_positions(d, limit=100)
+        dry = db.dry_positions(d) if AUTOTRADE_MODE == "dry" else {}     # 모의 보유 — 가상 체결 누적
     auto_rows = [r for r in rows if r.get("auto_trade")]
     live_ready = AUTOTRADE_MODE == "live" and settings["autotrade_enabled"] == "1" and bool(auto_rows)
-    return {"mode": AUTOTRADE_MODE, "settings": settings, "orders": orders, "auto_rows": auto_rows,
+    return {"mode": AUTOTRADE_MODE, "settings": settings, "orders": orders, "auto_rows": auto_rows, "dry_positions": dry,
             "live_ready": live_ready, "hard_max": {"KRW": AUTOTRADE_HARD_MAX_AMOUNT_KRW, "USD": AUTOTRADE_HARD_MAX_AMOUNT_USD},
             "open_count": sum(1 for o in orders if o["status"] in ("sent", "open")), "message": message,
             "bn_mode": BINANCE_TRADE_MODE, "bn_positions": bn}
@@ -355,9 +418,10 @@ def channel_rows() -> list:
     ]
 
 
-@app.get("/channels", response_class=HTMLResponse)
-def channels_page(request: Request):
-    return render(request, "channels.html", channels=channel_rows())
+@app.get("/channels")
+def channels_page():
+    """옛 주소 — 채널 표는 알림(신호 이력) 탭으로 합쳤다."""
+    return RedirectResponse("/signals", status_code=303)
 
 
 @app.post("/channels/{name}/test", response_class=HTMLResponse)

@@ -13,18 +13,20 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from alertbot import db
-from alertbot.binance_crash import CrashWorker, fetch_klines
+from alertbot.binance_book import SignalBook
+from alertbot.binance_crash import KST, CrashWorker, fetch_klines
 from alertbot.binance_follow import FollowWorker
 from alertbot.binance_broker import BinanceFutures, BrokerError
 from alertbot.binance_summary import summary_signal
 from alertbot.binance_trade import Trader
-from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SYMBOLS, BINANCE_TRADE_CAPITAL,
-                             BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TRADE_EXCHANGE_LEV,
-                             BINANCE_TRADE_MODE, CRASH_H4_KLINES, FOLLOW_KLINES, FOLLOW_SPECS, SUMMARY_INTERVAL_MIN,
-                             setup_logging)
+from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SIGNAL_TRADE_FILE, BINANCE_SYMBOLS,
+                             BINANCE_TRADE_CAPITAL, BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TRADE_EXCHANGE_LEV,
+                             BINANCE_TRADE_MODE, CRASH_H4_KLINES, DATA_DIR, FOLLOW_KLINES, FOLLOW_SPECS,
+                             SUMMARY_INTERVAL_MIN, setup_logging)
 from alertbot.models import Signal
 from alertbot.notify import build_channels
 from alertbot.notify.dispatcher import Dispatcher
+from alertbot.tracking import SignalTradeLog
 
 log = logging.getLogger("binance")
 
@@ -67,21 +69,37 @@ def live_broker():
     return broker
 
 
-def run(workers: list, trader=None, notifier=None):
+def run(workers: list, trader=None, notifier=None, book=None):
     # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 시작한다 — 한 주기를 기다리면 '돌고 있는 건지' 확인이 늦다
     last_summary = datetime.now(timezone.utc) - timedelta(minutes=SUMMARY_INTERVAL_MIN)
+    last_day = datetime.now(timezone.utc).astimezone(KST).date()      # 날짜(KST)가 바뀌면 지난 하루의 신호 성적표
     while True:
         for w in workers:
             try:
                 w.poll_once()
             except Exception as e:      # 네트워크·파싱 오류는 다음 사이클에 다시 시도한다
                 log.warning("%s 사이클 오류: %s", type(w).__name__, e)
+        if book is not None:
+            try:
+                book.poll()             # 독자의 신호 포지션 — 손절선·보유 한도 청산 알림
+            except Exception as e:
+                log.warning("신호 포지션 감시 오류: %s", e)
         if trader is not None:
             try:
                 trader.poll()           # 열린 가상 포지션의 손절·보유 한도·펀딩
             except Exception as e:
                 log.warning("자동매매 감시 오류: %s", e)
         now = datetime.now(timezone.utc)
+        today = now.astimezone(KST).date()
+        if today != last_day:
+            if book is not None and notifier is not None:
+                try:
+                    report = book.daily_report(last_day.isoformat())
+                    if report:
+                        notifier.send(Signal("SIGNAL_REPORT", "📈 오늘 코인 신호 성적", f"{last_day:%m-%d}", report))
+                except Exception as e:
+                    log.warning("코인 신호 성적표 오류: %s", e)
+            last_day = today
         if notifier is not None and now - last_summary >= timedelta(minutes=SUMMARY_INTERVAL_MIN):
             last_summary = now
             try:
@@ -111,10 +129,14 @@ def main():
             on = db.get_settings(store)["binance_trade_enabled"] == "1"
             body.append(f"자동매매: LIVE (전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 격리 {BINANCE_TRADE_EXCHANGE_LEV}배 · "
                         f"가용 {broker.balance():,.0f} USDT · 킬 스위치 {'ON' if on else 'OFF'})")
+    # 진입 후보 뒤의 손절·보유 한도 청산 알림과 모의 성적(자정 KST 성적표). 재시작 전의 신호 포지션도 이어받는다
+    book = SignalBook(store, notifier, trades=SignalTradeLog(DATA_DIR / BINANCE_SIGNAL_TRADE_FILE))
+    if book.open:
+        body.append("진행 중 신호 포지션: " + ", ".join(f"{p['symbol']} {p['name']}" for p in book.open.values()))
     body.append(f"시황 요약 {SUMMARY_INTERVAL_MIN}분마다")
     notifier.send(Signal("SYSTEM", "⚪ 시스템", "Binance 감시 시작", "\n".join(body)))
-    run([CrashWorker(BINANCE_SYMBOLS, notifier, trader=trader)]
-        + [FollowWorker(spec, notifier, trader=trader) for spec in FOLLOW_SPECS], trader, notifier)
+    run([CrashWorker(BINANCE_SYMBOLS, notifier, trader=trader, book=book)]
+        + [FollowWorker(spec, notifier, trader=trader, book=book) for spec in FOLLOW_SPECS], trader, notifier, book)
 
 
 if __name__ == "__main__":

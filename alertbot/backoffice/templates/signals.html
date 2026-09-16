@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% set nav = "signals" %}
 {% block content %}
-<div class="page-head"><div><h2>신호 이력</h2><p>발송된 알림과 채널별 결과</p></div></div>
+<div class="page-head"><div><h2>알림</h2><p>발송된 신호 이력과 채널별 결과. 채널 설정과 테스트 발송은 아래.</p></div></div>
 <form class="toolbar" method="get" action="/signals">
  <input type="text" name="symbol" placeholder="심볼" value="{{ symbol or '' }}">
  <select name="severity">
@@ -29,4 +29,26 @@
 {% endfor %}
 </table>
 </div>
+<h3 style="margin-top:30px">알림 채널 <span class="muted" style="font-weight:500">채널과 수신자는 .env 로 설정한다. 테스트 발송은 쿨다운·등급과 무관하게 보내고 이력에 남는다.</span></h3>
+<div class="panel">
+<table>
+<tr><th>채널</th><th>설정</th><th>수신자</th><th>최소 등급</th><th>비고</th><th>테스트</th></tr>
+{% for c in channels %}
+<tr>
+ <td><strong>{{ c.name }}</strong></td>
+ <td>{% if c.configured %}<span class="ok">● 설정됨</span>{% else %}<span class="muted">○ 미설정</span>{% endif %}</td>
+ <td>{{ c.recipients }}</td>
+ <td><span class="badge {{ c.min_severity }}">{{ c.min_severity }}</span></td>
+ <td class="muted">{{ c.detail }}</td>
+ <td>{% if c.configured %}<button hx-post="/channels/{{ c.name }}/test" hx-target="#test-{{ c.name }}">테스트 발송</button> <span id="test-{{ c.name }}"></span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+<h3>등급</h3>
+<ul class="legend">
+ <li><span class="badge action">action</span> 🔵 매수 · 🔴 손절/매도 · 🟢 익절 · 🔵 추가매수 · 🟠 마감 정리</li>
+ <li><span class="badge review">review</span> 🔵 매수 대기 · 🔴 매도 대기 · 🟡 일부 익절 검토 · ⚪ 매수 대기 취소/만료 · 청산 완료</li>
+ <li><span class="badge info">info</span> 📊 시황 · 🔔🔕 장 시작/마감 · 📈 성적 · 시스템</li>
+</ul>
 {% endblock %}

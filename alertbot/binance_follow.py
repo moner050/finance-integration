@@ -176,9 +176,10 @@ def build_signal(symbol: str, r: dict, spec: dict) -> Signal:
 class FollowWorker:
     """사양 하나. 심볼별로 새 완성봉이 생길 때마다 한 번 판정하고, 단계별로 보유 한도 동안 한 번만 알린다."""
 
-    def __init__(self, spec: dict, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding, trader=None):
+    def __init__(self, spec: dict, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding, trader=None, book=None):
         self.spec = spec
         self.trader = trader        # binance_trade.DryTrader — 진입 후보(entry)만 가상 체결한다
+        self.book = book            # binance_book.SignalBook — 독자의 신호 포지션(손절·보유 한도 청산 알림). None 이면 진입 알림만
         self.notify = notifier
         self.fetch_bars = fetch_bars
         self.fetch_fund = fetch_fund
@@ -195,11 +196,16 @@ class FollowWorker:
         return {**m, "close": bars[-1]["close"], "bull": reg[0] if reg else None}
 
     def status_lines(self, now: datetime = None) -> list:
-        """시황 요약 한 줄씩. 급변 조건이 어디까지 찼는지, 관찰(눌림·반등 대기) 중인지, 국면이 맞는지."""
+        """시황 요약 한 줄씩. 진입 신호가 진행 중이면 그 진행 상황을, 아니면 급변 조건이 어디까지 찼는지·관찰(눌림·반등 대기)
+        중인지·국면이 맞는지."""
         now = now or datetime.now(timezone.utc)
         spec, long, out = self.spec, self.spec["side"] == "long", []
         head = f"{spec['name']} {spec['label']}"
         for symbol in spec["symbols"]:
+            live = self.book.status_line(spec["kinds"][1], symbol, now) if self.book is not None else None
+            if live:
+                out.append(f"{head} {symbol}  {live}")
+                continue
             m = self.status.get(symbol)
             if not m:
                 out.append(f"{head} {symbol}  데이터 부족")
@@ -254,10 +260,15 @@ class FollowWorker:
             self.notify.send(signal)
             self.last_alert[key] = now
             sent.append(signal)
-            if self.trader is not None and result["stage"] == "entry":
+            if result["stage"] != "entry":
+                continue
+            hold_hours = spec["hold_bars"] * BAR_HOURS[spec["interval"]]
+            if self.book is not None:
+                self.book.opened(spec["kinds"][1], symbol, spec["side"], signal.label, f"{spec['name']} {spec['label']}",
+                                 result["close"], result["stop"], hold_hours, now)
+            if self.trader is not None:
                 try:
-                    self.trader.on_entry(spec["kinds"][1], symbol, spec["side"], result,
-                                         spec["hold_bars"] * BAR_HOURS[spec["interval"]], now)
+                    self.trader.on_entry(spec["kinds"][1], symbol, spec["side"], result, hold_hours, now)
                 except Exception as e:          # 자동매매 오류가 알림을 막으면 안 된다
                     log.warning("%s 자동매매 진입 처리 실패: %s", symbol, e)
         return sent

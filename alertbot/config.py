@@ -187,8 +187,8 @@ REENTRY_BLOCK_MIN = 60
 # 산 지 1~2분 만에 '정리하세요'가 나오는 모순이 생긴다.
 # 손절·매도(위험 알림)에는 적용하지 않는다.
 EXIT_GRACE_MIN = 20
-# 매수 신호 뒤 이 시간 안에 진입하지 않으면 신호를 거둔다 (매수 신호 만료).
-# 돌파봉의 근거는 오래가지 않는다 — 한 시간 뒤의 '매수하세요' 는 늦은 진입이다.
+# 매수 대기 신호 뒤 이 시간 안에 확인 항목이 채워지지 않으면 대기를 거둔다 (매수 대기 만료).
+# 돌파봉의 근거는 오래가지 않는다 — 한 시간 뒤의 승격은 늦은 진입이다. 확정 신호('매수하세요')는 곧바로 신호 포지션이라 만료가 없다.
 # 첫 반복(15분)은 한 번 나가고, 그 다음 반복 전에 만료된다.
 ENTRY_PENDING_MAX_MIN = 30
 # 청산 신호(손절·매도·익절) 반복 알림의 최대 간격. 15분에서 두 배씩 늘린다 (15→30→60→120→240).
@@ -220,6 +220,10 @@ ENABLE_TRACKING = True
 TRACK_MINUTES = [15, 30, 60]   # ENTRY 후 몇 분 뒤를 기록할지
 TRACK_FILE = "signal_tracking.csv"
 TRADE_FILE = "trade_log.csv"    # 청산된 거래 기록 (일일 성적 집계용)
+# 신호 포지션(확정 매수 신호 → 확정 청산 신호)의 모의 성적. 신호가와 청산 신호 시점 가격 기준이라 체결·수수료는 없다.
+# 주식은 장 마감 성적표, 코인은 자정(KST) 성적표의 근거다.
+SIGNAL_TRADE_FILE = "signal_trades.csv"
+BINANCE_SIGNAL_TRADE_FILE = "binance_signal_trades.csv"
 
 # 런타임 산출물(로그·추적 CSV·거래 CSV) 위치. 기본은 프로젝트 루트, Docker 에선 볼륨(ALERT_DATA_DIR=/data).
 DATA_DIR = Path(_CFG.get("ALERT_DATA_DIR") or os.getenv("ALERT_DATA_DIR") or BASE_DIR)

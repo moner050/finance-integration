@@ -151,7 +151,8 @@ def fmt_price(x: float) -> str:
     return f"{x:,.1f}" if x >= 1000 else (f"{x:.3f}" if x >= 1 else f"{x:.5f}")
 
 
-def build_signal(symbol: str, r: dict) -> Signal:
+def build_signal(symbol: str, r: dict, addon: bool = False) -> Signal:
+    """addon 은 같은 심볼의 급락 매수 신호가 아직 진행 중일 때(60분 쿨다운 < 8시간 보유) — 새 진입이 아니라 추가매수로 부른다."""
     when = datetime.fromtimestamp(r["open_time"] / 1000, tz=timezone.utc).astimezone(KST)
     lines = [
         f"{fmt_price(r['close'])} ({when:%m-%d %H:%M} KST 봉) · 4시간 고점 {fmt_price(r['ref_high'])} 대비 "
@@ -169,16 +170,21 @@ def build_signal(symbol: str, r: dict) -> Signal:
                      else "4시간봉 배열 불명 (조회 실패) — 상승 배열이면 지나간다")
     lines.append(f"참고: 손절 {fmt_price(r['stop'])} (종가 -{CRASH_STOP_PCT:g}%) · 보유 한도 {CRASH_HOLD_HOURS}시간 · "
                  f"목표 지정가 없음 · 50% 되돌림선 {fmt_price(r['retrace50'])}")
-    return Signal("CRASH_BUY", "🔵 급락 매수 후보", f"{symbol} 5분봉", "\n".join(lines), symbol)
+    if addon:
+        lines.append("진행 중인 급락 매수 신호에 추가 — 손절선·보유 한도는 이 봉 기준으로 갱신\n"
+                     "⚠ 물량 늘리면 손절 시 손실도 같은 배로 커짐")
+    return Signal("CRASH_BUY", "🔵 급락 추가매수 후보" if addon else "🔵 급락 매수 후보", f"{symbol} 5분봉", "\n".join(lines), symbol)
 
 
 class CrashWorker:
     """심볼별로 새 완성봉이 생길 때마다 한 번 판정한다. 같은 심볼은 CRASH_COOLDOWN_MIN 동안 한 번만 알린다."""
 
-    def __init__(self, symbols: list, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding, trader=None, fetch_h4=None):
+    def __init__(self, symbols: list, notifier, fetch_bars=fetch_klines, fetch_fund=fetch_funding, trader=None, fetch_h4=None,
+                 book=None):
         self.symbols = list(symbols)
         self.fetch_h4 = fetch_h4 or (lambda s: fetch_klines(s, "4h", CRASH_H4_KLINES))
         self.trader = trader        # binance_trade.DryTrader — 진입 후보를 가상 체결한다. None 이면 알림만
+        self.book = book            # binance_book.SignalBook — 독자의 신호 포지션(손절·보유 한도 청산 알림). None 이면 진입 알림만
         self.notify = notifier
         self.fetch_bars = fetch_bars
         self.fetch_fund = fetch_fund
@@ -187,10 +193,15 @@ class CrashWorker:
         self.status = {}            # symbol -> 마지막 완성봉의 급락 지표 (시황 요약용)
 
     def status_lines(self, now: datetime = None) -> list:
-        """시황 요약 한 줄씩. 조건 3개(낙폭·RSI·반전봉) 중 몇 개가 찼는지 보여준다 — 행동 신호는 개별 알림뿐이다."""
+        """시황 요약 한 줄씩. 신호가 진행 중이면 그 진행 상황을, 아니면 조건 3개(낙폭·RSI·반전봉) 중 몇 개가 찼는지 —
+        행동 신호는 개별 알림뿐이다."""
         now = now or datetime.now(timezone.utc)
         out = []
         for symbol in self.symbols:
+            live = self.book.status_line("CRASH_BUY", symbol, now) if self.book is not None else None
+            if live:
+                out.append(f"급락 매수 5분봉 {symbol}  {live}")
+                continue
             m = self.status.get(symbol)
             if not m:
                 out.append(f"급락 매수 5분봉 {symbol}  데이터 부족")
@@ -232,10 +243,13 @@ class CrashWorker:
                 log.info("%s 급락 조건 충족했지만 쿨다운 중 (마지막 알림 %s)", symbol, last.isoformat(timespec="minutes"))
                 continue
             result["funding"] = self.fetch_fund(symbol)
-            signal = build_signal(symbol, result)
+            signal = build_signal(symbol, result, addon=self.book is not None and self.book.is_open("CRASH_BUY", symbol))
             self.notify.send(signal)
             self.last_alert[symbol] = now
             sent.append(signal)
+            if self.book is not None:
+                self.book.opened("CRASH_BUY", symbol, "long", signal.label, "급락 매수 5분봉", result["close"], result["stop"],
+                                 CRASH_HOLD_HOURS, now)
             if self.trader is not None:
                 try:
                     self.trader.on_entry("CRASH_BUY", symbol, "long", result, CRASH_HOLD_HOURS, now)

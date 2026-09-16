@@ -1,4 +1,4 @@
-"""기록 — 신호 추적 CSV 와 청산 거래 CSV."""
+"""기록 — 신호 추적 CSV, 청산 거래 CSV, 신호 포지션 모의 성적 CSV."""
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -161,4 +161,100 @@ class TradeLog:
                 parts.append(f"손익비 1:{round(aw / al, 2)}  (평균 익절 {aw:+.2f}% / 평균 손절 -{al:.2f}%)")
         parts.append("")
         parts.append("※ 체결가 미확인 — 모두 추정치")
+        return "\n".join(parts)
+
+
+def fmt_num(x: float) -> str:
+    """성적표용 가격 — 큰 값은 천 단위 구분, 작은 값은 있는 자리 그대로 (코인 소수점)."""
+    return f"{x:,.0f}" if x >= 1000 else f"{x:g}"
+
+
+def hold_min_text(minutes: float) -> str:
+    return f"{minutes / 60:.1f}시간" if minutes >= 120 else f"{round(minutes)}분"
+
+
+class SignalTradeLog:
+    """신호 포지션(확정 매수 신호 → 확정 청산 신호)의 모의 성적을 CSV 에 남기고 하루치를 집계한다.
+
+    체결이 아니라 신호 시점 가격이 기준이고 수량이 없으니, 건마다 같은 금액을 넣었다고 보고 단순 평균·합계로 계산한다.
+    수수료·슬리피지는 반영하지 않는다 — '신호가 맞았는가' 를 보는 표다. 코인은 market='BINANCE' 이고 하루는 KST 기준이다.
+    """
+
+    HEADER = "closed_at,ticker,label,market,opened_at,entry_price,exit_price,pnl_pct,reason,hold_min\n"
+
+    def __init__(self, path: Path):
+        self.path = path
+        if not self.path.exists():
+            self.path.write_text(self.HEADER, encoding="utf-8-sig")
+
+    @staticmethod
+    def _tz(market: str) -> str:
+        return "KR" if market == "BINANCE" else market
+
+    def add(self, ticker: str, label: str, market: str, opened_at: str, entry: float, exit_price: float, pnl: float,
+            reason: str, now: datetime = None) -> dict:
+        now = now or datetime.now(timezone.utc)
+        try:
+            hold = round((now - datetime.fromisoformat(opened_at)).total_seconds() / 60, 1)
+        except ValueError:
+            hold = 0.0
+        row = {"closed_at": now.isoformat(), "ticker": ticker, "label": label, "market": market, "opened_at": opened_at,
+               "entry": entry, "exit": exit_price, "pnl": pnl, "reason": reason, "hold_min": hold}
+        try:
+            with self.path.open("a", encoding="utf-8-sig") as f:
+                f.write(f"{row['closed_at']},{ticker},{label},{market},{opened_at},{entry},{exit_price},{pnl},{reason},{hold}\n")
+        except OSError as e:
+            log.warning("신호 성적 기록 실패: %s", e)
+        return row
+
+    def all_rows(self) -> list:
+        """전체 기록 (오래된 순). 시각은 market 현지(코인은 KST)로 바꿔 둔다 — 백오피스 매매 결과 화면과 하루치 집계가 쓴다."""
+        out = []
+        try:
+            lines = self.path.read_text(encoding="utf-8-sig").splitlines()[1:]
+        except OSError:
+            return out
+        for ln in lines:
+            p = ln.split(",")
+            if len(p) < 10:
+                continue
+            tz = self._tz(p[3])
+            try:
+                out.append({"market": p[3], "closed": to_local(datetime.fromisoformat(p[0]), tz), "ticker": p[1], "label": p[2],
+                            "opened": to_local(datetime.fromisoformat(p[4]), tz), "entry": float(p[5]), "exit": float(p[6]),
+                            "pnl": float(p[7]), "reason": p[8], "hold_min": float(p[9])})
+            except ValueError:
+                continue
+        return out
+
+    def rows_on(self, market: str, day: str = None) -> list:
+        """market 의 현지 날짜 day(YYYY-MM-DD, 기본 오늘)에 청산된 신호들 (기록 순서)."""
+        day = day or now_local(self._tz(market)).strftime("%Y-%m-%d")
+        return [r for r in self.all_rows() if r["market"] == market and r["closed"].strftime("%Y-%m-%d") == day]
+
+    def daily_summary(self, market: str, open_lines=(), day: str = None) -> str:
+        """마감(코인은 자정) 성적표. 청산된 신호도 진행 중인 신호도 없으면 빈 문자열."""
+        rows, open_lines = self.rows_on(market, day), list(open_lines)
+        if not rows and not open_lines:
+            return ""
+        parts = []
+        if rows:
+            wins = [r for r in rows if r["pnl"] > 0]
+            losses = [r for r in rows if r["pnl"] < 0]
+            avg = sum(r["pnl"] for r in rows) / len(rows)
+            parts.append(f"청산 {len(rows)}건: {len(wins)}익절 {len(losses)}손절 (승률 {round(len(wins) / len(rows) * 100)}%)")
+            parts.append(f"평균 {avg:+.2f}% · 합계 {sum(r['pnl'] for r in rows):+.2f}%  (건당 같은 금액 기준)")
+            if wins and losses:
+                aw = sum(r["pnl"] for r in wins) / len(wins)
+                al = abs(sum(r["pnl"] for r in losses) / len(losses))
+                parts.append(f"손익비 1:{round(aw / al, 2)}  (평균 익절 {aw:+.2f}% / 평균 손절 -{al:.2f}%)")
+            for r in rows:
+                parts.append(f"· {r['opened']:%H:%M} {r['label']} {fmt_num(r['entry'])} → {fmt_num(r['exit'])} "
+                             f"{r['pnl']:+.2f}% {r['reason']} ({hold_min_text(r['hold_min'])})")
+        else:
+            parts.append("오늘 청산된 신호 없음")
+        if open_lines:
+            parts.append(f"진행 중 {len(open_lines)}건 — 청산 신호가 나올 때까지 계속 관리")
+            parts += [f"· {x}" for x in open_lines]
+        parts += ["", "※ 신호가 → 청산 신호 시점 가격의 모의 성적. 체결·수수료 미반영"]
         return "\n".join(parts)

@@ -161,6 +161,7 @@ SETTING_DEFAULTS = {
     "daily_loss_limit_usd": "200",       # 같은 기준 (달러)
     "max_order_amount_krw": "1000000",   # 1회 매수 금액 상한 (원)
     "max_order_amount_usd": "1000",      # 1회 매수 금액 상한 (달러)
+    "binance_signal_book": "[]",         # 코인 신호 포지션 장부(binance_book.SignalBook) — 워커가 쓰는 JSON, 백오피스는 건드리지 않는다
 }
 
 # upsert 는 방언이 다르다. MySQL 은 8.0.19+ 의 행 별칭(AS new) 구문 — VALUES() 는 8.0.20 부터 폐기 예정.
@@ -503,6 +504,37 @@ def recent_orders(db: DB, limit: int = 200) -> list:
 def get_order(db: DB, intent_id: str):
     rows = _order_rows(db, "SELECT * FROM alert_orders WHERE intent_id = %s", (intent_id,))
     return rows[0] if rows else None
+
+
+def trade_rows(db: DB, mode: str = None) -> list:
+    """체결된 매도(실현손익 있음) — 매매 결과 화면의 건별·일별 시계열. 오래된 것부터."""
+    sql = "SELECT * FROM alert_orders WHERE side = 'SELL' AND status IN ('filled', 'partial') AND pnl IS NOT NULL"
+    params = []
+    if mode:
+        sql += " AND mode = %s"
+        params.append(mode)
+    return _order_rows(db, sql + " ORDER BY created_at", params)
+
+
+def dry_positions(db: DB) -> dict:
+    """dry 가상 체결을 누적한 모의 보유 — symbol -> {qty, avg, market}. 매수는 평단을 가중 평균으로 더하고 매도는 수량을 뺀다.
+
+    따로 표를 두지 않고 체결된 dry 의도에서 매번 계산한다 — 이중 장부가 없어 어긋날 수 없고, 주문 수는 하루 수십 건이 상한이다.
+    """
+    pos = {}
+    rows = _order_rows(db, "SELECT * FROM alert_orders WHERE mode = 'dry' AND status IN ('filled', 'partial') "
+                           "ORDER BY created_at")
+    for o in rows:
+        qty, price = o["filled_qty"] or 0.0, o["avg_price"] or o["price"]
+        if qty <= 0:
+            continue
+        p = pos.setdefault(o["symbol"], {"qty": 0.0, "avg": 0.0, "market": o["market"]})
+        if o["side"] == "BUY":
+            p["avg"] = round((p["avg"] * p["qty"] + price * qty) / (p["qty"] + qty), 4)
+            p["qty"] += qty
+        else:
+            p["qty"] = max(p["qty"] - qty, 0.0)
+    return {s: p for s, p in pos.items() if p["qty"] > 0}
 
 
 # -- Binance 가상 포지션 (alertbot/binance_trade.py) --------------------------------

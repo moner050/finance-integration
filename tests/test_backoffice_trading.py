@@ -91,3 +91,30 @@ def test_binance_kill_switch_toggle(client):
     assert DBM.get_settings(store)["binance_trade_enabled"] == "1"
     c.post("/trading/binance/toggle", follow_redirects=False)
     assert DBM.get_settings(store)["binance_trade_enabled"] == "0"
+
+
+def test_results_page_shows_live_then_dry_series(client, monkeypatch, tmp_path):
+    c, store = client
+    monkeypatch.setattr(A, "DATA_DIR", tmp_path)                      # 신호 성적 CSV 는 비어 있다
+    base = {"market": "KR", "order_type": "MARKET", "price": 100.0, "quantity": 10, "amount": 1000, "bar_key": None,
+            "reason": None, "order_id": "dry-1", "filled_qty": 10, "status": "filled", "updated_at": None}
+    DBM.insert_order(store, {**base, "intent_id": "AAA-b", "mode": "dry", "symbol": "AAA", "side": "BUY", "kind": "ENTRY",
+                             "ref_avg": None, "avg_price": 100.0, "pnl": None, "created_at": "2026-09-15T01:00:00+00:00"})
+    DBM.insert_order(store, {**base, "intent_id": "AAA-s", "mode": "dry", "symbol": "AAA", "side": "SELL", "kind": "SELL",
+                             "ref_avg": 100.0, "avg_price": 102.0, "pnl": 20.0, "created_at": "2026-09-15T02:00:00+00:00"})
+    DBM.insert_order(store, {**base, "intent_id": "AAA-s2", "mode": "dry", "symbol": "AAA", "side": "SELL", "kind": "STOP",
+                             "ref_avg": 100.0, "avg_price": 97.0, "pnl": -30.0, "created_at": "2026-09-16T02:00:00+00:00"})
+    DBM.insert_order(store, {**base, "intent_id": "AAA-l", "mode": "live", "symbol": "AAA", "side": "SELL", "kind": "SELL",
+                             "ref_avg": 100.0, "avg_price": 101.0, "pnl": 10.0, "created_at": "2026-09-16T03:00:00+00:00"})
+    ctx = A.results_context()
+    assert (ctx["dry"]["n"], ctx["dry"]["wins"], ctx["dry"]["rate"], ctx["dry"]["pnl"]["KRW"]) == (2, 1, 50, -10.0)
+    assert [(d["day"], d["n"], d["cum"]["KRW"]) for d in ctx["dry"]["days"]] == [("09-15", 1, 20.0), ("09-16", 1, -10.0)]
+    assert ctx["dry"]["trades"][0]["kind"] == "STOP" and ctx["dry"]["trades"][0]["pct"] == -3.0       # 최신순
+    assert ctx["live"]["n"] == 1 and ctx["live"]["pnl"]["KRW"] == 10.0 and ctx["signals"]["n"] == 0
+    r = c.get("/results")
+    assert r.status_code == 200
+    assert r.text.index("실전 매매 (live)") < r.text.index("모의 매매 (dry)") < r.text.index("신호 모의 성적")
+    assert "닫힌 신호가 없다" in r.text and "-3.00%" in r.text
+    # 합친 탭: 옛 주소는 새 탭으로 간다
+    assert c.get("/summary", follow_redirects=False).status_code == 303 and "시황 시계열" in c.get("/").text
+    assert c.get("/channels", follow_redirects=False).headers["location"] == "/signals" and "테스트 발송" in c.get("/signals").text
