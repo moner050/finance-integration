@@ -140,8 +140,10 @@ SCHEMA = {
 # 기존 테이블에 나중에 추가된 컬럼. init_schema 가 없으면 붙인다.
 EXTRA_COLUMNS = {
     "alert_watchlist": {
-        "mysql": [("auto_trade", "TINYINT NOT NULL DEFAULT 0"), ("auto_amount", "DECIMAL(18,2) NOT NULL DEFAULT 0")],
-        "sqlite": [("auto_trade", "INTEGER NOT NULL DEFAULT 0"), ("auto_amount", "REAL NOT NULL DEFAULT 0")],
+        "mysql": [("auto_trade", "TINYINT NOT NULL DEFAULT 0"), ("auto_amount", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+                  ("day_trade", "TINYINT NOT NULL DEFAULT 0")],
+        "sqlite": [("auto_trade", "INTEGER NOT NULL DEFAULT 0"), ("auto_amount", "REAL NOT NULL DEFAULT 0"),
+                   ("day_trade", "INTEGER NOT NULL DEFAULT 0")],
     },
     "alert_binance_positions": {                     # live 주문번호 (dry 행은 비어 있다)
         "mysql": [("entry_order_id", "VARCHAR(32)"), ("stop_order_id", "VARCHAR(32)")],
@@ -165,21 +167,21 @@ SETTING_DEFAULTS = {
 UPSERT_WATCH = {
     "mysql": """INSERT INTO alert_watchlist
                   (symbol, market, name, leaders, inverse, pair, hold_only, note, enabled, auto_trade, auto_amount,
-                   created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
+                   day_trade, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE market=new.market, name=new.name, leaders=new.leaders,
                   inverse=new.inverse, pair=new.pair, hold_only=new.hold_only, note=new.note,
                   enabled=new.enabled, auto_trade=new.auto_trade, auto_amount=new.auto_amount,
-                  updated_at=new.updated_at""",
+                  day_trade=new.day_trade, updated_at=new.updated_at""",
     "sqlite": """INSERT INTO alert_watchlist
                   (symbol, market, name, leaders, inverse, pair, hold_only, note, enabled, auto_trade, auto_amount,
-                   created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   day_trade, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(symbol) DO UPDATE SET market=excluded.market, name=excluded.name,
                   leaders=excluded.leaders, inverse=excluded.inverse, pair=excluded.pair,
                   hold_only=excluded.hold_only, note=excluded.note, enabled=excluded.enabled,
                   auto_trade=excluded.auto_trade, auto_amount=excluded.auto_amount,
-                  updated_at=excluded.updated_at""",
+                  day_trade=excluded.day_trade, updated_at=excluded.updated_at""",
 }
 UPSERT_STATUS = {
     "mysql": """INSERT INTO alert_engine_status (id, heartbeat_at, active, pre, last_error, state, snapshots)
@@ -195,7 +197,7 @@ UPSERT_STATUS = {
 
 
 def _json_default(value):
-    """엔진 상태에 섞인 datetime 은 ISO 문자열로. 복원 쪽은 문자열이어도 쓰지 않는 필드(pending.at)다."""
+    """엔진 상태에 섞인 datetime 은 ISO 문자열로. 복원 쪽은 문자열을 그대로 파싱한다 (pending.at·next_at)."""
     if isinstance(value, datetime):
         return value.isoformat()
     raise TypeError(f"JSON 직렬화 불가: {type(value).__name__}")
@@ -306,6 +308,7 @@ def _row_to_item(row: dict) -> dict:
         "note": row["note"] or None,
         "auto_trade": bool(row.get("auto_trade") or 0),
         "auto_amount": float(row.get("auto_amount") or 0),
+        "day_trade": bool(row.get("day_trade") or 0),
     }
 
 
@@ -337,7 +340,8 @@ def watchlist_version(db: DB) -> str:
 
 def upsert_watch(db: DB, symbol: str, market: str, name: str = None, leaders: list = None,
                  inverse: bool = False, pair: str = None, hold_only: bool = False,
-                 note: str = None, enabled: bool = True, auto_trade: bool = False, auto_amount: float = 0):
+                 note: str = None, enabled: bool = True, auto_trade: bool = False, auto_amount: float = 0,
+                 day_trade: bool = False):
     symbol = symbol.strip().upper()
     if not symbol:
         raise ValueError("symbol 이 비어 있다")
@@ -348,7 +352,7 @@ def upsert_watch(db: DB, symbol: str, market: str, name: str = None, leaders: li
     db.execute(UPSERT_WATCH[db.dialect],
                (symbol, market, name or None, leaders_json, int(bool(inverse)),
                 (pair or "").strip().upper() or None, int(bool(hold_only)), note or None,
-                int(bool(enabled)), int(bool(auto_trade)), float(auto_amount or 0), now, now))
+                int(bool(enabled)), int(bool(auto_trade)), float(auto_amount or 0), int(bool(day_trade)), now, now))
 
 
 def set_enabled(db: DB, symbol: str, enabled: bool):
@@ -369,7 +373,8 @@ def seed_watchlist(db: DB, items: dict) -> int:
             continue
         upsert_watch(db, symbol, cfg["market"], cfg.get("name"), cfg.get("leaders") or [],
                      cfg.get("inverse", False), cfg.get("pair"), cfg.get("hold_only", False), cfg.get("note"),
-                     auto_trade=cfg.get("auto_trade", False), auto_amount=cfg.get("auto_amount", 0))
+                     auto_trade=cfg.get("auto_trade", False), auto_amount=cfg.get("auto_amount", 0),
+                     day_trade=cfg.get("day_trade", False))
         added += 1
     return added
 

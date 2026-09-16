@@ -39,10 +39,10 @@ def test_signal_model():
 def test_cooldown_by_kind_and_symbol():
     d = D.Dispatcher([Recorder()])
     assert d.send(sig()) == {"rec": "ok"}
-    assert d.send(sig()) == {}                                   # 15분 안 → 억제
+    assert d.send(sig()) is None                                 # 15분 안 → 억제 (빈 dict 는 '채널 없음')
     assert d.send(sig(symbol="BBB")) == {"rec": "ok"}            # 다른 종목은 별개
     assert d.send(sig("EXIT_FULL", title="🟢 전량 익절하세요")) == {"rec": "ok"}
-    assert d.send(sig("EXIT_FULL", title="🟢 전량 정리하세요")) == {}   # 문구가 달라도 같은 청산 신호 (P1-5)
+    assert d.send(sig("EXIT_FULL", title="🟢 전량 정리하세요")) is None   # 문구가 달라도 같은 청산 신호 (P1-5)
     d.last_sent[sig().key] = datetime.now(timezone.utc) - timedelta(minutes=16)
     assert d.send(sig()) == {"rec": "ok"}
     assert d.send(sig(), force=True) == {"rec": "ok"}           # 테스트 발송은 쿨다운 무시
@@ -53,7 +53,7 @@ def test_weak_and_none_cooldown():
     half = sig("EXIT_HALF", title="🟡 절반 익절 검토")
     assert d.send(half)
     d.last_sent[half.key] = datetime.now(timezone.utc) - timedelta(minutes=30)
-    assert d.send(half) == {}                                    # 45분 쿨다운
+    assert d.send(half) is None                                  # 45분 쿨다운
     summary = Signal("SUMMARY", "📊 시황", "10:00", "x")
     assert d.send(summary) and d.send(summary)                   # 정기 발송은 쿨다운 없음
 

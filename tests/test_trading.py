@@ -10,6 +10,7 @@ from alertbot.trading.broker import BrokerError, DryRunBroker, OrderState
 from alertbot.trading.models import OrderIntent
 from alertbot.trading.policy import RiskPolicy
 from tests import scenario as sc
+from tests.conftest import bar
 from tests.test_notify import Recorder
 from alertbot.notify.dispatcher import Dispatcher
 
@@ -200,3 +201,32 @@ def test_engine_hooks_pass_signals_and_fill_prices(monkeypatch, tmp_path):
     assert eng.last_seen["AAA"]["actual"] is True and eng.last_seen["AAA"]["price"] == 100.2
     eng.evaluate("AAA", {"AAA": 100.2}, {})
     assert "자동매매 체결가 기준" in cap.sent[-1][2]
+
+
+def test_engine_repeat_entry_does_not_reorder(monkeypatch, tmp_path):
+    """진입대기 반복은 원래 신호봉으로 실행기에 가고, 쿨다운에 억제된 반복은 실행기에 가지도 않는다."""
+    store = DBM.DB.sqlite().init_schema()
+    DBM.seed_watchlist(store, {"AAA": {**CFG, "name": "테스트"}})
+    DBM.set_setting(store, "autotrade_enabled", 1)
+    ex = X.Executor(store, SlowBroker(), "dry", Dispatcher([Recorder("telegram")]))   # 체결되지 않는 지정가
+    for mod in (E, MH, X):
+        monkeypatch.setattr(mod, "now_local", sc.fixed_now_local)
+    monkeypatch.setattr(E, "DATA_DIR", tmp_path)
+    engine_rec = Recorder("engine")
+    client = sc.FakeClient(sc.scenario_candles())
+    eng = E.SignalEngine(client, Dispatcher([engine_rec]), True, DBM.load_watchlist(store), store, ex)   # 진짜 쿨다운
+    eng.evaluate("AAA", {"AAA": 100.8}, {})                               # ENTRY → 매수 의도 1 (미체결)
+    assert [o["bar_key"][11:16] for o in DBM.recent_orders(store)] == ["10:01"]
+    last = datetime.fromisoformat(client.candles[-1]["timestamp"])
+    client.candles = client.candles + [bar(last + timedelta(minutes=1), 100.9, 1000, high=100.95, low=100.8)]
+    eng.evaluate("AAA", {"AAA": 100.9}, {})                               # 다음 봉, 쿨다운 안 → 알림도 실행기도 침묵
+    assert len(DBM.recent_orders(store)) == 1 and len(engine_rec.got) == 1
+    # 미체결 매수가 TTL 로 취소된 뒤 반복 알림이 나가도, 같은 신호봉이라 다시 사지 않는다
+    intent_id = DBM.recent_orders(store)[0]["intent_id"]
+    DBM.update_order(store, intent_id, created_at=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds"))
+    eng._reconcile_orders()
+    assert DBM.get_order(store, intent_id)["status"] == "canceled"
+    eng.notify.last_sent.clear()                                          # 15분이 지난 것으로
+    eng.evaluate("AAA", {"AAA": 100.9}, {})
+    assert engine_rec.got[-1].kind == "ENTRY" and "아직 미진입" in engine_rec.got[-1].body
+    assert len(DBM.recent_orders(store)) == 1                             # 새 주문 없음

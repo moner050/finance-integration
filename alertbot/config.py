@@ -99,6 +99,7 @@ ENABLE_EXIT_SIGNAL = True      # 거래량 소진 기반 익절 알림. 끄려�
 #   leaders : 선행 바스켓. None 이면 방향 조건을 생략 (개별주)
 #   inverse : 인버스면 선행 바스켓 방향을 뒤집는다
 #   pair    : 동시 진입을 막을 반대 종목
+#   day_trade: 마감 CLOSE_WARN_MIN 분 전 정리 알림(자동매매면 전량 매도) 대상. 오버나잇을 피할 레버리지 상품에만
 SEED_WATCHLIST = {
     # 반도체: 신호는 1배 ETF(SOXX)에서 낸다. 3배 상품은 1분봉이 너무 튀어
     # 지표가 지저분하다. SOXX 에서 매수 신호가 뜨면 사람이 SOXL 을 산다.
@@ -108,13 +109,13 @@ SEED_WATCHLIST = {
     # 3배 상품은 보유 중일 때만 감시한다 (매수 신호는 안 낸다).
     # 손절·익절은 자기 캔들로 판단해야 3배 변동폭이 반영된다.
     "SOXL":   {"market": "US", "leaders": None, "inverse": False,
-               "pair": "SOXS", "hold_only": True},
+               "pair": "SOXS", "hold_only": True, "day_trade": True},
     "SOXS":   {"market": "US", "leaders": None, "inverse": True,
-               "pair": "SOXL", "hold_only": True},
+               "pair": "SOXL", "hold_only": True, "day_trade": True},
     "KORU":   {"market": "US", "leaders": ["EWY"],
-               "inverse": False, "pair": None},
+               "inverse": False, "pair": None, "day_trade": True},
     "BITX":   {"market": "US", "leaders": ["IBIT"],
-               "inverse": False, "pair": None},
+               "inverse": False, "pair": None, "day_trade": True},
     # 개별주. 선행 바스켓 없이 VWAP + RVOL 두 조건으로 판단한다.
     "OKLO":   {"market": "US", "leaders": None,
                "inverse": False, "pair": None},
@@ -170,6 +171,16 @@ REENTRY_BLOCK_MIN = 60
 # 산 지 1~2분 만에 '정리하세요'가 나오는 모순이 생긴다.
 # 손절·매도(위험 알림)에는 적용하지 않는다.
 EXIT_GRACE_MIN = 20
+# 매수 신호 뒤 이 시간 안에 진입하지 않으면 신호를 거둔다 (매수 신호 만료).
+# 돌파봉의 근거는 오래가지 않는다 — 한 시간 뒤의 '매수하세요' 는 늦은 진입이다.
+# 첫 반복(15분)은 한 번 나가고, 그 다음 반복 전에 만료된다.
+ENTRY_PENDING_MAX_MIN = 30
+# 청산 신호(손절·매도·익절) 반복 알림의 최대 간격. 15분에서 두 배씩 늘린다 (15→30→60→120→240).
+# 같은 사유가 15분마다 종일 오면 진짜 위험 알림도 흘려보게 된다. 장기 보유로 정한 -30% 포지션이 그랬다.
+EXIT_REPEAT_MAX_MIN = 240
+# 청산대기 해제: 손절 한도에서 이 % 넘게 회복하면 (-5% → -3% 위) 보유로 돌아간다.
+# 매도선 이탈은 밴드만큼 되올라오면, 거래량 소진은 가격이 기준선 위로 올라서면 해제한다.
+STOP_RECOVER_PCT = 2.0
 # 매수 신호는 그날 정점 대비 이 비율 이상이어야 한다.
 # 정점 5배였던 종목이 2.1배로 반등한 걸 '돌파'로 보면 안 된다.
 ENTRY_MIN_PEAK_RATIO = 0.6

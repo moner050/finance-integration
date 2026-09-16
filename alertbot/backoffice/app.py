@@ -128,14 +128,15 @@ def watchlist_page(request: Request, edit: str = None):
 def watchlist_save(request: Request, symbol: str = Form(...), market: str = Form(...),
                    name: str = Form(""), leaders: str = Form(""), inverse: bool = Form(False),
                    pair: str = Form(""), hold_only: bool = Form(False), note: str = Form(""),
-                   enabled: bool = Form(False), auto_trade: bool = Form(False), auto_amount: str = Form("0")):
+                   enabled: bool = Form(False), auto_trade: bool = Form(False), auto_amount: str = Form("0"),
+                   day_trade: bool = Form(False)):
     try:
         amount = float(auto_amount or 0)
         if amount < 0:
             raise ValueError("1회 매수 금액은 0 이상")
         with get_db() as d:
             db.upsert_watch(d, symbol, market, name.strip(), leaders.split(","), inverse, pair,
-                            hold_only, note.strip(), enabled, auto_trade, amount)
+                            hold_only, note.strip(), enabled, auto_trade, amount, day_trade)
     except ValueError as e:
         return render(request, "watchlist.html", status_code=400, **watchlist_context(error=str(e)))
     log.info("백오피스: 종목 저장 %s", symbol.strip().upper())

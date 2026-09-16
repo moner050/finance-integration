@@ -21,14 +21,14 @@ class Dispatcher:
         self.record = record        # record(signal, results) — signal_log 기록. None 이면 생략
         self.last_sent = {}         # signal.key -> 마지막 발송 시각
 
-    def send(self, signal, force: bool = False) -> dict:
-        """채널별 결과 {"telegram": "ok"}. 쿨다운에 걸리면 빈 dict."""
+    def send(self, signal, force: bool = False):
+        """채널별 결과 {"telegram": "ok"}. 쿨다운에 걸려 보내지 않았으면 None (채널이 없어 빈 dict 인 것과 구분)."""
         now = datetime.now(timezone.utc)
         if not force:
             gap = COOLDOWN_MIN[signal.cooldown]
             prev = self.last_sent.get(signal.key)
             if prev and now - prev < timedelta(minutes=gap):
-                return {}
+                return None
         self.last_sent[signal.key] = now
         log.info(signal.text())
 

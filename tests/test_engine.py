@@ -200,3 +200,121 @@ def test_entry_only_on_regular_session_bar(monkeypatch, tmp_path):
     monkeypatch.setattr(MH, "now_local", at_1545)
     eng2.evaluate("AAA", {"AAA": 100.8}, {})
     assert [x[0] for x in cap2.sent] == ["🔵 매수하세요"] and eng2.snapshots["AAA"]["regular"] is True
+
+
+# --- hold_only 종목은 청산이 잡힐 때까지 평가 대상에 남는다 ------------------------
+
+def test_hold_only_stays_active_until_exit_is_noticed(monkeypatch, tmp_path):
+    watch = {"AAA": {**sc.WATCHLIST["AAA"], "hold_only": True}}
+    eng, cap = make_engine(monkeypatch, tmp_path, watchlist=watch)
+    held = {"AAA": {"qty": 10.0, "avg": 100.0}}
+    eng._last_holdings = held
+    eng.evaluate("AAA", {"AAA": 100.9}, held)                  # 보유 전환
+    eng.evaluate("AAA", {"AAA": 90.0}, held)                   # -10% → 손절 → 청산대기
+    assert eng.state["AAA"] == "청산대기"
+    eng._last_holdings = {}                                    # 청산됨
+    assert eng._active_tickers(["AAA"]) == ["AAA"]             # 상태가 남아 있으니 한 사이클 더 본다
+    eng.evaluate("AAA", {"AAA": 90.0}, {})
+    assert eng.state["AAA"] == "관망" and cap.sent[-1][0] == "✅ 손절 완료"
+    assert eng._active_tickers(["AAA"]) == []                  # 이제는 보유할 때까지 조회하지 않는다
+    # 다시 사면 새 포지션이다 — 옛 손절 사유가 붙지 않고 익절 유예가 다시 시작된다
+    eng.evaluate("AAA", {"AAA": 101.5}, {"AAA": {"qty": 5.0, "avg": 100.8}})
+    assert eng.state["AAA"] == "보유" and "AAA" in eng.entry_at and cap.sent[-1][0] == "✅ 손절 완료"
+
+
+# --- 청산대기 복귀: 근거가 사라지면 보유로 돌아간다 -------------------------------
+
+def test_exit_wait_recovers_to_holding(monkeypatch, tmp_path):
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    for price, holdings in sc.STEPS[:4]:                       # 매수 → 보유 → 신호봉 저점 100.3 이탈 → 매도하세요
+        eng.evaluate("AAA", {"AAA": price}, holdings)
+    held = {"AAA": {"qty": 10.0, "avg": 100.8}}
+    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 매도하세요"
+    floor = round(100.3 * (1 + eng.snapshots["AAA"]["band"] / 100), 4)
+    eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
+    eng.evaluate("AAA", {"AAA": floor - 0.01}, held)           # 매도선 위지만 밴드 여유 안 → 아직 청산대기
+    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 매도하세요"
+    eng.evaluate("AAA", {"AAA": floor + 0.01}, held)           # 밴드만큼 넘어 회복 → 보유 복귀
+    assert eng.state["AAA"] == "보유" and "AAA" not in eng.pending
+    assert cap.sent[-1][0] == "⚪ 청산 신호 해제" and "매도선 100.3" in cap.sent[-1][2]
+
+
+def test_stop_recovers_only_past_hysteresis(monkeypatch, tmp_path):
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    held = {"AAA": {"qty": 10.0, "avg": 100.0}}
+    eng.evaluate("AAA", {"AAA": 100.9}, held)                  # 보유
+    eng.evaluate("AAA", {"AAA": 94.0}, held)                   # -6% → 손절하세요
+    assert cap.sent[-1][0] == "🔴 손절하세요" and eng.pending["AAA"]["kind"] == "STOP"
+    eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
+    eng.evaluate("AAA", {"AAA": 96.5}, held)                   # -3.5%: 한도 위지만 회복폭 2% 미달 → 반복
+    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 손절하세요"
+    eng.evaluate("AAA", {"AAA": 100.9}, held)                  # -3% 넘게 회복 + 매도선 위 → 보유 복귀
+    assert eng.state["AAA"] == "보유" and cap.sent[-1][0] == "⚪ 청산 신호 해제"
+
+
+def test_exit_wait_repeat_backs_off(monkeypatch, tmp_path):
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    for price, holdings in sc.STEPS[:4]:
+        eng.evaluate("AAA", {"AAA": price}, holdings)
+    held = {"AAA": {"qty": 10.0, "avg": 100.8}}
+    first = eng.pending["AAA"]
+    assert first["repeats"] == 0 and first["next_at"] > datetime.now(timezone.utc).isoformat()
+    n = len(cap.sent)
+    eng.evaluate("AAA", {"AAA": 100.2}, held)                  # 15분 안 → 침묵 (알림기 쿨다운과 별개로 엔진이 막는다)
+    assert len(cap.sent) == n
+    first["next_at"] = "2000-01-01T00:00:00+00:00"
+    eng.evaluate("AAA", {"AAA": 100.2}, held)
+    assert len(cap.sent) == n + 1 and "다음 알림 30분 뒤" in cap.sent[-1][2]
+    due = datetime.fromisoformat(first["next_at"]) - datetime.now(timezone.utc)
+    assert timedelta(minutes=29) < due <= timedelta(minutes=30) and first["repeats"] == 1
+    first["repeats"], first["next_at"] = 6, "2000-01-01T00:00:00+00:00"    # 여러 번 반복한 뒤엔 상한
+    eng.evaluate("AAA", {"AAA": 100.2}, held)
+    assert f"다음 알림 {E.EXIT_REPEAT_MAX_MIN}분 뒤" in cap.sent[-1][2]
+
+
+# --- 마감 전 정리는 당일 청산 종목에만 -------------------------------------------
+
+def test_close_warn_only_for_day_trade_symbols(monkeypatch, tmp_path):
+    def at_1510(market):
+        return datetime(2026, 3, 25, 15, 10, tzinfo=TZ["KR"]).astimezone(TZ[market])
+    held = {"AAA": {"qty": 10.0, "avg": 100.0}}
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    monkeypatch.setattr(E, "now_local", at_1510)
+    monkeypatch.setattr(MH, "now_local", at_1510)
+    eng.evaluate("AAA", {"AAA": 100.9}, held)
+    assert cap.sent == []                                      # 오버나잇 종목엔 마감 정리를 말하지 않는다
+    watch = {"AAA": {**sc.WATCHLIST["AAA"], "day_trade": True}}
+    eng2, cap2 = make_engine(monkeypatch, tmp_path, watchlist=watch)
+    monkeypatch.setattr(E, "now_local", at_1510)
+    monkeypatch.setattr(MH, "now_local", at_1510)
+    eng2.evaluate("AAA", {"AAA": 100.9}, held)
+    assert [s[0] for s in cap2.sent] == ["🟠 마감 전 정리"]
+
+
+# --- 진입대기 만료 -----------------------------------------------------------------
+
+def test_pending_entry_expires(monkeypatch, tmp_path):
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    eng.evaluate("AAA", {"AAA": 100.8}, {})
+    assert eng.state["AAA"] == "진입대기" and eng.pending["AAA"]["bar_key"] == eng.snapshots["AAA"]["bar_key"]
+    eng.evaluate("AAA", {"AAA": 100.85}, {})                   # 만료 전 → 반복 알림
+    assert cap.sent[-1][0] == "🔵 매수하세요" and "아직 미진입" in cap.sent[-1][2]
+    eng.pending["AAA"]["at"] = (datetime.now(timezone.utc) - timedelta(minutes=E.ENTRY_PENDING_MAX_MIN)).isoformat()
+    eng.evaluate("AAA", {"AAA": 100.85}, {})
+    assert eng.state["AAA"] == "관망" and "AAA" not in eng.pending
+    assert cap.sent[-1][0] == "⚪ 매수 신호 만료" and f"{E.ENTRY_PENDING_MAX_MIN}분 안에 진입하지 않음" in cap.sent[-1][2]
+
+
+def test_pending_entry_expires_when_session_ends(monkeypatch, tmp_path):
+    def at_1545(market):
+        return datetime(2026, 3, 25, 15, 45, tzinfo=TZ["KR"]).astimezone(TZ[market])
+    eng, cap = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(14, 28))   # 신호봉 15:29 (정규장)
+    monkeypatch.setattr(E, "now_local", at_1545)
+    monkeypatch.setattr(MH, "now_local", at_1545)
+    eng.evaluate("AAA", {"AAA": 100.8}, {})
+    assert eng.state["AAA"] == "진입대기"
+    # 다음 봉(15:30)은 시간외 봉 — 마감 뒤 반복 알림 대신 만료
+    last = datetime.fromisoformat(eng.client.candles[-1]["timestamp"])
+    eng.client.candles = eng.client.candles + [bar(last + timedelta(minutes=1), 100.9, 1000, high=100.95, low=100.8)]
+    eng.evaluate("AAA", {"AAA": 100.9}, {})
+    assert eng.state["AAA"] == "관망" and cap.sent[-1][0] == "⚪ 매수 신호 만료" and "정규장 종료" in cap.sent[-1][2]

@@ -24,7 +24,7 @@ def test_watchlist_roundtrip():
     wl = DBM.load_watchlist(d)
     assert wl["SOXX"] == {"market": "US", "leaders": ["NVDA", "AVGO"], "inverse": False, "pair": None,
                           "hold_only": False, "name": None, "note": "레버리지 진입 시 SOXL",
-                          "auto_trade": False, "auto_amount": 0.0}
+                          "auto_trade": False, "auto_amount": 0.0, "day_trade": False}
     assert wl["SOXL"]["hold_only"] is True and wl["SOXL"]["pair"] == "SOXS" and wl["SOXL"]["leaders"] is None
     assert wl["005930"]["name"] == "삼성전자"
 

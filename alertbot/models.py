@@ -13,7 +13,8 @@ SEVERITY_ORDER = {"info": 0, "review": 1, "action": 2}
 # 검토 권유가 15분마다 오면 정작 손절 알림이 왔을 때도 흘려보게 되므로 weak 는 더 길다.
 KINDS = {
     "ENTRY": ("action", "strong"),          # 매수 신호와 '아직 미진입' 반복은 같은 키를 쓴다
-    "ENTRY_CANCEL": ("review", "strong"),
+    "ENTRY_CANCEL": ("review", "strong"),   # 매수 취소·매수 신호 만료
+    "EXIT_CANCEL": ("review", "strong"),    # 청산 신호 해제 — 근거가 사라져 보유로 복귀
     "CRASH_BUY": ("action", "strong"),      # Binance 5분봉 급락 매수 후보 (run_binance.py). 워커가 60분 쿨다운을 따로 건다
     "SURGE_WATCH": ("review", "strong"),    # Binance 4시간봉 급등 확인 — 추종 관찰 (눌림 대기)
     "SURGE_ENTRY": ("action", "strong"),    # Binance 4시간봉 급등 뒤 눌림 재돌파 — 추종 진입 후보. 워커가 7일 쿨다운을 건다

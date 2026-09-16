@@ -3,7 +3,7 @@
 엔진은 알림을 낸 직후 on_signal 을, 사이클 끝에 reconcile 을 부른다. 실행기 안의 어떤 예외도
 엔진을 멈추면 안 되므로 엔진 쪽 호출은 try/except 로 감싼다.
 
-자동 범위: 매수 ENTRY / 전량 매도 STOP·SELL·EXIT_FULL·CLOSE_WARN. 나머지 신호는 무시한다.
+자동 범위: 매수 ENTRY / 전량 매도 STOP·SELL·EXIT_FULL·CLOSE_WARN(당일 청산 종목에만 온다). 나머지 신호는 무시한다.
 """
 
 import logging
@@ -72,8 +72,9 @@ class Executor:
         limit = round_price(ref * (1 + AUTOTRADE_BUY_BUFFER_PCT / 100), market, "BUY")
         amount = float(cfg.get("auto_amount") or 0)
         qty = math.floor(amount / limit) if limit > 0 else 0
+        # 반복 알림은 원래 신호봉(signal_bar)을 넘긴다 — 같은 진입 기회에 두 번 사지 않는다 (_duplicate_buy)
         return OrderIntent.create(self.mode, symbol, market, "BUY", "ENTRY", "LIMIT", limit, qty,
-                                  bar_key=snap.get("bar_key"))
+                                  bar_key=snap.get("signal_bar") or snap.get("bar_key"))
 
     def _sell_intent(self, symbol, market, kind, snap, held):
         qty = float(held.get("qty", 0) or 0)

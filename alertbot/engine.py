@@ -13,13 +13,13 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from . import db
-from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, CLOSE_WARN_MIN, DATA_DIR,
+from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, ALERT_COOLDOWN_MIN, CLOSE_WARN_MIN, DATA_DIR,
                      ENABLE_ADD_ON, ENABLE_AMBIGUOUS, ENABLE_EXIT_SIGNAL, ENABLE_TRACKING,
-                     ENTRY_MIN_PEAK_RATIO, EXIT_GRACE_MIN, EXIT_PORTION_HALF, EXIT_PORTION_STRONG,
-                     EXIT_PORTION_THIRD, FADE_MIN_PEAK, FADE_STRONG_RATIO, FADE_WEAK_RATIO,
-                     LEADER_GAP_PCT, LEADER_MOMENTUM_GATE, LEADER_MOMENTUM_MIN, POLL_INTERVAL_SEC,
-                     PROFILE_PAGES, REENTRY_BLOCK_MIN,
-                     RVOL_TRIGGER, RVOL_WINDOW, STATS_REPORT_MIN, STOP_LOSS_PCT,
+                     ENTRY_MIN_PEAK_RATIO, ENTRY_PENDING_MAX_MIN, EXIT_GRACE_MIN, EXIT_PORTION_HALF,
+                     EXIT_PORTION_STRONG, EXIT_PORTION_THIRD, EXIT_REPEAT_MAX_MIN, FADE_MIN_PEAK,
+                     FADE_STRONG_RATIO, FADE_WEAK_RATIO, LEADER_GAP_PCT, LEADER_MOMENTUM_GATE,
+                     LEADER_MOMENTUM_MIN, POLL_INTERVAL_SEC, PROFILE_PAGES, REENTRY_BLOCK_MIN,
+                     RVOL_TRIGGER, RVOL_WINDOW, STATS_REPORT_MIN, STOP_LOSS_PCT, STOP_RECOVER_PCT,
                      SUMMARY_INTERVAL_MIN, TRACK_FILE, TRADE_FILE, VWAP_BAND_PCT)
 from .indicators import (SessionState, build_volume_profile, compute_rsi, compute_rvol,
                          effective_band, ema_alignment, is_regular_bar, strong_bar, vwap_position)
@@ -87,18 +87,20 @@ class SignalEngine:
 
     # -- 알림 ---------------------------------------------------------------
     def _emit(self, kind: str, title: str, label: str, symbol, body: str):
-        """알림 한 건. 채널 선택·쿨다운·이력 기록은 Dispatcher 가 맡는다.
+        """알림 한 건. 채널 선택·쿨다운·이력 기록은 Dispatcher 가 맡는다. 발송 결과를 돌려준다 (억제되면 None).
 
-        자동매매가 켜져 있으면 같은 신호를 실행기에도 넘긴다. 실행기 오류가 알림을 막으면 안 되므로
+        자동매매가 켜져 있으면 실제로 발송된 신호만 실행기에도 넘긴다. 쿨다운에 억제된 반복까지 넘기면
+        진입대기·청산대기 동안 30초마다 주문 의도가 생긴다. 실행기 오류가 알림을 막으면 안 되므로
         알림을 먼저 보내고, 실행기 예외는 잡아서 로그만 남긴다.
         """
-        self.notify.send(Signal(kind, title, label, body, symbol))
-        if self.executor is not None and symbol:
+        signal = Signal(kind, title, label, body, symbol)
+        sent = self.notify.send(signal)
+        if sent is not None and self.executor is not None and symbol:
             try:
-                self.executor.on_signal(Signal(kind, title, label, body, symbol), self.snapshots.get(symbol),
-                                        self._holdings_now)
+                self.executor.on_signal(signal, self.snapshots.get(symbol), self._holdings_now)
             except Exception as e:
                 log.exception("자동매매 실행기 오류 (%s %s): %s", kind, symbol, e)
+        return sent
 
     def _reconcile_orders(self):
         """미결 주문 추적. 체결된 매도의 실제 평균가를 청산 메시지에 쓰도록 남긴다."""
@@ -440,6 +442,12 @@ class SignalEngine:
 
         # ---- 진입 대기: 아직 안 샀다. 조건이 살아있으면 다시 알린다 ----
         if st == "진입대기":
+            sig = self.pending.get(ticker, {})
+            # 돌파봉의 근거는 오래가지 않는다. 한 시간 뒤의 '매수하세요' 는 늦은 진입이고,
+            # 정규장이 끝난 뒤의 반복은 시간외 가격을 보고 하는 말이다.
+            at = sig.get("at")
+            stale = bool(at) and (datetime.now(timezone.utc) - datetime.fromisoformat(at)
+                                  >= timedelta(minutes=ENTRY_PENDING_MAX_MIN))
             if pos == "below":
                 # 근거가 무너졌으면 기다릴 이유가 없다
                 self.state[ticker] = "관망"
@@ -447,8 +455,15 @@ class SignalEngine:
                 self._emit("ENTRY_CANCEL", "⚪ 매수 취소", label, ticker,
                                  f"현재가 {price}가 기준선 {vwap} 아래로 내려감\n"
                                  f"진입 근거 소멸 — 관망으로 전환")
+            elif stale or not snap["regular"]:
+                self.state[ticker] = "관망"
+                self.pending.pop(ticker, None)
+                why = f"{ENTRY_PENDING_MAX_MIN}분 안에 진입하지 않음" if stale else "정규장 종료"
+                self._emit("ENTRY_CANCEL", "⚪ 매수 신호 만료", label, ticker,
+                                 f"신호가 {sig.get('price', price)} → 현재가 {price}\n"
+                                 f"{why} — 관망으로 전환")
             else:
-                sig = self.pending.get(ticker, {})
+                snap["signal_bar"] = sig.get("bar_key")     # 실행기는 원래 신호봉으로 중복을 판단한다
                 self._emit("ENTRY", "🔵 매수하세요", label, ticker,
                                  f"현재가 {price}  (신호가 {sig.get('price', price)})\n"
                                  f"거래량 {rvol}배, 기준선 {vwap} 위 유지\n"
@@ -504,7 +519,8 @@ class SignalEngine:
             rsi_prev, rsi_now = compute_rsi(snap["candles"])
             slope = "상승" if rsi_now > rsi_prev else "하락"
             self.state[ticker] = "진입대기"
-            self.pending[ticker] = {"price": price, "at": datetime.now(timezone.utc)}
+            self.pending[ticker] = {"price": price, "at": datetime.now(timezone.utc).isoformat(),
+                                    "bar_key": snap["bar_key"]}
             note = snap["cfg"].get("note")
             self._emit("ENTRY", "🔵 매수하세요", label, ticker,
                              f"현재가 {price}\n"
@@ -550,6 +566,32 @@ class SignalEngine:
 
     def _ambiguous_reason(self, pos_now: str, ctx: dict) -> str:
         return " + ".join(self._ambiguous_flags(pos_now, ctx))
+
+    @staticmethod
+    def _exit_pending(kind: str, level: str, why: str) -> dict:
+        """청산대기 정보. 최초 사유를 고정하고, 첫 반복은 강한 알림 쿨다운 뒤에 온다."""
+        nxt = datetime.now(timezone.utc) + timedelta(minutes=ALERT_COOLDOWN_MIN)
+        return {"kind": kind, "level": level, "why": why, "repeats": 0, "next_at": nxt.isoformat()}
+
+    @staticmethod
+    def _exit_recovered(first: dict, pnl: float, price: float, pos_now: str, sell_line: float, band: float) -> str:
+        """청산대기의 근거가 사라졌으면 그 설명을, 아니면 빈 문자열.
+
+        경계에서 왔다갔다하지 않게 여유를 둔다: 손절은 한도에서 STOP_RECOVER_PCT 넘게 회복,
+        매도선은 밴드만큼 위. 거래량 소진(EXIT_FULL)은 가격이 기준선 위로 올라서야 철회한다 —
+        그 자리였으면 애초에 발동하지 않았다(holding_up).
+        """
+        if pnl <= STOP_LOSS_PCT + STOP_RECOVER_PCT:
+            return ""
+        floor = round(sell_line * (1 + band / 100), 4) if sell_line > 0 else 0
+        if floor and price < floor:
+            return ""
+        kind = first.get("kind")
+        if kind == "EXIT_FULL":
+            return "기준선 위로 복귀 — 거래량 소진 판단 철회" if pos_now == "above" else ""
+        if kind == "STOP":
+            return f"손절 한도 {STOP_LOSS_PCT}% 에서 {STOP_RECOVER_PCT}% 넘게 회복 (매도선 {sell_line} 위)"
+        return f"매도선 {sell_line} 위로 회복 (밴드 {band}% 여유 포함)"
 
     def _closing_note(self, ticker: str):
         """포지션이 사라졌을 때 결과를 정리해 보낸다.
@@ -600,21 +642,6 @@ class SignalEngine:
         avg = held["avg"]
         pnl = round((price - avg) / avg * 100, 2) if avg > 0 else 0.0
 
-        # 이미 청산 신호를 낸 상태면 사유를 바꾸지 않는다.
-        # 매 사이클 조건을 다시 평가하면 '매도하세요 → 익절하세요 → 1/3 익절'처럼
-        # 같은 행동(팔아라)에 다른 이름표가 붙어 헷갈린다. 최초 사유를 고정하고
-        # 손익만 갱신해 반복한다. 단, 손절 한도(-5%)는 더 급한 상황이라 갈아탄다.
-        if self.state.get(ticker) == "청산대기":
-            first = self.pending.get(ticker, {})
-            if pnl <= STOP_LOSS_PCT and first.get("level") != "🔴 손절하세요":
-                self.pending[ticker] = {"kind": "STOP", "level": "🔴 손절하세요", "why": f"손절 한도 {STOP_LOSS_PCT}% 도달"}
-                first = self.pending[ticker]
-            level = first.get("level", "🔴 매도하세요")
-            self._emit(first.get("kind", "SELL"), level, label, ticker,
-                             f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
-                             f"아직 미청산 — {first.get('why', '청산 신호 유지')}\n"
-                             f"{held['qty']:g}주 보유 중")
-            return
         # 매도 기준선. 우리 신호로 산 포지션이면 신호봉 저점, 아니면 기준선 밴드.
         # 신호봉 저점은 '이 봉이 무너지면 진입 근거가 깨진 것'이라는 뜻이라
         # 밴드보다 종목 상황에 밀착돼 있다. 사자마자 살짝 눌리는 정도로는 안 걸린다.
@@ -626,6 +653,42 @@ class SignalEngine:
         else:
             sell_line, sell_why = band_low, f"기준선 밴드 하단 (VWAP -{band}%)"
         broke = sell_line > 0 and price < sell_line
+
+        # 이미 청산 신호를 낸 상태면 사유를 바꾸지 않는다.
+        # 매 사이클 조건을 다시 평가하면 '매도하세요 → 익절하세요 → 1/3 익절'처럼
+        # 같은 행동(팔아라)에 다른 이름표가 붙어 헷갈린다. 최초 사유를 고정하고
+        # 손익만 갱신해 반복한다. 단, 손절 한도(-5%)는 더 급한 상황이라 갈아탄다.
+        if self.state.get(ticker) == "청산대기":
+            first = self.pending.setdefault(ticker, {})
+            # 근거가 사라졌으면 보유로 돌아간다. 포지션이 없어질 때까지 반복하면
+            # 가격이 회복한 뒤에도 '이탈했다'고 계속 말하는 꼴이다.
+            recovered = self._exit_recovered(first, pnl, price, pos_now, sell_line, band)
+            if recovered:
+                self.state[ticker] = "보유"
+                self.pending.pop(ticker, None)
+                self._emit("EXIT_CANCEL", "⚪ 청산 신호 해제", label, ticker,
+                                 f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
+                                 f"{recovered}\n"
+                                 f"청산 근거 소멸 — 보유로 전환")
+                return
+            if pnl <= STOP_LOSS_PCT and first.get("kind") != "STOP":
+                first = self.pending[ticker] = self._exit_pending("STOP", "🔴 손절하세요",
+                                                                  f"손절 한도 {STOP_LOSS_PCT}% 도달")
+            # 같은 사유를 15분마다 종일 반복하면 진짜 위험 알림이 묻힌다.
+            # 반복할수록 간격을 두 배로 늘린다 (15→30→60→…, 상한 EXIT_REPEAT_MAX_MIN).
+            now = datetime.now(timezone.utc)
+            due = first.get("next_at")
+            if due and now < datetime.fromisoformat(due):
+                return
+            n = first.get("repeats", 0) + 1
+            gap = min(ALERT_COOLDOWN_MIN * 2 ** n, EXIT_REPEAT_MAX_MIN)
+            sent = self._emit(first.get("kind", "SELL"), first.get("level", "🔴 매도하세요"), label, ticker,
+                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
+                              f"아직 미청산 — {first.get('why', '청산 신호 유지')}\n"
+                              f"{held['qty']:g}주 보유 중 · 다음 알림 {gap}분 뒤")
+            if sent is not None:            # 알림기 쿨다운에 걸렸으면 다음 사이클에 다시 시도한다
+                first["repeats"], first["next_at"] = n, (now + timedelta(minutes=gap)).isoformat()
+            return
 
         # 거래량 소진도: 세션 정점 대비 현재 비율.
         # 정점이 충분히 높아야(FADE_MIN_PEAK) '한 번 터진 추세'로 인정한다.
@@ -660,7 +723,7 @@ class SignalEngine:
             self.exit_at[ticker] = datetime.now(timezone.utc)
             self.entry_at.pop(ticker, None)
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = {"kind": "STOP", "level": "🔴 손절하세요", "why": f"손절 한도 {STOP_LOSS_PCT}% 도달"}
+            self.pending[ticker] = self._exit_pending("STOP", "🔴 손절하세요", f"손절 한도 {STOP_LOSS_PCT}% 도달")
             self._emit("STOP", "🔴 손절하세요", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"손절 한도 {STOP_LOSS_PCT}% 도달 — 최후 안전망")
@@ -672,7 +735,7 @@ class SignalEngine:
             self.exit_at[ticker] = datetime.now(timezone.utc)
             self.entry_at.pop(ticker, None)
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = {"kind": "SELL", "level": "🔴 매도하세요", "why": f"{sell_why} {sell_line} 이탈"}
+            self.pending[ticker] = self._exit_pending("SELL", "🔴 매도하세요", f"{sell_why} {sell_line} 이탈")
             self._emit("SELL", "🔴 매도하세요", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"{flavor}\n"
@@ -687,8 +750,8 @@ class SignalEngine:
             self.entry_at.pop(ticker, None)
             qty = held["qty"]
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = {"kind": "EXIT_FULL", "level": f"🟢 {EXIT_PORTION_STRONG} {verb}",
-                                    "why": f"거래량 정점 {rvol_peak}배 대비 {round(faded * 100)}% 로 소진"}
+            self.pending[ticker] = self._exit_pending("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}",
+                                                      f"거래량 정점 {rvol_peak}배 대비 {round(faded * 100)}% 로 소진")
             self._emit("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}", label, ticker,
                              f"손익 {pnl}%  (평단 {avg} → 현재 {price})\n"
                              f"보유 {qty:g}주 → {EXIT_PORTION_STRONG} 정리 권장\n"
@@ -724,10 +787,11 @@ class SignalEngine:
                              f"보유 {qty:g}주 → {part:g}주 정리, {qty - part:g}주 유지\n"
                              f"흐려진 근거: {self._ambiguous_reason(pos_now, ctx)}\n"
                              f"급하지 않음. 조금 덜어내고 지켜봐도 되는 구간")
-        elif self.hours.near_close(market):
+        elif self.watchlist[ticker].get("day_trade") and self.hours.near_close(market):
+            # 당일 청산 종목만. 오버나잇이 전제인 종목에 마감 정리를 말하면(자동매매면 전량 매도) 사고다.
             self._emit("CLOSE_WARN", "🟠 마감 전 정리", label, ticker,
                              f"손익 {pnl}%  ({held['qty']:g}주 보유)\n"
-                             f"마감 {CLOSE_WARN_MIN}분 전 — 3배 상품은 오버나잇 시 가치 감소")
+                             f"마감 {CLOSE_WARN_MIN}분 전 — 당일 청산 종목, 오버나잇 금지")
 
     def market_summary(self, active: list, holdings: dict, pre: list = None):
         """30분마다 전 종목 상태를 한 번에 보낸다.
@@ -834,6 +898,18 @@ class SignalEngine:
             return "▼", f"기준선 아래{lean}"
         return "－", f"기준선 중립대{lean}"
 
+    def _active_tickers(self, open_now: list) -> list:
+        """이번 사이클에 평가할 종목.
+
+        hold_only 종목(3배 레버리지)은 보유 중일 때만 감시한다. 안 들고 있으면 조회할 이유가
+        없다 — 매수 신호는 SOXX 가 낸다. 단 상태가 남아 있으면(보유·청산대기) 한 사이클은 더 본다.
+        그래야 청산이 _sync_state 에 잡혀 관망으로 돌아가고 청산 완료 알림이 나간다. 안 그러면
+        청산대기가 영원히 남아, 다음에 같은 종목을 사는 순간 옛 손절 사유가 그대로 반복된다.
+        """
+        held = set(self._last_holdings)
+        return [t for t in open_now
+                if not self.watchlist[t].get("hold_only") or t in held or self.state.get(t, "관망") != "관망"]
+
     # -- 메인 루프 -------------------------------------------------------------
     def run(self):
         log.info("알림 전용 모드 시작 (주문 없음). 대상=%s", self.tickers)
@@ -843,11 +919,7 @@ class SignalEngine:
         while True:
             self._reload_watchlist()
             open_now = [t for t in self.tickers if self.hours.market_open(self.watchlist[t]["market"])]
-            # hold_only 종목(3배 레버리지)은 보유 중일 때만 감시한다.
-            # 안 들고 있으면 조회할 이유가 없다 — 매수 신호는 SOXX 가 낸다.
-            held_syms = set(self._last_holdings.keys())
-            active = [t for t in open_now
-                      if not self.watchlist[t].get("hold_only") or t in held_syms]
+            active = self._active_tickers(open_now)
             # 프리마켓 종목은 시황에만 쓴다. 알림 판단에는 넣지 않는다.
             pre = [t for t in self.tickers
                    if t not in active and self.hours.market_premarket(self.watchlist[t]["market"])]
