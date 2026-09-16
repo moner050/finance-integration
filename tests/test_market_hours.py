@@ -14,6 +14,14 @@ US_LIST = {"days": [{"date": "2026-03-25", "regularMarketSession": {
     "startDateTime": "2026-03-25T13:30:00Z", "endDateTime": "2026-03-25T20:00:00Z"}}]}
 US_EARLY = {"today": {"regularMarketSession": {"start": "2026-11-27T14:30:00Z", "end": "2026-11-27T18:00:00Z"}}}
 US_HOLIDAY = {"days": [{"date": "2026-07-03", "regularMarketSession": None}]}
+# 실제 토스 응답(2026-09-16 조회): 미국 항목인데 date 는 한국 날짜, 시각은 KST. 09-16 항목이 곧 미국 09-15 장이다.
+def _us_kst_day(date, next_date):
+    return {"date": date,
+            "preMarket": {"startTime": f"{date}T17:00:00.000+09:00", "endTime": f"{date}T22:30:00.000+09:00"},
+            "regularMarket": {"startTime": f"{date}T22:30:00.000+09:00", "endTime": f"{next_date}T05:00:00.000+09:00"}}
+US_TOSS = {"today": _us_kst_day("2026-09-16", "2026-09-17"),
+           "previousBusinessDay": _us_kst_day("2026-09-15", "2026-09-16"),
+           "nextBusinessDay": _us_kst_day("2026-09-17", "2026-09-18")}
 
 
 @pytest.mark.parametrize("data, market, date, expect", [
@@ -23,6 +31,9 @@ US_HOLIDAY = {"days": [{"date": "2026-07-03", "regularMarketSession": None}]}
     (US_LIST, "US", "2026-03-25", {"closed": False, "open": 570, "close": 960}),   # 09:30~16:00 EDT
     (US_EARLY, "US", "2026-11-27", {"closed": False, "open": 570, "close": 780}),  # 조기폐장 13:00 EST
     (US_HOLIDAY, "US", "2026-07-03", {"closed": True}),
+    (US_TOSS, "US", "2026-09-15", {"closed": False, "open": 570, "close": 960}),   # 미국 09-15 저녁(KST 09-16 새벽 전) → 전영업일 항목
+    (US_TOSS, "US", "2026-09-16", {"closed": False, "open": 570, "close": 960}),   # 미국 09-16 → today 항목 (KST 09-16 22:30)
+    (US_TOSS, "US", "2026-09-18", None),                                          # 목록 밖 날짜
     ({"weird": 1}, "US", "2026-03-25", None),
     (None, "KR", "2026-03-25", None),
 ])

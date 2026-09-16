@@ -38,15 +38,18 @@ def parse_calendar(data, market: str, date: str):
     """캘린더 응답(result 벗긴 것) → {"closed": bool, "open": 분, "close": 분}. 형식 불명이면 None.
 
     KR: today.integrated 가 null 이면 휴장, 아니면 regularMarket.startTime/endTime.
-    US: today 또는 days/marketDays 목록에서 오늘 항목의 regularMarketSession
-        (startDateTime/endDateTime 또는 start/end). 세션이 null 이면 휴장.
+    US: today/previousBusinessDay/nextBusinessDay 또는 days/marketDays 목록에서 오늘 항목의
+        regularMarket(Session) (startTime/endTime, startDateTime/endDateTime, start/end). 세션이 null 이면 휴장.
     오늘 날짜와 맞지 않는 항목은 쓰지 않는다 — 어제 정보로 오늘을 판단하면 안 된다.
+    항목의 date 는 토스가 한국 날짜로 붙인다 (미국 09-15 장이 'date: 09-16, 22:30~05:00 KST'). 그래서
+    정규장 시작 시각이 있으면 그것을 시장 현지 날짜로 바꿔 대조하고, date 필드는 시각이 없을 때(휴장)만 쓴다.
     """
     if not isinstance(data, dict):
         return None
     entries = []
-    if isinstance(data.get("today"), dict):
-        entries.append(data["today"])
+    for key in ("today", "previousBusinessDay", "nextBusinessDay"):
+        if isinstance(data.get(key), dict):
+            entries.append(data[key])
     for key in ("days", "marketDays", "calendar"):
         if isinstance(data.get(key), list):
             entries.extend(d for d in data[key] if isinstance(d, dict))
@@ -64,10 +67,12 @@ def parse_calendar(data, market: str, date: str):
         if isinstance(sess, dict):
             start = sess.get("startDateTime") or sess.get("start") or sess.get("startTime")
             end = sess.get("endDateTime") or sess.get("end") or sess.get("endTime")
-        d_date = str(d.get("date") or "")[:10]
-        if not d_date and start and "T" in str(start):
+        d_date = ""
+        if start and "T" in str(start):
             dt = parse_ts(str(start), market)
             d_date = dt.strftime("%Y-%m-%d") if dt else ""
+        if not d_date:
+            d_date = str(d.get("date") or "")[:10]
         if d_date != date:
             continue
         if closed:
