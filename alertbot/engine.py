@@ -15,7 +15,8 @@ from datetime import datetime, timedelta, timezone
 from . import db
 from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, ALERT_COOLDOWN_MIN, CLOSE_WARN_MIN, DATA_DIR,
                      ENABLE_ADD_ON, ENABLE_AMBIGUOUS, ENABLE_EXIT_SIGNAL, ENABLE_TRACKING,
-                     ENTRY_MIN_PEAK_RATIO, ENTRY_PENDING_MAX_MIN, ENTRY_SKIP_BEAR_EMA, EXIT_GRACE_MIN,
+                     ENTRY_CONFIRM_MIN, ENTRY_MIN_PEAK_RATIO, ENTRY_PENDING_MAX_MIN, ENTRY_SKIP_BEAR_EMA,
+                     ENTRY_STRONG_RVOL, EXIT_GRACE_MIN,
                      EXIT_PORTION_HALF, EXIT_PORTION_STRONG, EXIT_PORTION_THIRD, EXIT_REPEAT_MAX_MIN,
                      FADE_BARS, FADE_MIN_PEAK, FADE_STRONG_RATIO, FADE_WEAK_RATIO, LEADER_GAP_PCT,
                      LEADER_MOMENTUM_GATE, LEADER_MOMENTUM_MIN, OPEN_EXCLUDE_MIN, POLL_INTERVAL_SEC,
@@ -490,11 +491,19 @@ class SignalEngine:
                                  f"{why} — 관망으로 전환")
             else:
                 snap["signal_bar"] = sig.get("bar_key")     # 실행기는 원래 신호봉으로 중복을 판단한다
-                # 반복은 '대기' 로 부른다 — '매수하세요' 는 돌파 순간의 첫 신호에만 쓴다
-                self._emit("ENTRY", "🔵 매수 대기하세요", label, ticker,
-                                 f"현재가 {price}  (신호가 {sig.get('price', price)})\n"
-                                 f"거래량 {rvol}배, 기준선 {vwap} 위 유지\n"
-                                 f"매수 신호 유지 중 — 아직 미진입")
+                if self._upgrade_entry(ticker, label, snap, sig):
+                    return
+                # 반복은 '대기' 로 부른다 — '매수하세요' 는 확인 항목이 찬 신호에만 쓴다. 자동매매로는 가지 않는다.
+                now = datetime.now(timezone.utc)
+                due = sig.get("next_at")
+                if due and now < datetime.fromisoformat(due):
+                    return
+                sent = self._emit("ENTRY_WATCH", "🔵 매수 대기하세요", label, ticker,
+                                  f"현재가 {price}  (신호가 {sig.get('price', price)})\n"
+                                  f"거래량 {rvol}배, 기준선 {vwap} 위 유지\n"
+                                  f"매수 신호 유지 중 — 아직 미진입")
+                if sent is not None:
+                    sig["next_at"] = (now + timedelta(minutes=ALERT_COOLDOWN_MIN)).isoformat()
             return
 
         # ---- 관망: 매수 판단 ----
@@ -557,14 +566,21 @@ class SignalEngine:
             self.stop_ref[ticker], self.stop_src[ticker] = snap["last_low"], "매수 신호봉 저점"
             rsi_prev, rsi_now = compute_rsi(snap["candles"])
             slope = "상승" if rsi_now > rsi_prev else "하락"
+            # 요건을 채웠어도 확인 항목이 모자라면 '대기' 다. 대기 신호는 자동매매로 가지 않고,
+            # 진입대기 동안 확인 항목이 채워지면 _upgrade_entry 가 '매수하세요' 로 올린다.
+            checks = self._entry_confirmations(snap, align, rsi_prev, rsi_now)
+            strong = sum(ok for _, ok in checks) >= ENTRY_CONFIRM_MIN
+            now = datetime.now(timezone.utc)
             self.state[ticker] = "진입대기"
-            self.pending[ticker] = {"price": price, "at": datetime.now(timezone.utc).isoformat(),
-                                    "bar_key": snap["bar_key"]}
+            self.pending[ticker] = {"price": price, "at": now.isoformat(), "bar_key": snap["bar_key"], "strong": strong,
+                                    "next_at": (now + timedelta(minutes=ALERT_COOLDOWN_MIN)).isoformat()}
             note = snap["cfg"].get("note")
-            self._emit("ENTRY", "🔵 매수하세요", label, ticker,
+            self._emit("ENTRY" if strong else "ENTRY_WATCH", "🔵 매수하세요" if strong else "🔵 매수 대기하세요", label, ticker,
                              f"현재가 {price}\n"
                              f"거래량 {prev_rvol}→{rvol}배 돌파, 기준선 {vwap} 위\n"
-                             f"{direction_txt} | EMA {align} | RSI {rsi_now}({slope})"
+                             f"{direction_txt} | EMA {align} | RSI {rsi_now}({slope})\n"
+                             f"{self._confirm_text(checks)}"
+                             + ("" if strong else "\n확인 항목이 채워지면 매수 신호로 올린다")
                              + (f"\n→ {note}" if note else ""))
             if self.tracker:
                 self.tracker.add(ticker, price, {
@@ -573,7 +589,45 @@ class SignalEngine:
                     "leader_pct": strength if strength is not None else "",
                     "ema": align, "rsi": rsi_now,
                     "leader_mom": snap["momentum"] if snap["momentum"] is not None else "",
+                    "grade": "확정" if strong else "대기",
                 })
+
+    @staticmethod
+    def _entry_confirmations(snap: dict, align: str, rsi_prev: float, rsi_now: float) -> list:
+        """매수 확신도 확인 항목 [(이름, 충족)]. 요건(방향·돌파·기준선·강봉)과 별개로 '지금 사도 되는가' 를 가른다."""
+        items = [("EMA 정배열", align == "정배열"), ("RSI 상승", rsi_now > rsi_prev),
+                 (f"거래량 {ENTRY_STRONG_RVOL:g}배↑", snap["rvol"] >= ENTRY_STRONG_RVOL)]
+        mom = snap.get("momentum")
+        if snap["cfg"].get("leaders") and mom is not None:
+            items.append(("선행 모멘텀", mom <= 0 if snap["cfg"].get("inverse") else mom >= 0))
+        return items
+
+    @staticmethod
+    def _confirm_text(checks: list) -> str:
+        n = sum(ok for _, ok in checks)
+        return f"확인 {n}/{len(checks)}: " + " · ".join(f"{name} {'✓' if ok else '✗'}" for name, ok in checks)
+
+    def _upgrade_entry(self, ticker: str, label: str, snap: dict, sig: dict) -> bool:
+        """대기 신호가 살아 있는 동안 확인 항목이 채워지면 '매수하세요' 로 올린다. 여기서만 자동매매로 간다."""
+        if sig.get("strong") or snap["rvol"] < RVOL_TRIGGER or snap["pos_close"] != "above":
+            return False
+        align = ema_alignment(snap["candles"])
+        rsi_prev, rsi_now = compute_rsi(snap["candles"])
+        checks = self._entry_confirmations(snap, align, rsi_prev, rsi_now)
+        if sum(ok for _, ok in checks) < ENTRY_CONFIRM_MIN:
+            return False
+        sig["strong"] = True
+        self._emit("ENTRY", "🔵 매수하세요", label, ticker,
+                   f"현재가 {snap['price']}  (대기 신호가 {sig.get('price', snap['price'])})\n"
+                   f"거래량 {snap['rvol']}배, 기준선 {snap['vwap']} 위 · EMA {align} | RSI {rsi_now}\n"
+                   f"{self._confirm_text(checks)}\n"
+                   f"대기 → 매수 신호로 승격")
+        return True
+
+    @staticmethod
+    def _sell_confirmed(close: float, sell_line: float, band: float, rvol: float) -> bool:
+        """매도 확신도: 종가가 매도선을 밴드 폭보다 깊이 뚫었거나 매도 거래량이 붙었을 때만 확정. 얕은 이탈은 '대기'."""
+        return close < sell_line * (1 - band / 100) or rvol >= RVOL_TRIGGER
 
 
     @staticmethod
@@ -607,10 +661,11 @@ class SignalEngine:
         return " + ".join(self._ambiguous_flags(pos_now, ctx))
 
     @staticmethod
-    def _exit_pending(kind: str, level: str, why: str) -> dict:
-        """청산대기 정보. 최초 사유를 고정하고, 첫 반복은 강한 알림 쿨다운 뒤에 온다."""
+    def _exit_pending(kind: str, level: str, why: str, target: dict = None) -> dict:
+        """청산대기 정보. 최초 사유를 고정하고, 첫 반복은 강한 알림 쿨다운 뒤에 온다.
+        target 은 대기(EXIT_WATCH) 신호가 확정되면 올라갈 종류·제목."""
         nxt = datetime.now(timezone.utc) + timedelta(minutes=ALERT_COOLDOWN_MIN)
-        return {"kind": kind, "level": level, "why": why, "repeats": 0, "next_at": nxt.isoformat()}
+        return {"kind": kind, "level": level, "why": why, "repeats": 0, "next_at": nxt.isoformat(), "target": target}
 
     @staticmethod
     def _exit_recovered(first: dict, pnl: float, price: float, pos_now: str, sell_line: float, band: float) -> str:
@@ -723,6 +778,18 @@ class SignalEngine:
             if pnl <= STOP_LOSS_PCT and first.get("kind") != "STOP":
                 first = self.pending[ticker] = self._exit_pending("STOP", "🔴 손절하세요",
                                                                   f"손절 한도 {STOP_LOSS_PCT}% 도달")
+            target = first.get("target")
+            if first.get("kind") == "EXIT_WATCH" and target:
+                # 대기 신호가 확정 조건을 채우면 올린다 — 매도선을 깊이 뚫거나 매도 거래량, 소진은 기준선 아래. 여기서만 자동매매로 간다.
+                sure = (self._sell_confirmed(close, sell_line, band, rvol) if target["kind"] == "SELL"
+                        else pos_now == "below")
+                if sure:
+                    first = self.pending[ticker] = self._exit_pending(target["kind"], target["level"], first.get("why", ""))
+                    self._emit(target["kind"], target["level"], label, ticker,
+                                     f"{first['why']} — 대기 → 확정\n"
+                                     f"종가 {close} · 거래량 {rvol}배 · 기준선 {'아래' if pos_now == 'below' else '중립대'}",
+                                     account=f"손익 {pnl}%  (평단 {avg} → 현재 {price})")
+                    return
             # 같은 사유를 15분마다 종일 반복하면 진짜 위험 알림이 묻힌다.
             # 반복할수록 간격을 두 배로 늘린다 (15→30→60→…, 상한 EXIT_REPEAT_MAX_MIN).
             now = datetime.now(timezone.utc)
@@ -731,8 +798,10 @@ class SignalEngine:
                 return
             n = first.get("repeats", 0) + 1
             gap = min(ALERT_COOLDOWN_MIN * 2 ** n, EXIT_REPEAT_MAX_MIN)
-            # 반복은 '대기' 로 부른다 ('🔴 매도하세요' → '🔴 매도 대기하세요'). 첫 청산 신호만 원래 제목을 쓴다
-            level = first.get("level", "🔴 매도하세요").replace("하세요", " 대기하세요")
+            # 반복은 '대기' 로 부른다 ('🔴 매도하세요' → '🔴 매도 대기하세요'). 손절 한도는 언제나 확정이라 그대로 둔다.
+            level = first.get("level", "🔴 매도하세요")
+            if first.get("kind") != "STOP" and "대기" not in level:
+                level = level.replace("하세요", " 대기하세요")
             sent = self._emit(first.get("kind", "SELL"), level, label, ticker,
                               f"{first.get('why', '청산 신호 유지')} — 청산 신호 유지 중\n"
                               f"다음 알림 {gap}분 뒤",
@@ -784,13 +853,18 @@ class SignalEngine:
             # 손절 성격의 알림은 반복돼야 한다. 쿨다운이 빈도를 제한한다.
             flavor = (f"매도 물량 쏟아지는 중 (거래량 {rvol}배)" if rvol >= RVOL_TRIGGER
                       else f"조용히 빠지는 중 (거래량 {rvol}배)")
+            # 확신도: 밴드 폭보다 깊이 뚫었거나 매도 거래량이 붙었으면 확정, 아니면 대기. 자동매매는 확정에만 반응한다.
+            sure = self._sell_confirmed(close, sell_line, band, rvol)
+            kind, level = ("SELL", "🔴 매도하세요") if sure else ("EXIT_WATCH", "🔴 매도 대기하세요")
             self.exit_at[ticker] = datetime.now(timezone.utc)
             self.entry_at.pop(ticker, None)
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = self._exit_pending("SELL", "🔴 매도하세요", f"{sell_why} {sell_line} 이탈")
-            self._emit("SELL", "🔴 매도하세요", label, ticker,
+            self.pending[ticker] = self._exit_pending(kind, level, f"{sell_why} {sell_line} 이탈",
+                                                      target=None if sure else {"kind": "SELL", "level": "🔴 매도하세요"})
+            self._emit(kind, level, label, ticker,
                              f"{flavor}\n"
-                             f"종가 {close}가 {sell_why} {sell_line} 아래로 내려감",
+                             f"종가 {close}가 {sell_why} {sell_line} 아래로 내려감"
+                             + ("" if sure else "\n이탈이 얕고 매도 물량이 없다 — 더 뚫리거나 거래량이 붙으면 매도 신호로 올린다"),
                              account=f"손익 {pnl}%  (평단 {avg} → 현재 {price})")
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
               and faded <= FADE_STRONG_RATIO):
@@ -798,17 +872,22 @@ class SignalEngine:
             # 판단에 쓰지 않는다. 다만 손실 중인데 '익절'이라 부르면 어색하므로
             # 문구만 상황에 맞춘다.
             verb = "익절하세요" if pnl > 0 else "정리하세요"
+            # 확신도: 가격이 기준선 아래로 내려섰으면 확정, 중립대면 대기 (기준선 위였다면 holding_up 으로 애초에 안 온다)
+            sure = pos_now == "below"
+            strong_level = f"🟢 {EXIT_PORTION_STRONG} {verb}"
+            kind, level = ("EXIT_FULL", strong_level) if sure else ("EXIT_WATCH", strong_level.replace("하세요", " 대기하세요"))
             self.exit_at[ticker] = datetime.now(timezone.utc)
             self.entry_at.pop(ticker, None)
             qty = held["qty"]
             self.state[ticker] = "청산대기"
-            self.pending[ticker] = self._exit_pending("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}",
-                                                      f"거래량 정점 {rvol_peak}배 대비 {round(faded * 100)}% 로 소진")
-            self._emit("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} {verb}", label, ticker,
+            self.pending[ticker] = self._exit_pending(kind, level, f"거래량 정점 {rvol_peak}배 대비 {round(faded * 100)}% 로 소진",
+                                                      target=None if sure else {"kind": "EXIT_FULL", "level": strong_level})
+            self._emit(kind, level, label, ticker,
                              f"{EXIT_PORTION_STRONG} 정리 권장\n"
                              f"거래량이 오늘 정점 {rvol_peak}배 → 최근 {FADE_BARS}봉 평균 {rvol_recent}배 "
                              f"({round(faded * 100)}% 수준)\n"
-                             f"상승 연료 소진 — 더 오를 힘이 남지 않음",
+                             f"상승 연료 소진 — 더 오를 힘이 남지 않음"
+                             + ("" if sure else "\n가격은 아직 기준선 중립대 — 아래로 내려서면 익절 신호로 올린다"),
                              account=f"손익 {pnl}%  (평단 {avg} → 현재 {price}) · 보유 {qty:g}주")
         elif (ENABLE_ADD_ON and pos_now == "above" and rvol_breakout
               and pnl >= ADDON_MIN_PROFIT_PCT

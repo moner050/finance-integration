@@ -277,8 +277,8 @@ def test_stop_recovers_only_past_hysteresis(monkeypatch, tmp_path):
     eng.evaluate("AAA", {"AAA": 94.0}, held)                   # -6% → 손절하세요
     assert cap.sent[-1][0] == "🔴 손절하세요" and eng.pending["AAA"]["kind"] == "STOP"
     eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
-    eng.evaluate("AAA", {"AAA": 96.5}, held)                   # -3.5%: 한도 위지만 회복폭 2% 미달 → 반복 ('대기' 제목)
-    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 손절 대기하세요"
+    eng.evaluate("AAA", {"AAA": 96.5}, held)                   # -3.5%: 한도 위지만 회복폭 2% 미달 → 반복 (손절은 언제나 확정 제목)
+    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 손절하세요"
     eng.evaluate("AAA", {"AAA": 100.9}, held)                  # -3% 넘게 회복 + 매도선 위 → 보유 복귀
     assert eng.state["AAA"] == "보유" and cap.sent[-1][0] == "⚪ 청산 신호 해제"
 
@@ -327,8 +327,12 @@ def test_pending_entry_expires(monkeypatch, tmp_path):
     eng, cap = make_engine(monkeypatch, tmp_path)
     eng.evaluate("AAA", {"AAA": 100.8}, {})
     assert eng.state["AAA"] == "진입대기" and eng.pending["AAA"]["bar_key"] == eng.snapshots["AAA"]["bar_key"]
-    eng.evaluate("AAA", {"AAA": 100.85}, {})                   # 만료 전 → 반복 알림은 '매수 대기하세요'
-    assert cap.sent[0][0] == "🔵 매수하세요" and cap.sent[-1][0] == "🔵 매수 대기하세요" and "아직 미진입" in cap.sent[-1][2]
+    assert cap.sent[0][0] == "🔵 매수하세요" and cap.signals[0].kind == "ENTRY" and "확인 3/3" in cap.sent[0][2]
+    eng.evaluate("AAA", {"AAA": 100.85}, {})                   # 15분 안 → 반복 없음
+    assert len(cap.sent) == 1
+    eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
+    eng.evaluate("AAA", {"AAA": 100.85}, {})                   # 반복 알림은 '매수 대기하세요' (review, 자동매매 대상 아님)
+    assert cap.sent[-1][0] == "🔵 매수 대기하세요" and cap.signals[-1].kind == "ENTRY_WATCH" and "아직 미진입" in cap.sent[-1][2]
     eng.pending["AAA"]["at"] = (datetime.now(timezone.utc) - timedelta(minutes=E.ENTRY_PENDING_MAX_MIN)).isoformat()
     eng.evaluate("AAA", {"AAA": 100.85}, {})
     assert eng.state["AAA"] == "관망" and "AAA" not in eng.pending
@@ -384,7 +388,8 @@ def test_entry_blocked_right_after_open_and_near_close(monkeypatch, tmp_path):
 def test_cancel_and_sell_judged_on_bar_close(monkeypatch, tmp_path):
     eng, cap = make_engine(monkeypatch, tmp_path)
     eng.evaluate("AAA", {"AAA": 100.8}, {})
-    eng.evaluate("AAA", {"AAA": 99.0}, {})                     # 현재가만 밴드 아래로 튐 → 취소 아님
+    eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"          # 반복 시각이 됐다고 치자
+    eng.evaluate("AAA", {"AAA": 99.0}, {})                     # 현재가만 밴드 아래로 튐 → 취소 아님, 대기 반복
     assert eng.state["AAA"] == "진입대기" and "아직 미진입" in cap.sent[-1][2]
     push_bar(eng, 99.5)
     eng.evaluate("AAA", {"AAA": 99.5}, {})                     # 종가가 기준선 아래 → 취소
@@ -396,9 +401,20 @@ def test_cancel_and_sell_judged_on_bar_close(monkeypatch, tmp_path):
     n = len(cap2.sent)
     eng2.evaluate("AAA", {"AAA": 99.0}, held)                  # 틱 이탈만으로는 매도 알림 없음
     assert eng2.state["AAA"] == "보유" and len(cap2.sent) == n
-    push_bar(eng2, 100.2)
+    push_bar(eng2, 100.2)                                      # 얕은 이탈(밴드 안), 거래량 없음 → 매도 대기
     eng2.evaluate("AAA", {"AAA": 100.2}, held)
-    assert cap2.sent[-1][0] == "🔴 매도하세요" and "종가 100.2가 매수 신호봉 저점 100.3" in cap2.sent[-1][2]
+    assert cap2.sent[-1][0] == "🔴 매도 대기하세요" and cap2.signals[-1].kind == "EXIT_WATCH"
+    assert "종가 100.2가 매수 신호봉 저점 100.3" in cap2.sent[-1][2] and eng2.state["AAA"] == "청산대기"
+    push_bar(eng2, 100.0)                                      # 밴드 폭보다 깊이 뚫림 → 매도 확정으로 승격
+    eng2.evaluate("AAA", {"AAA": 100.0}, held)
+    assert cap2.sent[-1][0] == "🔴 매도하세요" and cap2.signals[-1].kind == "SELL" and "대기 → 확정" in cap2.sent[-1][2]
+    assert eng2.pending["AAA"]["kind"] == "SELL"
+
+
+def test_shallow_break_with_volume_is_confirmed_sell(monkeypatch, tmp_path):
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    sc.run_steps(eng, range(4))                                # 10:02 봉: 종가 100.2 (밴드 안) 이지만 거래량 3000 → 확정
+    assert cap.signals[-1].kind == "SELL" and cap.sent[-1][0] == "🔴 매도하세요" and "매도 물량" in cap.sent[-1][2]
 
 
 # --- 신호 없이 산 포지션의 손절선과 수익 구간 상향 ----------------------------------
@@ -409,9 +425,9 @@ def test_stop_ref_from_first_seen_bar_and_trailing(monkeypatch, tmp_path):
     eng.evaluate("AAA", {"AAA": 100.9}, held)                  # 우리 신호 없이 보유 발견
     assert eng.stop_ref["AAA"] == 100.3 and eng.stop_src["AAA"] == "보유 확인 봉 저점"
     eng.stop_ref["AAA"] = 99.0                                 # 저점이 낮았다고 치자
-    push_bar(eng, 99.8)                                        # 수익 +1.3%, 종가가 밴드 하단(≈99.93) 아래
+    push_bar(eng, 99.8)                                        # 수익 +1.3%, 종가가 밴드 하단(≈99.93) 아래 (얕은 이탈 → 대기)
     eng.evaluate("AAA", {"AAA": 99.8}, held)
-    assert cap.sent[-1][0] == "🔴 매도하세요" and "저점 99.0 에서 상향" in cap.sent[-1][2]
+    assert cap.sent[-1][0] == "🔴 매도 대기하세요" and "저점 99.0 에서 상향" in cap.sent[-1][2]
 
 
 # --- 불타기는 매수와 같은 돌파 기준, 손절선 상향 ------------------------------------
@@ -482,4 +498,24 @@ def test_entry_skips_bear_ema(monkeypatch, tmp_path):
     monkeypatch.setattr(E, "ENTRY_SKIP_BEAR_EMA", False)
     eng2, cap2 = make_engine(monkeypatch, tmp_path, candles=bear_candles())
     eng2.evaluate("AAA", {"AAA": 102.0}, {})
-    assert [s[0] for s in cap2.sent] == ["🔵 매수하세요"] and "EMA 역배열" in cap2.sent[0][2]
+    # 필터를 끄면 신호는 나지만 역배열·거래량 2.9배라 확인 항목이 모자라 '대기' 다
+    assert [s[0] for s in cap2.sent] == ["🔵 매수 대기하세요"] and "EMA 역배열" in cap2.sent[0][2]
+    assert cap2.signals[0].kind == "ENTRY_WATCH" and "EMA 정배열 ✗" in cap2.sent[0][2]
+
+
+# --- 매수 확신도: 확인 항목이 모자라면 대기, 채워지면 승격 -----------------------------
+
+def test_entry_watch_then_upgrade_when_confirmations_fill(monkeypatch, tmp_path):
+    weak = sc.scenario_candles()
+    weak[-1] = bar(datetime(2026, 3, 25, 10, 1, tzinfo=TZ["KR"]), 100.8, 2500, high=100.85, low=100.3)   # 2.4배: 요건은 되지만 강한 거래량 아님
+    eng, cap = make_engine(monkeypatch, tmp_path, candles=weak)
+    eng.evaluate("AAA", {"AAA": 100.8}, {})
+    assert cap.signals[-1].kind == "ENTRY_WATCH" and cap.sent[-1][0] == "🔵 매수 대기하세요"
+    assert "확인 2/3" in cap.sent[-1][2] and "거래량 3배↑ ✗" in cap.sent[-1][2] and eng.pending["AAA"]["strong"] is False
+    push_bar(eng, 100.9, volume=4000, high=100.95, low=100.8)                 # 다음 봉에 거래량 3.9배가 붙음
+    eng.evaluate("AAA", {"AAA": 100.9}, {})
+    assert cap.signals[-1].kind == "ENTRY" and cap.sent[-1][0] == "🔵 매수하세요" and "승격" in cap.sent[-1][2]
+    assert eng.pending["AAA"]["strong"] is True and eng.state["AAA"] == "진입대기"
+    eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
+    eng.evaluate("AAA", {"AAA": 100.9}, {})                                   # 그 뒤 반복은 다시 '대기' 제목
+    assert cap.signals[-1].kind == "ENTRY_WATCH" and cap.sent[-1][0] == "🔵 매수 대기하세요"

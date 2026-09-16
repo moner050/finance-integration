@@ -226,6 +226,7 @@ def test_engine_repeat_entry_does_not_reorder(monkeypatch, tmp_path):
     eng._reconcile_orders()
     assert DBM.get_order(store, intent_id)["status"] == "canceled"
     eng.notify.last_sent.clear()                                          # 15분이 지난 것으로
+    eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
     eng.evaluate("AAA", {"AAA": 100.9}, {})
-    assert engine_rec.got[-1].kind == "ENTRY" and "아직 미진입" in engine_rec.got[-1].body
+    assert engine_rec.got[-1].kind == "ENTRY_WATCH" and "아직 미진입" in engine_rec.got[-1].body   # 반복은 review, 실행기 대상 아님
     assert len(DBM.recent_orders(store)) == 1                             # 새 주문 없음

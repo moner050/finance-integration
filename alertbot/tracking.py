@@ -19,11 +19,24 @@ class SignalTracker:
     """
 
     HEADER = ("signal_time,ticker,entry_price,vwap,rvol_prev,rvol,rvol_method,"
-              "leader_pct,ema,rsi,leader_mom,horizon_min,later_price,change_pct\n")
+              "leader_pct,ema,rsi,leader_mom,horizon_min,later_price,change_pct,grade\n")
 
     def __init__(self, path: Path):
         self.path = path
         self.pending = []           # 아직 관측 시점이 안 된 신호들
+        if self.path.exists():
+            # 열이 바뀐 옛 파일(grade 없음)은 날짜를 붙여 옆으로 치우고 새로 시작한다 — 열이 어긋난 CSV 는 못 읽는다
+            try:
+                first = self.path.open(encoding="utf-8-sig").readline()
+            except OSError:
+                first = ""
+            if first.strip() != self.HEADER.strip():
+                keep = self.path.with_name(f"{self.path.stem}.{datetime.now(timezone.utc):%Y%m%d}{self.path.suffix}")
+                try:
+                    self.path.rename(keep)
+                    log.info("추적 CSV 열이 바뀌어 옛 파일을 %s 로 옮겼다", keep.name)
+                except OSError as e:
+                    log.warning("추적 CSV 옛 파일을 옮기지 못했다 (%s) — 그대로 이어 쓴다", e)
         if not self.path.exists():
             self.path.write_text(self.HEADER, encoding="utf-8-sig")
 
@@ -61,7 +74,7 @@ class SignalTracker:
                    f'{m.get("vwap", "")},{m.get("rvol_prev", "")},{m.get("rvol", "")},'
                    f'{m.get("rvol_method", "")},{m.get("leader_pct", "")},'
                    f'{m.get("ema", "")},{m.get("rsi", "")},{m.get("leader_mom", "")},'
-                   f'{item["horizon"]},{later},{change}\n')
+                   f'{item["horizon"]},{later},{change},{m.get("grade", "")}\n')
             try:
                 with self.path.open("a", encoding="utf-8-sig") as f:
                     f.write(row)

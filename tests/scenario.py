@@ -16,15 +16,15 @@ def fixed_now_local(market: str) -> datetime:
 
 
 def scenario_candles(start_hour: int = 9, start_minute: int = 0) -> list:
-    """시작 시각부터 KR 62봉. 60번째까지 조용하고, 60(거래량 1.5배)→61(3배, 강봉, 기준선 위) 돌파.
-    기본 09:00~10:01."""
+    """시작 시각부터 KR 62봉. 60번째까지 조용하고, 60(거래량 1.5배)→61(3.4배, 강봉, 기준선 위) 돌파.
+    기본 09:00~10:01. 돌파봉 거래량은 확신도 기준(ENTRY_STRONG_RVOL 3배)을 넘겨 '매수하세요' 가 되게 한다."""
     t0 = datetime(2026, 3, 25, start_hour, start_minute, tzinfo=TZ["KR"])
     out = []
     for i in range(60):
         close = 100.0 + (i % 3) * 0.05
         out.append(bar(t0 + timedelta(minutes=i), close, 1000, high=close + 0.1, low=close - 0.1))
     out.append(bar(t0 + timedelta(minutes=60), 100.3, 1500, high=100.4, low=100.1))
-    out.append(bar(t0 + timedelta(minutes=61), 100.8, 3000, high=100.85, low=100.3))
+    out.append(bar(t0 + timedelta(minutes=61), 100.8, 3500, high=100.85, low=100.3))
     return out
 
 
@@ -75,14 +75,15 @@ class CaptureNotifier:
 
 STEPS = [
     # (현재가, 보유)  → evaluate 한 번씩
-    (100.8, {}),                                   # 돌파 → 🔵 매수하세요
-    (100.85, {}),                                  # 아직 미진입 → 🔵 매수하세요 (조건 유지)
+    (100.8, {}),                                   # 돌파 → 🔵 매수하세요 (확인 3/3)
+    (100.85, {}),                                  # 아직 미진입. 반복 알림은 15분 뒤라 여기선 침묵
     (100.9, {"AAA": {"qty": 10.0, "avg": 100.8}}), # 보유 전환. 유예 중이라 알림 없음
-    (100.2, {"AAA": {"qty": 10.0, "avg": 100.8}}), # 10:02 봉 종가 100.2 가 신호봉 저점 100.3 이탈 → 🔴 매도하세요
+    (100.2, {"AAA": {"qty": 10.0, "avg": 100.8}}), # 10:02 봉 종가 100.2 가 신호봉 저점 100.3 이탈, 매도 거래량 → 🔴 매도하세요
     (100.2, {}),                                   # 청산됨 → ✅ 손절 완료
 ]
 # 매도·취소 판정은 완성봉 종가라 4단계 전에 하락 봉이 하나 필요하다. run_steps 가 해당 단계 직전에 붙인다.
-STEP_BARS = {3: bar(datetime(2026, 3, 25, 10, 2, tzinfo=TZ["KR"]), 100.2, 1000, high=100.75, low=100.1)}
+# 거래량 3000(≈2.7배)은 이탈이 얕아도(밴드 안) '매도하세요' 가 되게 하는 매도 물량이다.
+STEP_BARS = {3: bar(datetime(2026, 3, 25, 10, 2, tzinfo=TZ["KR"]), 100.2, 3000, high=100.75, low=100.1)}
 
 
 def run_steps(engine, indexes=None, symbol="AAA"):

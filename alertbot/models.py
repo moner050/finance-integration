@@ -14,7 +14,9 @@ SEVERITY_ORDER = {"info": 0, "review": 1, "action": 2}
 KINDS = {
     "ENTRY": ("action", "strong"),          # 매수 신호와 '아직 미진입' 반복은 같은 키를 쓴다
     "ENTRY_CANCEL": ("review", "strong"),   # 매수 취소·매수 신호 만료
+    "ENTRY_WATCH": ("review", "strong"),    # 매수 대기 — 요건은 찼지만 확인 항목이 모자란 신호, 그리고 미진입 반복. 자동매매 대상 아님
     "EXIT_CANCEL": ("review", "strong"),    # 청산 신호 해제 — 근거가 사라져 보유로 복귀
+    "EXIT_WATCH": ("review", "strong"),     # 매도·익절 대기 — 이탈이 얕거나 소진이 아직 확실하지 않은 신호. 자동매매 대상 아님
     "CRASH_BUY": ("action", "strong"),      # Binance 5분봉 급락 매수 후보 (run_binance.py). 워커가 60분 쿨다운을 따로 건다
     "SURGE_WATCH": ("review", "strong"),    # Binance 4시간봉 급등 확인 — 추종 관찰 (눌림 대기)
     "SURGE_ENTRY": ("action", "strong"),    # Binance 4시간봉 급등 뒤 눌림 재돌파 — 추종 진입 후보. 워커가 7일 쿨다운을 건다
@@ -53,7 +55,8 @@ KINDS = {
 # 손절 한도(내 평단 기준), 청산 완료, 주문·포지션 사건, 성적표, 시스템은 계좌 정보라 보내지 않는다.
 # 본문에서도 계좌 줄(Signal.account — 손익·평단·보유 수량·내 포지션)은 공개 채널에 빠진다.
 PUBLIC_KINDS = {
-    "ENTRY", "ENTRY_CANCEL", "SELL", "EXIT_FULL", "EXIT_HALF", "EXIT_THIRD", "EXIT_CANCEL", "ADDON", "CLOSE_WARN",
+    "ENTRY", "ENTRY_WATCH", "ENTRY_CANCEL", "SELL", "EXIT_FULL", "EXIT_HALF", "EXIT_THIRD", "EXIT_WATCH", "EXIT_CANCEL",
+    "ADDON", "CLOSE_WARN",
     "CRASH_BUY", "SURGE_WATCH", "SURGE_ENTRY", "SURGE_WATCH_1D", "SURGE_ENTRY_1D", "CRASH_WATCH_1D", "CRASH_SHORT_1D",
     "MARKET_OPEN", "MARKET_CLOSE", "SUMMARY",
 }
