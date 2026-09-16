@@ -58,6 +58,18 @@ def test_holding_alerts_keep_account_lines_separate(monkeypatch, tmp_path):
     assert entry.kind == "ENTRY" and entry.account is None                # 매수 신호는 시장 근거뿐
 
 
+def test_market_summary_keeps_holdings_in_account_lines(monkeypatch, tmp_path):
+    """시황 본문은 전 종목의 시장 상태만, 내 보유 현황(수량·손익·청산 대기)은 account 로 분리된다."""
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    held = {"AAA": {"qty": 10.0, "avg": 100.0}}
+    eng.evaluate("AAA", {"AAA": 100.9}, held)
+    eng.last_summary = datetime.now(timezone.utc) - timedelta(hours=1)
+    eng.market_summary(["AAA"], held)
+    summary = cap.signals[-1]
+    assert summary.kind == "SUMMARY" and "보유" not in summary.body and "테스트  기준선 위" in summary.body
+    assert summary.account.startswith("\n내 보유\n🟢 테스트  보유 10주 +0.90%")
+
+
 def test_engine_state_transitions(monkeypatch, tmp_path):
     eng, cap = make_engine(monkeypatch, tmp_path)
     states = []

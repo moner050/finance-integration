@@ -49,12 +49,13 @@ KINDS = {
 }
 
 
-# 공개 채널(TELEGRAM_PUBLIC_*)이 받는 종류 — 시장 데이터만으로 성립하는 매수·매도 신호.
-# 손절 한도(내 평단 기준), 청산 완료, 시황(보유 현황 포함), 주문·포지션 사건, 성적표는 계좌 정보라 보내지 않는다.
-# 본문에서도 계좌 줄(Signal.account)은 공개 채널에 빠진다.
+# 공개 채널(TELEGRAM_PUBLIC_*)이 받는 종류 — 시장 데이터만으로 성립하는 매수·매도 신호, 장 시작·마감, 시황.
+# 손절 한도(내 평단 기준), 청산 완료, 주문·포지션 사건, 성적표, 시스템은 계좌 정보라 보내지 않는다.
+# 본문에서도 계좌 줄(Signal.account — 손익·평단·보유 수량·내 포지션)은 공개 채널에 빠진다.
 PUBLIC_KINDS = {
     "ENTRY", "ENTRY_CANCEL", "SELL", "EXIT_FULL", "EXIT_HALF", "EXIT_THIRD", "EXIT_CANCEL", "ADDON", "CLOSE_WARN",
     "CRASH_BUY", "SURGE_WATCH", "SURGE_ENTRY", "SURGE_WATCH_1D", "SURGE_ENTRY_1D", "CRASH_WATCH_1D", "CRASH_SHORT_1D",
+    "MARKET_OPEN", "MARKET_CLOSE", "SUMMARY",
 }
 
 

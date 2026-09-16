@@ -860,7 +860,7 @@ class SignalEngine:
             return
         self.last_summary = now
 
-        lines = []
+        lines, mine = [], []          # lines 는 시장 상태(공개 채널에도 간다), mine 은 내 보유 현황(계좌 줄)
         for t in active:
             snap = self.snapshots.get(t)
             if not snap:
@@ -885,10 +885,10 @@ class SignalEngine:
                             else "기준선 위 유지")
                 else:
                     tail = f"기준선 {'아래' if snap['pos'] == 'below' else '중립대'}"
-                lines.append(f"{mark} {label}  보유 {held['qty']:g}주 {pnl:+.2f}% | {tail}")
-                continue
+                mine.append(f"{mark} {label}  보유 {held['qty']:g}주 {pnl:+.2f}% | {tail}")
+                # 시장 상태 줄은 아래에서 미보유 종목과 같은 형식으로 덧붙인다
 
-            # 미보유: 매수 조건 3개 중 몇 개가 찼는지
+            # 매수 조건 3개 중 몇 개가 찼는지 (보유 여부와 무관한 시장 상태)
             checks = []
             checks.append(("방향", snap["direction_ok"]))
             checks.append(("거래량", snap["rvol"] >= RVOL_TRIGGER))
@@ -927,7 +927,9 @@ class SignalEngine:
         lines.append("※ 참고용. 매수·매도는 개별 알림(🔵🔴🟢)이 왔을 때만")
         ref = (active or pre)[0]
         clock = now_local(self.watchlist[ref]["market"]).strftime("%H:%M")
-        self._emit("SUMMARY", "📊 시황", clock, None, "\n".join(lines))
+        # 보유 현황은 계좌 줄 — 내 채널에만 붙고 공개 채널에는 시장 상태만 간다
+        self._emit("SUMMARY", "📊 시황", clock, None, "\n".join(lines),
+                   account="\n".join(["", "내 보유"] + mine) if mine else None)
 
     @staticmethod
     def _stance(snap) -> tuple:

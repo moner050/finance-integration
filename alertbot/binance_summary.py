@@ -15,9 +15,9 @@ def summary_signal(workers: list, trader=None, now: datetime = None):
     lines = []
     for w in workers:
         lines.extend(w.status_lines(now))
-    if trader is not None:
-        lines.extend(trader.open_lines())
-    if not lines:
+    mine = trader.open_lines() if trader is not None else []      # 내 포지션 — 계좌 줄, 공개 채널엔 빠진다
+    if not lines and not mine:
         return None
     lines += ["", "※ 참고용. 진입·청산은 개별 알림(🔵🔴📥📤)이 왔을 때만"]
-    return Signal("SUMMARY", "📊 코인 시황", now.astimezone(KST).strftime("%H:%M"), "\n".join(lines))
+    return Signal("SUMMARY", "📊 코인 시황", now.astimezone(KST).strftime("%H:%M"), "\n".join(lines),
+                  account="\n".join(["", "내 포지션"] + mine) if mine else None)

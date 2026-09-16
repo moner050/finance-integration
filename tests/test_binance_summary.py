@@ -75,8 +75,9 @@ def test_trader_open_lines_and_summary_signal(monkeypatch):
     w.poll_once(T)
     sig = summary_signal([w], t, T)
     assert sig.kind == "SUMMARY" and sig.title == "📊 코인 시황" and sig.label == "12:00"
-    assert sig.body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT") and "📥 [DRY] ETCUSDT" in sig.body
+    assert sig.body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT") and "[DRY]" not in sig.body
     assert sig.body.endswith("※ 참고용. 진입·청산은 개별 알림(🔵🔴📥📤)이 왔을 때만")
+    assert sig.account.startswith("\n내 포지션\n📥 [DRY] ETCUSDT")                 # 내 포지션은 계좌 줄 — 공개 채널엔 빠진다
 
 
 def test_start_message_lists_symbols_not_rules():

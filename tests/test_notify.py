@@ -91,11 +91,15 @@ def test_public_channel_gets_market_signals_without_account_lines(monkeypatch):
     assert calls[1][0].startswith("https://api.telegram.org/botPUB/") and "손익" not in calls[1][1] and "저점 100.3" in calls[1][1]
     assert sell.full_body().endswith("손익 -0.6%  (평단 100.8 → 현재 100.2)")
     # 계좌 정보만 담는 종류는 공개 채널이 받지 않는다
-    for kind, title in (("STOP", "🔴 손절하세요"), ("CLOSED", "✅ 손절 완료"), ("SUMMARY", "📊 시황"),
-                        ("ORDER_SENT", "📤 주문 접수"), ("BN_ENTRY", "📥 진입")):
+    for kind, title in (("STOP", "🔴 손절하세요"), ("CLOSED", "✅ 손절 완료"), ("SYSTEM", "⚪ 시스템"),
+                        ("ORDER_SENT", "📤 주문 접수"), ("BN_ENTRY", "📥 진입"), ("DAILY_REPORT", "📈 오늘 성적")):
         r = d.send(Signal(kind, title, "x", "b", "BBB"))
         assert r["telegram"] == "ok" and r["telegram_public"] == "skip", kind
     assert d.send(Signal("CRASH_BUY", "🔵 급락 매수 후보", "ETCUSDT 5분봉", "b", "ETCUSDT"))["telegram_public"] == "ok"
+    # 장 시작·시황은 공개로 가지만 시황의 보유 현황(account)은 빠진다
+    assert d.send(Signal("MARKET_OPEN", "🔔 장 시작", "한국", "감시 시작"))["telegram_public"] == "ok"
+    r = d.send(Signal("SUMMARY", "📊 시황", "10:00", "▲ 삼성전자  기준선 위 | 2/3", account="\n내 보유\n🔴 속쓰  보유 380주 -31%"))
+    assert r["telegram_public"] == "ok" and "보유 380주" in calls[-2][1] and "보유" not in calls[-1][1]
 
 
 def test_record_failure_does_not_break_send():
