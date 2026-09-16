@@ -68,7 +68,7 @@ def live_broker():
 
 
 def run(workers: list, trader=None, notifier=None):
-    # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 시작한다 — 30분을 기다리면 '돌고 있는 건지' 확인이 늦다
+    # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 시작한다 — 한 주기를 기다리면 '돌고 있는 건지' 확인이 늦다
     last_summary = datetime.now(timezone.utc) - timedelta(minutes=SUMMARY_INTERVAL_MIN)
     while True:
         for w in workers:

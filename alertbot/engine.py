@@ -77,7 +77,7 @@ class SignalEngine:
         self.stop_src = {}          # ticker -> 손절선의 출처 문구 (매수 신호봉 / 보유 확인 봉 / 추가매수 봉)
         self.snapshots = {}         # 최근 지표. 시황 요약이 재계산 없이 쓴다
         # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 초기화한다.
-        # 30분을 기다리면 '돌고 있는 건지' 확인이 늦어진다.
+        # 한 주기를 기다리면 '돌고 있는 건지' 확인이 늦어진다.
         self.last_summary = datetime.now(timezone.utc) - timedelta(minutes=SUMMARY_INTERVAL_MIN)
         if store is not None:
             self._restore_state()
@@ -848,7 +848,7 @@ class SignalEngine:
                              account=f"손익 {pnl}%  ({held['qty']:g}주 보유)")
 
     def market_summary(self, active: list, holdings: dict, pre: list = None):
-        """30분마다 전 종목 상태를 한 번에 보낸다.
+        """SUMMARY_INTERVAL_MIN 분마다 전 종목 상태를 한 번에 보낸다.
 
         보유하지 않은 종목도 지금 조건이 어디까지 찼는지 보여준다.
         개별 알림은 조건이 다 맞아야 나오지만, 요약은 '아직 뭐가 모자란지'를

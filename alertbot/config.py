@@ -64,7 +64,7 @@ TG_TOKEN = _CFG["TELEGRAM_BOT_TOKEN"]
 TG_CHATS = [c.strip() for c in _CFG["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
 # 받을 최소 등급 (info | review | action). info 면 시황 요약까지 전부 받는다.
 TG_MIN_SEVERITY = _CFG.get("TELEGRAM_MIN_SEVERITY") or "info"
-# 공개 채널 — 다른 봇·채팅으로 시장 신호(매수·매도·코인 신호)만 보낸다. 내 계좌 정보(손익·평단·보유 수량·주문·시황)는 가지 않는다.
+# 공개 채널 — 다른 봇·채팅으로 시장 신호(매수·매도·코인 신호)와 장 시작·시황을 보낸다. 내 계좌 정보(손익·평단·보유 수량·내 포지션·주문)는 가지 않는다.
 # 비워 두면 만들지 않는다. 종류 목록은 models.PUBLIC_KINDS.
 TG_PUBLIC_TOKEN = (_CFG.get("TELEGRAM_PUBLIC_BOT_TOKEN") or "").strip()
 TG_PUBLIC_CHATS = [c.strip() for c in (_CFG.get("TELEGRAM_PUBLIC_CHAT_ID") or "").split(",") if c.strip()]
@@ -195,7 +195,7 @@ STOP_RECOVER_PCT = 2.0
 ENTRY_MIN_PEAK_RATIO = 0.6
 CLOSE_WARN_MIN = 30
 STATS_REPORT_MIN = 60
-SUMMARY_INTERVAL_MIN = 30      # 전 종목 시황 요약 발송 주기
+SUMMARY_INTERVAL_MIN = 10      # 전 종목 시황 요약 발송 주기 (주식·코인 공통)
 
 # 불타기(추세 지속 확인 후 추가 매수) 알림
 ENABLE_ADD_ON = True
