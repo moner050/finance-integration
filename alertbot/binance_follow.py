@@ -219,8 +219,9 @@ class FollowWorker:
                     rsi_ok = m["rsi"] >= spec["rsi"] if long else m["rsi"] <= spec["rsi"]
                     miss = [n for n, ok in (("변동폭", m["mult"] >= spec["atr_mult"]), ("RSI", rsi_ok)) if not ok]
                     tail = f"{'급등' if long else '급락'} 조건 {2 - len(miss)}/2 (부족: {', '.join(miss)})"
+            signed = m["move"] if long else -m["move"]               # 롱은 저점 대비 상승(+), 숏은 고점 대비 하락(-)
             out.append(f"{head} {symbol}  {fmt_price(m['close'])} · {spec['lookback']}봉 {'저점' if long else '고점'} 대비 "
-                       f"{'+' if long else '-'}{m['move']:.2f}% (기준ATR {m['mult']:.1f}/{spec['atr_mult']:g}배) · "
+                       f"{signed:+.2f}% (기준ATR {max(m['mult'], 0):.1f}/{spec['atr_mult']:g}배) · "
                        f"RSI {m['rsi']:.1f} · {reg} | {tail}")
         return out
 
