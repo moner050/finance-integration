@@ -490,10 +490,11 @@ class SignalEngine:
                                  f"{why} — 관망으로 전환")
             else:
                 snap["signal_bar"] = sig.get("bar_key")     # 실행기는 원래 신호봉으로 중복을 판단한다
-                self._emit("ENTRY", "🔵 매수하세요", label, ticker,
+                # 반복은 '대기' 로 부른다 — '매수하세요' 는 돌파 순간의 첫 신호에만 쓴다
+                self._emit("ENTRY", "🔵 매수 대기하세요", label, ticker,
                                  f"현재가 {price}  (신호가 {sig.get('price', price)})\n"
                                  f"거래량 {rvol}배, 기준선 {vwap} 위 유지\n"
-                                 f"아직 미진입 — 조건 유지 중")
+                                 f"매수 신호 유지 중 — 아직 미진입")
             return
 
         # ---- 관망: 매수 판단 ----
@@ -730,7 +731,9 @@ class SignalEngine:
                 return
             n = first.get("repeats", 0) + 1
             gap = min(ALERT_COOLDOWN_MIN * 2 ** n, EXIT_REPEAT_MAX_MIN)
-            sent = self._emit(first.get("kind", "SELL"), first.get("level", "🔴 매도하세요"), label, ticker,
+            # 반복은 '대기' 로 부른다 ('🔴 매도하세요' → '🔴 매도 대기하세요'). 첫 청산 신호만 원래 제목을 쓴다
+            level = first.get("level", "🔴 매도하세요").replace("하세요", " 대기하세요")
+            sent = self._emit(first.get("kind", "SELL"), level, label, ticker,
                               f"{first.get('why', '청산 신호 유지')} — 청산 신호 유지 중\n"
                               f"다음 알림 {gap}분 뒤",
                               account=f"손익 {pnl}%  (평단 {avg} → 현재 {price}) · 아직 미청산, {held['qty']:g}주 보유 중")

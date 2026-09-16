@@ -262,8 +262,8 @@ def test_exit_wait_recovers_to_holding(monkeypatch, tmp_path):
     floor = round(100.3 * (1 + eng.snapshots["AAA"]["band"] / 100), 4)
     eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
     push_bar(eng, floor - 0.01)
-    eng.evaluate("AAA", {"AAA": floor - 0.01}, held)           # 종가가 매도선 위지만 밴드 여유 안 → 아직 청산대기
-    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 매도하세요"
+    eng.evaluate("AAA", {"AAA": floor - 0.01}, held)           # 종가가 매도선 위지만 밴드 여유 안 → 아직 청산대기 (반복은 '대기')
+    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 매도 대기하세요"
     push_bar(eng, floor + 0.01)
     eng.evaluate("AAA", {"AAA": floor + 0.01}, held)           # 종가가 밴드만큼 넘어 회복 → 보유 복귀
     assert eng.state["AAA"] == "보유" and "AAA" not in eng.pending
@@ -277,8 +277,8 @@ def test_stop_recovers_only_past_hysteresis(monkeypatch, tmp_path):
     eng.evaluate("AAA", {"AAA": 94.0}, held)                   # -6% → 손절하세요
     assert cap.sent[-1][0] == "🔴 손절하세요" and eng.pending["AAA"]["kind"] == "STOP"
     eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"
-    eng.evaluate("AAA", {"AAA": 96.5}, held)                   # -3.5%: 한도 위지만 회복폭 2% 미달 → 반복
-    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 손절하세요"
+    eng.evaluate("AAA", {"AAA": 96.5}, held)                   # -3.5%: 한도 위지만 회복폭 2% 미달 → 반복 ('대기' 제목)
+    assert eng.state["AAA"] == "청산대기" and cap.sent[-1][0] == "🔴 손절 대기하세요"
     eng.evaluate("AAA", {"AAA": 100.9}, held)                  # -3% 넘게 회복 + 매도선 위 → 보유 복귀
     assert eng.state["AAA"] == "보유" and cap.sent[-1][0] == "⚪ 청산 신호 해제"
 
@@ -327,8 +327,8 @@ def test_pending_entry_expires(monkeypatch, tmp_path):
     eng, cap = make_engine(monkeypatch, tmp_path)
     eng.evaluate("AAA", {"AAA": 100.8}, {})
     assert eng.state["AAA"] == "진입대기" and eng.pending["AAA"]["bar_key"] == eng.snapshots["AAA"]["bar_key"]
-    eng.evaluate("AAA", {"AAA": 100.85}, {})                   # 만료 전 → 반복 알림
-    assert cap.sent[-1][0] == "🔵 매수하세요" and "아직 미진입" in cap.sent[-1][2]
+    eng.evaluate("AAA", {"AAA": 100.85}, {})                   # 만료 전 → 반복 알림은 '매수 대기하세요'
+    assert cap.sent[0][0] == "🔵 매수하세요" and cap.sent[-1][0] == "🔵 매수 대기하세요" and "아직 미진입" in cap.sent[-1][2]
     eng.pending["AAA"]["at"] = (datetime.now(timezone.utc) - timedelta(minutes=E.ENTRY_PENDING_MAX_MIN)).isoformat()
     eng.evaluate("AAA", {"AAA": 100.85}, {})
     assert eng.state["AAA"] == "관망" and "AAA" not in eng.pending
