@@ -1,48 +1,51 @@
 {% extends "base.html" %}
 {% set nav = "trading" %}
 {% block content %}
-<div class="page-head"><div><h2>자동매매</h2><p>토스 주식 실행기와 Binance 선물 워커의 모드·킬 스위치·한도·기록</p></div></div>
+{% set admin = me.role == 'admin' %}
+<div class="page-head"><div><h2>자동매매</h2><p>위는 공용 가상 장부(실계좌와 격리된 모의매매), 아래는 계정별 live 매매. live 는 각 계정의 키로 그 계정 계좌에만 주문한다.</p></div></div>
 {% if message %}<p class="warn">{{ message }}</p>{% endif %}
+
+<h3>내 live 매매 <span class="muted" style="font-weight:500">{{ me.email }}</span></h3>
+<form class="card" method="post" action="/trading/live">
+ <input type="hidden" name="csrf" value="{{ csrf }}">
+ <label><span><input type="checkbox" name="toss_live" value="1" {{ 'checked' if mine.toss_live else '' }} {{ '' if keys.toss and keys.telegram else 'disabled' }}> 토스 live (주식)</span></label>
+ <label><span><input type="checkbox" name="binance_live" value="1" {{ 'checked' if mine.binance_live else '' }} {{ '' if keys.binance and keys.telegram else 'disabled' }}> Binance live (선물)</span></label>
+ <label>주식 금액 배율 (종목 1회 매수 금액 × 배율) <input type="text" name="amount_scale" value="{{ '{:g}'.format(mine.amount_scale) }}"></label>
+ <label>Binance 전략별 자본 (USDT) <input type="text" name="binance_capital" value="{{ '{:g}'.format(mine.binance_capital) }}"></label>
+ <div class="full">
+  <button type="submit" class="primary">저장</button>
+  <span class="muted">키: 토스 {{ '●' if keys.toss else '○' }} · Binance {{ '●' if keys.binance else '○' }} · 텔레그램 {{ '●' if keys.telegram else '○' }} — <a href="/account">내 API 키</a>. live 를 켜려면 해당 키와 텔레그램 키가 필요하다.</span>
+  {% if mode != 'live' %}<span class="warn">서버 토스 모드가 {{ mode }} 라 켜도 주식 주문이 나가지 않는다</span>{% endif %}
+  {% if bn_mode != 'live' %}<span class="warn">서버 Binance 모드가 {{ bn_mode }} 라 켜도 선물 주문이 나가지 않는다</span>{% endif %}
+ </div>
+</form>
 <dl class="kv">
- <dt>모드 <code>AUTOTRADE_MODE</code></dt>
- <dd><strong>{{ mode }}</strong>
-  {% if mode == 'off' %}<span class="muted">실행기 없음. 알림만 보낸다.</span>
-  {% elif mode == 'dry' %}<span class="muted">정책·의도 기록은 실제와 같고 주문은 가상 체결. 가상 체결은 엔진 보유에 합쳐져 매도·성적표까지 이어진다.</span>
-  {% else %}<span class="warn">실제 주문 모드.</span>{% endif %}</dd>
- <dt>킬 스위치 (DB)</dt>
- <dd><span class="badge {{ 'ok-badge' if settings.autotrade_enabled == '1' else 'action' }}">{{ 'ON' if settings.autotrade_enabled == '1' else 'OFF' }}</span>
-  <form class="inline" method="post" action="/trading/toggle"><button>{{ '끄기' if settings.autotrade_enabled == '1' else '켜기' }}</button></form></dd>
- <dt>자동매매 종목</dt>
+ <dt>live 주문 조건</dt>
+ <dd><span class="muted">서버 모드 live + 내 live 스위치 + (주식) 종목 화면의 live 자동매매 체크와 1회 매수 금액. 한도(아래)는 계정마다 따로 센다. 주문·체결·실패·일일 성적은 내 텔레그램으로만 간다.</span></dd>
+ <dt>live 자동매매 종목</dt>
  <dd>{% if auto_rows %}{% for r in auto_rows %}<span class="badge">{{ r.symbol }} · {{ '{:,.0f}'.format(r.auto_amount or 0) }}</span>{% endfor %}{% else %}<span class="muted">없음 — 종목 화면에서 지정</span>{% endif %}</dd>
- {% if mode == 'dry' %}
- <dt>모의 보유 (dry)</dt>
- <dd>{% if dry_positions %}{% for sym, p in dry_positions.items() %}<span class="badge">{{ sym }} · {{ '{:g}'.format(p.qty) }}주 @ {{ p.avg }}</span>{% endfor %}{% else %}<span class="muted">없음</span>{% endif %}</dd>
- {% endif %}
- <dt>실제 주문 조건</dt>
- <dd>{% if live_ready %}<span class="warn">충족 (모드 live + 킬 스위치 ON + 자동 종목 있음)</span>{% else %}<span class="ok">미충족 — 주문이 나가지 않는다</span>{% endif %}</dd>
- <dt>주문 권한</dt>
- <dd><button hx-post="/trading/check-permission" hx-target="#perm">주문 권한 확인 (매수가능금액 조회)</button> <span id="perm"></span></dd>
 </dl>
 
-<h3>한도 (재시작 없이 반영)</h3>
+<h3>한도 <span class="muted" style="font-weight:500">live 계정마다 따로 적용 · {{ '재시작 없이 반영' if admin else '관리자만 바꾼다' }}</span></h3>
 <form class="card" method="post" action="/trading/settings">
- <label>동시 보유 종목 수 <input type="text" name="max_positions" value="{{ settings.max_positions }}"></label>
- <label>하루 주문 횟수 (손절 제외) <input type="text" name="max_orders_per_day" value="{{ settings.max_orders_per_day }}"></label>
- <label>일일 손실 한도 KRW <input type="text" name="daily_loss_limit_krw" value="{{ settings.daily_loss_limit_krw }}"></label>
- <label>일일 손실 한도 USD <input type="text" name="daily_loss_limit_usd" value="{{ settings.daily_loss_limit_usd }}"></label>
- <label>1회 매수 상한 KRW <input type="text" name="max_order_amount_krw" value="{{ settings.max_order_amount_krw }}"><span class="muted" style="padding:0;font-weight:500">하드캡 {{ '{:,.0f}'.format(hard_max.KRW) }}</span></label>
- <label>1회 매수 상한 USD <input type="text" name="max_order_amount_usd" value="{{ settings.max_order_amount_usd }}"><span class="muted" style="padding:0;font-weight:500">하드캡 {{ '{:,.0f}'.format(hard_max.USD) }}</span></label>
- <div class="full"><button type="submit" class="primary">저장</button></div>
+ <input type="hidden" name="csrf" value="{{ csrf }}">
+ <label>동시 보유 종목 수 <input type="text" name="max_positions" value="{{ settings.max_positions }}" {{ '' if admin else 'readonly' }}></label>
+ <label>하루 주문 횟수 (손절 제외) <input type="text" name="max_orders_per_day" value="{{ settings.max_orders_per_day }}" {{ '' if admin else 'readonly' }}></label>
+ <label>일일 손실 한도 KRW <input type="text" name="daily_loss_limit_krw" value="{{ settings.daily_loss_limit_krw }}" {{ '' if admin else 'readonly' }}></label>
+ <label>일일 손실 한도 USD <input type="text" name="daily_loss_limit_usd" value="{{ settings.daily_loss_limit_usd }}" {{ '' if admin else 'readonly' }}></label>
+ <label>1회 매수 상한 KRW <input type="text" name="max_order_amount_krw" value="{{ settings.max_order_amount_krw }}" {{ '' if admin else 'readonly' }}><span class="muted" style="padding:0;font-weight:500">하드캡 {{ '{:,.0f}'.format(hard_max.KRW) }}</span></label>
+ <label>1회 매수 상한 USD <input type="text" name="max_order_amount_usd" value="{{ settings.max_order_amount_usd }}" {{ '' if admin else 'readonly' }}><span class="muted" style="padding:0;font-weight:500">하드캡 {{ '{:,.0f}'.format(hard_max.USD) }}</span></label>
+ {% if admin %}<div class="full"><button type="submit" class="primary">저장</button></div>{% endif %}
 </form>
 
-<h3>주문 의도 <span class="muted" style="font-weight:500">최근 200건 · 미결 {{ open_count }}</span></h3>
+{% macro order_table(orders, show_account) %}
 <div class="panel">
 <table>
-<tr><th>시각 (KST)</th><th>모드</th><th>종목</th><th>신호</th><th>주문</th><th>가격</th><th>수량</th><th>금액</th><th>상태</th><th>사유 / 주문번호</th><th>체결</th><th>손익</th><th></th></tr>
+<tr><th>시각 (KST)</th>{% if show_account %}<th>계정</th>{% endif %}<th>종목</th><th>신호</th><th>주문</th><th>가격</th><th>수량</th><th>금액</th><th>상태</th><th>사유 / 주문번호</th><th>체결</th><th>손익</th><th></th></tr>
 {% for o in orders %}
 <tr>
  <td style="white-space:nowrap">{{ o.created_at|kst }}</td>
- <td>{{ o.mode }}</td>
+ {% if show_account %}<td>{{ emails.get(o.account_id, o.account_id) }}</td>{% endif %}
  <td><strong>{{ o.symbol }}</strong> <span class="muted">{{ o.market }}</span></td>
  <td>{{ o.kind }}</td>
  <td>{{ o.side }} {{ o.order_type }}</td>
@@ -53,31 +56,34 @@
  <td>{{ o.reason or '' }}{% if o.order_id %}<br><span class="muted">{{ o.order_id }}</span>{% endif %}</td>
  <td>{% if o.filled_qty %}{{ '{:g}'.format(o.filled_qty) }} @ {{ o.avg_price }}{% endif %}</td>
  <td>{% if o.pnl is not none %}<span class="{{ 'ok' if o.pnl >= 0 else 'warn' }}">{{ '{:+,.0f}'.format(o.pnl) }}</span>{% endif %}</td>
- <td>{% if o.status in ('sent', 'open') %}<button hx-post="/trading/orders/{{ o.intent_id }}/cancel" hx-target="#c-{{ o.intent_id }}">취소</button> <span id="c-{{ o.intent_id }}"></span>{% endif %}</td>
+ <td>{% if o.status in ('sent', 'open') and (admin or o.account_id == me.id) %}<button hx-post="/trading/orders/{{ o.intent_id }}/cancel" hx-target="#c-{{ o.intent_id }}">취소</button> <span id="c-{{ o.intent_id }}"></span>{% endif %}</td>
 </tr>
 {% else %}
 <tr><td colspan="13" class="muted">기록이 없다</td></tr>
 {% endfor %}
 </table>
 </div>
+{% endmacro %}
 
-<h3>Binance 선물 자동매매 <span class="muted" style="font-weight:500">포지션 · 최근 100건</span></h3>
+<h3>{{ '계정별 live 주문' if admin else '내 live 주문' }} <span class="muted" style="font-weight:500">최근 200건 · 미결 {{ open_count }}</span></h3>
+{{ order_table(live_orders, admin) }}
+
+<h3>공용 가상 장부 (주식) <span class="muted" style="font-weight:500">확정 매수 신호마다 가상 체결 · 실계좌와 격리 · 한도 없음 · 최근 100건</span></h3>
 <dl class="kv">
- <dt>모드 <code>ALERT_BINANCE_TRADE_MODE</code></dt>
- <dd><strong>{{ bn_mode }}</strong>
-  {% if bn_mode == 'live' %}<span class="warn">실제 주문 모드.</span>{% elif bn_mode == 'dry' %}<span class="muted">가상 체결.</span>{% else %}<span class="muted">알림만.</span>{% endif %}</dd>
- <dt>Binance 킬 스위치 (DB, live 진입에만 적용)</dt>
- <dd><span class="badge {{ 'ok-badge' if settings.binance_trade_enabled == '1' else 'action' }}">{{ 'ON' if settings.binance_trade_enabled == '1' else 'OFF' }}</span>
-  <form class="inline" method="post" action="/trading/binance/toggle"><button>{{ '끄기' if settings.binance_trade_enabled == '1' else '켜기' }}</button></form></dd>
- <dt>동작</dt>
- <dd><span class="muted">진입 후보 알림을 시장가로 체결하고 손절 알고 주문(마크 트리거)을 건다. 종료는 손절 체결 또는 보유 한도. 손익은 추정값이다.</span></dd>
+ <dt>모의 보유</dt>
+ <dd>{% if dry_positions %}{% for sym, p in dry_positions.items() %}<span class="badge">{{ sym }} · {{ '{:g}'.format(p.qty) }}주 @ {{ p.avg }}</span>{% endfor %}{% else %}<span class="muted">없음</span>{% endif %}</dd>
 </dl>
+{{ order_table(virtual_orders, false) }}
+
+<h3>Binance 선물 포지션 <span class="muted" style="font-weight:500">가상 장부{{ ' + 모든 계정 live' if admin else ' + 내 live' }} · 최근 100건</span></h3>
 <div class="panel">
 <table>
-<tr><th>열림 (KST)</th><th>전략</th><th>심볼</th><th>방향</th><th>수량</th><th>진입가</th><th>명목 USDT</th><th>배율</th><th>손절</th><th>보유 한도 (KST)</th><th>상태</th><th>종료가 / 사유</th><th>펀딩</th><th>손익 USDT</th></tr>
+<tr><th>열림 (KST)</th><th>장부</th><th>전략</th><th>심볼</th><th>방향</th><th>수량</th><th>진입가</th><th>명목 USDT</th><th>배율</th><th>손절</th><th>보유 한도 (KST)</th><th>상태</th><th>종료가 / 사유</th><th>펀딩</th><th>손익 USDT</th></tr>
 {% for p in bn_positions %}
 <tr>
- <td style="white-space:nowrap">{{ p.opened_at|kst }}</td><td>{{ p.strategy }}</td><td><strong>{{ p.symbol }}</strong></td><td>{{ p.side }}</td>
+ <td style="white-space:nowrap">{{ p.opened_at|kst }}</td>
+ <td>{% if p.account_id %}<span class="badge action">LIVE</span> {{ emails.get(p.account_id, p.account_id) }}{% else %}<span class="badge">가상</span>{% endif %}</td>
+ <td>{{ p.strategy }}</td><td><strong>{{ p.symbol }}</strong></td><td>{{ p.side }}</td>
  <td>{{ '{:g}'.format(p.qty) }}</td><td>{{ p.entry_price }}</td><td>{{ '{:,.0f}'.format(p.notional) }}</td><td>{{ '{:g}'.format(p.leverage) }}</td>
  <td>{{ p.stop }}</td><td style="white-space:nowrap">{{ p.deadline|kst }}</td>
  <td><span class="badge {{ 'info' if p.status == 'closed' else 'ok-badge' }}">{{ p.status }}</span></td>
@@ -86,9 +92,9 @@
  <td>{% if p.pnl is not none %}<span class="{{ 'ok' if p.pnl >= 0 else 'warn' }}">{{ '{:+,.2f}'.format(p.pnl) }}</span>{% endif %}</td>
 </tr>
 {% else %}
-<tr><td colspan="14" class="muted">기록이 없다</td></tr>
+<tr><td colspan="15" class="muted">기록이 없다</td></tr>
 {% endfor %}
 </table>
 </div>
-<p class="sub" style="margin-top:14px">live 전환 순서: dry 로 1주 이상 운영해 위 기록을 검토 → .env <code>AUTOTRADE_MODE=live</code> → 엔진 재시작 → 킬 스위치 켜기 → 종목별 자동매매 체크.</p>
+<p class="sub" style="margin-top:14px">live 전환 순서: 공용 가상 장부 기록을 검토 → 내 API 키 저장·연결 확인 → 관리자가 서버 .env <code>AUTOTRADE_MODE=live</code> / <code>ALERT_BINANCE_TRADE_MODE=live</code> 로 재시작 → 위 '내 live 매매' 에서 스위치를 켠다. Binance live 는 스위치를 꺼도 열린 포지션은 손절·보유 한도까지 계속 관리한다.</p>
 {% endblock %}

@@ -31,8 +31,8 @@ US_TOSS = {"today": _us_kst_day("2026-09-16", "2026-09-17"),
     (US_LIST, "US", "2026-03-25", {"closed": False, "open": 570, "close": 960}),   # 09:30~16:00 EDT
     (US_EARLY, "US", "2026-11-27", {"closed": False, "open": 570, "close": 780}),  # 조기폐장 13:00 EST
     (US_HOLIDAY, "US", "2026-07-03", {"closed": True}),
-    (US_TOSS, "US", "2026-09-15", {"closed": False, "open": 570, "close": 960}),   # 미국 09-15 저녁(KST 09-16 새벽 전) → 전영업일 항목
-    (US_TOSS, "US", "2026-09-16", {"closed": False, "open": 570, "close": 960}),   # 미국 09-16 → today 항목 (KST 09-16 22:30)
+    (US_TOSS, "US", "2026-09-15", {"closed": False, "open": 570, "close": 960, "pre": 240}),   # 미국 09-15 저녁(KST 09-16 새벽 전) → 전영업일 항목
+    (US_TOSS, "US", "2026-09-16", {"closed": False, "open": 570, "close": 960, "pre": 240}),   # 미국 09-16 → today 항목 (KST 09-16 22:30)
     (US_TOSS, "US", "2026-09-18", None),                                          # 목록 밖 날짜
     ({"weird": 1}, "US", "2026-03-25", None),
     (None, "KR", "2026-03-25", None),
@@ -97,6 +97,10 @@ def test_calendar_early_close_us(monkeypatch):
 
 def test_premarket_us_only(monkeypatch):
     hours = mh.MarketHours()
+    at(monkeypatch, "US", 2026, 3, 25, 3, 59)
+    assert hours.market_premarket("US") is False
+    at(monkeypatch, "US", 2026, 3, 25, 4, 0)                 # 프리마켓은 04:00 ET (서머타임 KST 17:00) 부터
+    assert hours.market_premarket("US") is True
     at(monkeypatch, "US", 2026, 3, 25, 8, 30)
     assert hours.market_premarket("US") is True
     assert hours.market_open("US") is False
@@ -112,3 +116,12 @@ def test_client_error_falls_back(monkeypatch):
     at(monkeypatch, "US", 2026, 3, 25, 10, 0)
     assert hours.market_open("US") is True
     assert hours.cache["US"]["source"] == "고정"
+
+
+def test_session_open_has_no_margin(monkeypatch):
+    """감시는 앞뒤 10분 여유, 장 시작·마감 알림 기준(session_open)은 실제 정규장 시각."""
+    hours = mh.MarketHours(StubClient(US_TOSS))
+    for hh, mm, watch, session in [(9, 20, True, False), (9, 30, True, True), (15, 59, True, True),
+                                   (16, 0, True, False), (16, 10, True, False)]:
+        at(monkeypatch, "US", 2026, 9, 16, hh, mm)
+        assert (hours.market_open("US"), hours.session_open("US")) == (watch, session), (hh, mm)

@@ -15,6 +15,8 @@
   binance_crash Binance 선물 5분봉 급락 매수 알림 (별도 워커 run_binance.py, 공개 REST)
   binance_follow Binance 선물 추종 알림 — 급등 추종 롱(4시간봉·일봉)·급락 추종 숏(일봉) (같은 워커, 사양별)
   binance_trade Binance 선물 자동매매 dry — 진입 후보를 가상 체결, 마크 손절·보유 한도·펀딩 (ALERT_BINANCE_TRADE_MODE=dry)
+  binance_scan  Binance 선물 급변 감시 — 거래대금 상위 30 코인의 급등·급락 감지 알림 (같은 워커, 관찰 전용)
+  supervisor    run.py 관리 프로세스 — 엔진·Binance 워커·백오피스를 띄우고 지킨다 (lifecycle 로 멈춤 요청)
 
 알림 종류
 --------
@@ -29,6 +31,7 @@
   SURGE_ENTRY  급등 뒤 10봉 안 첫 눌림에서 EMA9 재돌파 — 추종 진입 후보
   *_1D         일봉 사양: SURGE_WATCH_1D/SURGE_ENTRY_1D (BTC 급등 추종 롱), CRASH_WATCH_1D/CRASH_SHORT_1D
                (ETC 급락 추종 숏 — 급락 뒤 첫 반등에서 EMA9 재이탈, 약세 국면만)
+  SCAN_SURGE / SCAN_CRASH  급변 감시 — 거래대금 상위 코인의 1시간봉 종가가 4시간 저점(고점) 대비 ≥ 기준ATR(30일)×10.3 (관찰, 매매 없음)
 
 주요 설계 결정
 ------------

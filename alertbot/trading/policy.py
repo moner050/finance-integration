@@ -1,7 +1,9 @@
 """리스크 정책 — 주문 의도가 나가도 되는지 판단한다. 판단 근거는 전부 문자열 사유로 남긴다.
 
-순서가 중요하다: 게이트(킬 스위치·종목 자동 여부·정규장) → 포지션 중복 → 금액·횟수·손실 한도 → 잔고 → 가격 정합성.
+순서가 중요하다: 게이트(계정 live 스위치·종목 자동 여부·정규장) → 포지션 중복 → 금액·횟수·손실 한도 → 잔고 → 가격 정합성.
 손절(STOP)은 횟수 한도를 면제하고, 매도 전체는 손실 한도를 면제한다 — 위험 청산을 막으면 안 된다.
+공용 가상 장부(ctx virtual)는 확정 신호를 전부 기록하는 게 목적이라 스위치·종목 체크·금액·보유 수·횟수·손실·잔고 한도를 적용하지 않는다.
+정규장·수량·미결 중복·보유 여부 같은 구조 검사만 한다.
 """
 
 from .models import OPEN_STATUSES
@@ -15,14 +17,15 @@ class RiskPolicy:
 
     def check(self, intent, ctx: dict):
         """(허용 여부, 사유). ctx 키:
-        settings, cfg(워치리스트 항목), regular(정규장 여부), holdings, open_intents, orders_today,
-        realized_pnl_today({"KRW": x, "USD": y}), buying_power(callable(currency) -> float), last_price
+        virtual(공용 가상 장부 여부), live_on(계정 live 스위치), settings, cfg(워치리스트 항목), regular(정규장 여부), holdings,
+        open_intents, orders_today, realized_pnl_today({"KRW": x, "USD": y}), buying_power(callable(currency) -> float), last_price
         """
-        settings, cfg = ctx["settings"], ctx["cfg"]
-        if str(settings.get("autotrade_enabled", "0")) != "1":
-            return False, "disabled"
-        if not cfg.get("auto_trade"):
-            return False, "symbol-not-auto"
+        settings, cfg, virtual = ctx["settings"], ctx["cfg"], bool(ctx.get("virtual"))
+        if not virtual:
+            if not ctx.get("live_on"):
+                return False, "disabled"
+            if not cfg.get("auto_trade"):
+                return False, "symbol-not-auto"
         if not ctx.get("regular"):
             return False, "outside-regular-hours"
         if intent.quantity < 1:
@@ -38,13 +41,15 @@ class RiskPolicy:
         if intent.side == "SELL":
             if held_qty <= 0:
                 return False, "nothing-to-sell"
-            if intent.kind != "STOP" and self._orders_today(ctx) >= int(settings["max_orders_per_day"]):
+            if not virtual and intent.kind != "STOP" and self._orders_today(ctx) >= int(settings["max_orders_per_day"]):
                 return False, "max-orders-per-day"
             return True, "ok"
 
         # ---- BUY ----
         if held_qty > 0:
             return False, "already-holding"
+        if virtual:
+            return True, "ok"
         cap = min(float(settings[f"max_order_amount_{ccy.lower()}"]), float(self.hard_max[ccy]))
         if intent.amount > cap:
             return False, f"amount-over-limit({cap:g})"

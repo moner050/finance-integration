@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set nav = "account" %}
+{% block content %}
+<div class="page-head"><div><h2>내 API 키</h2><p>{{ me.email }} 계정의 키. live 매매와 이 계정의 텔레그램 알림에만 쓰고, 시세·가상매매·공개 채널은 서버 공용 키(.env)를 쓴다.</p></div></div>
+{% if error %}<p class="warn">{{ error }}</p>{% endif %}
+{% if not master_ok %}<p class="warn">서버에 ALERT_MASTER_KEY 가 없어 키를 저장·사용할 수 없다 — 관리자에게 알릴 것</p>{% endif %}
+<dl class="kv">
+ <dt>보관 방식</dt>
+ <dd><span class="muted">입력한 값은 AES-256-GCM 으로 암호화해 DB 에 저장한다. 마스터 키는 서버 .env 에만 있어 DB 가 유출돼도 풀 수 없다. 저장한 값은 다시 보여 주지 않는다 — 바꾸려면 새로 입력한다.</span></dd>
+ <dt>live 스위치</dt>
+ <dd><span class="muted">키 저장 뒤 <a href="/trading">자동매매</a> 화면의 '내 live 매매' 에서 켠다. 키를 지우면 그 live 가 꺼지고, 텔레그램 키를 지우면 모든 live 가 꺼진다.</span></dd>
+</dl>
+{% for p in providers %}
+<h3>{{ p.title }} <span class="badge {{ 'ok-badge' if status[p.name] else '' }}">{{ ('설정됨 · ' ~ (status[p.name]|kst)) if status[p.name] else '미설정' }}</span></h3>
+<form class="card" method="post" action="/account/keys/{{ p.name }}" autocomplete="off">
+ <input type="hidden" name="csrf" value="{{ csrf }}">
+ {% for f in p.fields %}
+ <label>{{ f.label }} <input type="password" name="{{ f.name }}" autocomplete="new-password" spellcheck="false" placeholder="{{ '저장됨 — 바꿀 때만 입력' if status[p.name] else '' }}"></label>
+ {% endfor %}
+ <div class="full">
+  <button type="submit" class="primary">{{ '새 값으로 바꾸기' if status[p.name] else '저장' }}</button>
+  {% if status[p.name] %}
+  <button type="button" hx-post="/account/keys/{{ p.name }}/test" hx-target="#test-{{ p.name }}">연결 확인</button>
+  <button type="submit" class="danger" formaction="/account/keys/{{ p.name }}/delete" formnovalidate onclick="return confirm('{{ p.title }} 키를 삭제할까요? 관련 live 매매가 꺼집니다.')">삭제</button>
+  {% endif %}
+  <span id="test-{{ p.name }}"></span>
+  <span class="muted">{{ p.note }}</span>
+ </div>
+</form>
+{% endfor %}
+{% endblock %}

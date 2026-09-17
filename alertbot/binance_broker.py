@@ -1,6 +1,6 @@
 """Binance USDⓈ-M 선물 서명 클라이언트 — live 자동매매(binance_trade.Trader)가 쓴다.
 
-키는 .env ALERT_BINANCE_API_KEY / ALERT_BINANCE_API_SECRET (선물 거래 권한만, 출금 권한 없이). 헤지 모드 + 격리 마진 전제라
+키는 계정별로 백오피스 '내 API 키' 에 넣고 DB 에 암호화해 둔다 (선물 거래 권한만, 출금 권한 없이). 헤지 모드 + 격리 마진 전제라
 모든 주문에 positionSide(LONG/SHORT)를 보낸다. 손절 같은 조건부 주문은 2025-12-09 부터 알고 주문 API(/fapi/v1/algoOrder)로만
 받는다 — /fapi/v1/order 에 STOP_MARKET 을 내면 -4120 으로 거부된다.
 """

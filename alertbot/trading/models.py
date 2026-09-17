@@ -52,11 +52,13 @@ class OrderIntent:
     pnl: float = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
     updated_at: str = None
+    account_id: int = None       # 계정별 live 주문이면 그 계정. None = 공용 가상 장부
 
     @classmethod
-    def create(cls, mode, symbol, market, side, kind, order_type, price, quantity, bar_key=None, ref_avg=None):
+    def create(cls, mode, symbol, market, side, kind, order_type, price, quantity, bar_key=None, ref_avg=None, account_id=None):
         return cls(new_intent_id(symbol), mode, symbol, market, side, kind, order_type,
-                   float(price), float(quantity), round(float(price) * float(quantity), 4), bar_key, ref_avg)
+                   float(price), float(quantity), round(float(price) * float(quantity), 4), bar_key, ref_avg,
+                   account_id=account_id)
 
     @property
     def is_open(self) -> bool:

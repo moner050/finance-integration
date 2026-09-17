@@ -1,28 +1,27 @@
-"""Binance 선물 알림 워커 진입점 — 5분봉 급락 매수 + 상위 봉 추종 알림(급등 추종 롱·급락 추종 숏)을 한 프로세스에서.
+"""Binance 선물 알림 워커 진입점 — 5분봉 급락 매수 + 상위 봉 추종 알림(급등 추종 롱·급락 추종 숏) + 거래대금 상위 30 코인 급변 감시를 한 프로세스에서.
 
-실행:  python run_binance.py
+실행:  python run_binance.py   (보통은 python run.py 가 엔진·Binance 워커·백오피스를 함께 띄우고 지킨다)
 감시 심볼은 .env 의 ALERT_BINANCE_SYMBOLS(5분봉 급락 매수, 기본 ETCUSDT) 와 추종 사양별 키
 (ALERT_BINANCE_SURGE_SYMBOLS 4시간봉 BTCUSDT · ALERT_BINANCE_SURGE_1D_SYMBOLS 일봉 BTCUSDT ·
-ALERT_BINANCE_CRASHFOLLOW_1D_SYMBOLS 일봉 ETCUSDT). 토스 엔진과 독립적으로 돈다. 공개 REST 라 Binance API 키는 필요 없다.
-ALERT_BINANCE_TRADE_MODE=dry 면 진입 후보를 가상 체결하는 자동매매(alertbot/binance_trade.py)도 같이 돈다 — 역시 키 불필요.
-live 면 .env ALERT_BINANCE_API_KEY/SECRET 로 실제 주문을 낸다 — 기동 때 헤지 모드·격리·배율을 맞추고, DB 킬 스위치가 켜져야 진입한다.
+ALERT_BINANCE_CRASHFOLLOW_1D_SYMBOLS 일봉 ETCUSDT). 토스 엔진과 독립적으로 돈다. 시세는 공개 REST 라 키가 필요 없다.
+공용 가상 장부(alertbot/binance_trade.py dry)는 모드와 무관하게 늘 돈다 — 진입 후보를 가상 체결해 실계좌와 격리된 기록을 쌓고 공용 채널로 알린다.
+ALERT_BINANCE_TRADE_MODE=live 면 백오피스에서 Binance live 스위치를 켠 계정마다 그 계정 키로 실제 주문을 내고 그 계정 텔레그램으로 알린다
+(계정·키·스위치 변경은 재시작 없이 반영).
 """
 
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 
-from alertbot import db
+from alertbot import db, lifecycle
 from alertbot.binance_book import SignalBook
 from alertbot.binance_crash import KST, CrashWorker, fetch_klines
 from alertbot.binance_follow import FollowWorker
-from alertbot.binance_broker import BinanceFutures, BrokerError
+from alertbot.binance_scan import ScanWorker, Universe
 from alertbot.binance_summary import summary_signal
-from alertbot.binance_trade import Trader
+from alertbot.binance_trade import AccountTraders, Trader, TraderGroup
 from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SIGNAL_TRADE_FILE, BINANCE_SYMBOLS,
-                             BINANCE_TRADE_CAPITAL, BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TRADE_EXCHANGE_LEV,
-                             BINANCE_TRADE_MODE, CRASH_H4_KLINES, DATA_DIR, FOLLOW_KLINES, FOLLOW_SPECS,
-                             SUMMARY_INTERVAL_MIN, setup_logging)
+                             BINANCE_TRADE_CAPITAL, BINANCE_TRADE_EXCHANGE_LEV, BINANCE_TRADE_MODE, CRASH_H4_KLINES, DATA_DIR,
+                             FOLLOW_KLINES, FOLLOW_SPECS, SCAN_TOP_N, SUMMARY_INTERVAL_MIN, setup_logging)
 from alertbot.models import Signal
 from alertbot.notify import build_channels
 from alertbot.notify.dispatcher import Dispatcher
@@ -48,32 +47,24 @@ def check_symbols():
 
 
 def watch_list() -> list:
-    """시작 알림용 — 전략별 감시 심볼. 판정 조건은 코드·README 에 있으니 알림에는 싣지 않는다."""
+    """기동 로그용 — 전략별 감시 심볼. 판정 조건은 코드·README 에 있으니 싣지 않는다."""
     return [f"급락 매수 5분봉: {', '.join(BINANCE_SYMBOLS)}"] + \
-           [f"{spec['name']} {spec['label']}: {', '.join(spec['symbols'])}" for spec in FOLLOW_SPECS]
+           [f"{spec['name']} {spec['label']}: {', '.join(spec['symbols'])}" for spec in FOLLOW_SPECS] + \
+           [f"급변 감시 1시간봉: 거래대금 상위 {SCAN_TOP_N} 코인 (백오피스 '종목' 에서 추가·제외, 관찰 알림)"]
 
 
-def live_broker():
-    """live 사전 조건 — 키, 서버 시각, 심볼 필터, 헤지 모드·격리·배율. 하나라도 안 되면 기동을 멈춘다."""
-    if not (BINANCE_API_KEY and BINANCE_API_SECRET):
-        raise SystemExit("live 모드에는 .env ALERT_BINANCE_API_KEY / ALERT_BINANCE_API_SECRET 이 필요하다 (선물 거래 권한만, 출금 권한 없이)")
-    symbols = sorted({*BINANCE_SYMBOLS, *(s for spec in FOLLOW_SPECS for s in spec["symbols"])})
-    broker = BinanceFutures(BINANCE_API_KEY, BINANCE_API_SECRET)
-    try:
-        broker.sync_time()
-        broker.load_filters(symbols)
-        broker.setup(symbols, BINANCE_TRADE_EXCHANGE_LEV)
-        log.info("Binance live 준비: %s 격리 %d배 헤지 모드 · 가용 %.2f USDT", ", ".join(symbols), BINANCE_TRADE_EXCHANGE_LEV, broker.balance())
-    except BrokerError as e:
-        raise SystemExit(f"Binance live 준비 실패: {e}") from e
-    return broker
+def trade_symbols() -> list:
+    return sorted({*BINANCE_SYMBOLS, *(s for spec in FOLLOW_SPECS for s in spec["symbols"])})
 
 
-def run(workers: list, trader=None, notifier=None, book=None):
+def run(workers: list, trader=None, notifier=None, book=None, paper=None, live=None):
+    """trader 는 워커와 공유하는 TraderGroup, paper 는 공용 가상 트레이더(시황의 포지션 줄), live 는 계정별 트레이더 묶음(live 모드만)."""
     # 기동 직후 첫 시황이 바로 나가도록 과거 시각으로 시작한다 — 한 주기를 기다리면 '돌고 있는 건지' 확인이 늦다
     last_summary = datetime.now(timezone.utc) - timedelta(minutes=SUMMARY_INTERVAL_MIN)
     last_day = datetime.now(timezone.utc).astimezone(KST).date()      # 날짜(KST)가 바뀌면 지난 하루의 신호 성적표
-    while True:
+    while lifecycle.running():
+        if live is not None and trader is not None:
+            trader.traders = [paper] + live.refresh()       # 백오피스에서 바뀐 계정·키·live 스위치 반영
         for w in workers:
             try:
                 w.poll_once()
@@ -86,7 +77,7 @@ def run(workers: list, trader=None, notifier=None, book=None):
                 log.warning("신호 포지션 감시 오류: %s", e)
         if trader is not None:
             try:
-                trader.poll()           # 열린 가상 포지션의 손절·보유 한도·펀딩
+                trader.poll()           # 열린 포지션(가상·계정별)의 손절·보유 한도·펀딩
             except Exception as e:
                 log.warning("자동매매 감시 오류: %s", e)
         now = datetime.now(timezone.utc)
@@ -99,44 +90,52 @@ def run(workers: list, trader=None, notifier=None, book=None):
                         notifier.send(Signal("SIGNAL_REPORT", "📈 오늘 코인 신호 성적", f"{last_day:%m-%d}", report))
                 except Exception as e:
                     log.warning("코인 신호 성적표 오류: %s", e)
+            for t in (live.traders if live is not None else []):
+                try:
+                    report = t.daily_report(last_day.isoformat())
+                    if report:
+                        t.notify.send(Signal("DAILY_REPORT", "📈 오늘 코인 성적", f"{last_day:%m-%d}", report, account_id=t.account_id))
+                except Exception as e:
+                    log.warning("계정 %s 코인 성적표 오류: %s", t.account_id, e)
             last_day = today
         if notifier is not None and now - last_summary >= timedelta(minutes=SUMMARY_INTERVAL_MIN):
             last_summary = now
             try:
-                signal = summary_signal(workers, trader, now)
+                signal = summary_signal(workers, now, paper=paper)
                 if signal is not None:
                     notifier.send(signal)
             except Exception as e:
                 log.warning("시황 요약 오류: %s", e)
-        time.sleep(BINANCE_POLL_SEC)
+        lifecycle.sleep(BINANCE_POLL_SEC)
+    log.info("Binance 감시 종료 — 관리 프로세스의 멈춤 요청")
 
 
 def main():
     setup_logging(BINANCE_LOG_PATH)
     store = db.connect()            # 신호 이력은 토스 엔진과 같은 alert_signal_log 에 남긴다
+    lifecycle.install(heartbeat=lambda: db.touch_service(store, "binance"))     # run.py 가 띄웠으면 멈춤 요청·heartbeat
     check_symbols()
     notifier = Dispatcher(build_channels(), record=lambda s, r: db.log_signal(store, s, r))
     body = watch_list()
-    trader = None
-    if BINANCE_TRADE_MODE == "off":
-        body.append("자동매매: off")
+    paper = Trader(store, notifier, "dry")          # 공용 가상 장부 — 모드와 무관하게 늘 돈다
+    trader = TraderGroup([paper])                   # 워커가 공유한다. live 모드면 사이클마다 계정별 트레이더를 갈아 끼운다
+    live = None
+    body.append(f"가상매매: 진입 후보 전부 (전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT)")
+    if BINANCE_TRADE_MODE == "live":
+        live = AccountTraders(store, trade_symbols(), BINANCE_TRADE_EXCHANGE_LEV)
+        trader.traders = [paper] + live.refresh()
+        body.append(f"계정별 live: on (격리 {BINANCE_TRADE_EXCHANGE_LEV}배 · 준비된 계정 {len(live.traders)}개)")
     else:
-        broker = live_broker() if BINANCE_TRADE_MODE == "live" else None
-        trader = Trader(store, notifier, BINANCE_TRADE_MODE, broker)
-        if broker is None:
-            body.append(f"자동매매: dry (가상 체결, 전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT)")
-        else:
-            on = db.get_settings(store)["binance_trade_enabled"] == "1"
-            body.append(f"자동매매: LIVE (전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 격리 {BINANCE_TRADE_EXCHANGE_LEV}배 · "
-                        f"가용 {broker.balance():,.0f} USDT · 킬 스위치 {'ON' if on else 'OFF'})")
+        body.append("계정별 live: off")
     # 진입 후보 뒤의 손절·보유 한도 청산 알림과 모의 성적(자정 KST 성적표). 재시작 전의 신호 포지션도 이어받는다
     book = SignalBook(store, notifier, trades=SignalTradeLog(DATA_DIR / BINANCE_SIGNAL_TRADE_FILE))
     if book.open:
         body.append("진행 중 신호 포지션: " + ", ".join(f"{p['symbol']} {p['name']}" for p in book.open.values()))
     body.append(f"시황 요약 {SUMMARY_INTERVAL_MIN}분마다")
-    notifier.send(Signal("SYSTEM", "⚪ 시스템", "Binance 감시 시작", "\n".join(body)))
+    log.info("Binance 감시 시작\n%s", "\n".join(body))       # 공용 채널로는 보내지 않는다 — 로그(콘솔·파일)에만
     run([CrashWorker(BINANCE_SYMBOLS, notifier, trader=trader, book=book)]
-        + [FollowWorker(spec, notifier, trader=trader, book=book) for spec in FOLLOW_SPECS], trader, notifier, book)
+        + [FollowWorker(spec, notifier, trader=trader, book=book) for spec in FOLLOW_SPECS]
+        + [ScanWorker(Universe(store), notifier)], trader, notifier, book, paper, live)
 
 
 if __name__ == "__main__":

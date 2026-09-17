@@ -1,7 +1,7 @@
 """브로커 — 토스 주문 API 클라이언트와 dry-run 가짜 브로커.
 
 읽기 전용 클라이언트(toss_client.py)와 일부러 분리했다. 주문을 낼 수 있는 코드는 이 파일에만 있고,
-AUTOTRADE_MODE=live 일 때만 만들어진다.
+AUTOTRADE_MODE=live 일 때 live 스위치를 켠 계정마다 그 계정의 키로 만들어진다 (trading/live.py).
 
 토스 주문 스펙 (openapi.json 1.2.15 에서 확정, 2026-09-09):
   POST /api/v1/orders                 body {clientOrderId?, symbol, side BUY|SELL, orderType LIMIT|MARKET,
@@ -126,6 +126,10 @@ class TossOrderClient:
         raise BrokerError("rate-limit", "레이트리밋 재시도 실패")
 
     # -- 사전 정보 --------------------------------------------------------------
+    def holdings(self):
+        """이 키의 계좌 보유 symbol -> {qty, avg}. 조회 실패면 None. 계정별 live 실행기가 매도 수량·보유 한도에 쓴다."""
+        return self.reader.get_holdings()
+
     def buying_power(self, currency: str) -> float:
         r = self._call("GET", PATHS["buying_power"], params={"currency": currency})
         return float(r.get("cashBuyingPower") or 0)
@@ -195,7 +199,7 @@ class DryRunBroker:
 
     def place(self, intent) -> str:
         self._seq += 1
-        order_id = f"dry-{self._seq}"
+        order_id = f"dry-{intent.intent_id}"        # 프로세스마다 1 부터 세면 재시작 뒤 옛 미결 행과 번호가 겹친다
         self.orders[order_id] = OrderState(order_id, "filled", intent.quantity, intent.price, "FILLED")
         return order_id
 

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% set nav = "accounts" %}
+{% block content %}
+<div class="page-head"><div><h2>계정</h2><p>여기 등록된 활성 이메일의 구글 계정만 로그인한다. 관리자는 종목·한도·계정을 바꾸고 모든 계정의 live 현황을 본다. 일반 계정은 자기 키와 자기 live 매매만 다룬다.</p></div></div>
+{% if error %}<p class="warn">{{ error }}</p>{% endif %}
+<form class="card" method="post" action="/accounts">
+ <input type="hidden" name="csrf" value="{{ csrf }}">
+ <label>구글 이메일 <input type="text" name="email" required placeholder="someone@gmail.com"></label>
+ <label>권한
+  <select name="role"><option value="member">일반</option><option value="admin">관리자</option></select>
+ </label>
+ <div class="full"><button type="submit" class="primary">허용 계정 추가</button>
+  <span class="muted">첫 로그인 때 구글 계정 고유 ID 를 고정한다 — 같은 이메일이라도 다른 구글 계정이면 거부된다.</span></div>
+</form>
+<div class="panel">
+<table>
+<tr><th>이메일</th><th>권한</th><th>상태</th><th>마지막 로그인 (KST)</th><th>키 (토스 · Binance · 텔레그램)</th><th>live</th><th>금액 배율 · Binance 자본</th><th></th></tr>
+{% for a in rows %}
+{% set keys = key_status.get(a.id, {}) %}
+{% set locked = a.id == me.id or a.email == admin_email %}
+<tr class="{{ '' if a.active else 'muted' }}">
+ <td><strong>{{ a.email }}</strong>{% if a.id == me.id %} <span class="muted">(나)</span>{% endif %}</td>
+ <td><span class="badge {{ 'info' if a.role == 'admin' else '' }}">{{ '관리자' if a.role == 'admin' else '일반' }}</span></td>
+ <td><span class="badge {{ 'ok-badge' if a.active else 'action' }}">{{ '활성' if a.active else '중지' }}</span></td>
+ <td style="white-space:nowrap">{{ a.last_login_at|kst }}</td>
+ <td>{% for p in ['toss', 'binance', 'telegram'] %}<span class="{{ 'ok' if keys.get(p) else 'muted' }}">{{ '●' if keys.get(p) else '○' }}</span> {% endfor %}</td>
+ <td style="white-space:nowrap">토스 <span class="badge {{ 'action' if a.toss_live else '' }}">{{ 'ON' if a.toss_live else 'OFF' }}</span>
+  Binance <span class="badge {{ 'action' if a.binance_live else '' }}">{{ 'ON' if a.binance_live else 'OFF' }}</span></td>
+ <td>× {{ '{:g}'.format(a.amount_scale) }} · {{ '{:,.0f}'.format(a.binance_capital) }} USDT</td>
+ <td style="white-space:nowrap">
+  {% if a.toss_live or a.binance_live %}<form class="inline" method="post" action="/accounts/{{ a.id }}/live-off" onsubmit="return confirm('{{ a.email }} 의 live 매매를 모두 끌까요?')"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">live 끄기</button></form>{% endif %}
+  {% if not locked %}
+  <form class="inline" method="post" action="/accounts/{{ a.id }}/role"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ '일반으로' if a.role == 'admin' else '관리자로' }}</button></form>
+  <form class="inline" method="post" action="/accounts/{{ a.id }}/active"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="{{ 'danger' if a.active else '' }}">{{ '중지' if a.active else '재개' }}</button></form>
+  {% endif %}
+ </td>
+</tr>
+{% endfor %}
+</table>
+</div>
+<p class="sub" style="margin-top:14px">자기 자신과 .env ALERT_ADMIN_EMAIL 계정은 중지·강등할 수 없다. 중지하면 로그인 세션이 바로 끊기고 그 계정의 live 매매도 멈춘다.</p>
+{% endblock %}

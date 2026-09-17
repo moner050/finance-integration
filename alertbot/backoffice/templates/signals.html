@@ -22,14 +22,14 @@
  <td>{{ r.label }}{% if r.symbol %}<br><span class="muted">{{ r.symbol }}</span>{% endif %}</td>
  <td>{{ r.title }}</td>
  <td><pre>{{ r.body }}</pre></td>
- <td style="white-space:nowrap">{% for ch, res in r.results.items() %}<span class="{{ 'ok' if res == 'ok' else ('muted' if res == 'skip' else 'warn') }}">{{ ch }}: {{ res }}</span><br>{% endfor %}</td>
+ <td style="white-space:nowrap">{% if r.account_id %}<span class="badge">{{ emails.get(r.account_id, r.account_id) }}</span><br>{% endif %}{% for ch, res in r.results.items() %}<span class="{{ 'ok' if res == 'ok' else ('muted' if res == 'skip' else 'warn') }}">{{ ch }}: {{ res }}</span><br>{% endfor %}</td>
 </tr>
 {% else %}
 <tr><td colspan="7" class="muted">기록이 없다</td></tr>
 {% endfor %}
 </table>
 </div>
-<h3 style="margin-top:30px">알림 채널 <span class="muted" style="font-weight:500">채널과 수신자는 .env 로 설정한다. 테스트 발송은 쿨다운·등급과 무관하게 보내고 이력에 남는다.</span></h3>
+<h3 style="margin-top:30px">알림 채널 <span class="muted" style="font-weight:500">공용 채널은 .env 로, 계정별 텔레그램은 내 API 키에서 설정한다. 테스트 발송은 쿨다운·등급과 무관하게 보내고 이력에 남는다.</span></h3>
 <div class="panel">
 <table>
 <tr><th>채널</th><th>설정</th><th>수신자</th><th>최소 등급</th><th>비고</th><th>테스트</th></tr>
@@ -40,7 +40,7 @@
  <td>{{ c.recipients }}</td>
  <td><span class="badge {{ c.min_severity }}">{{ c.min_severity }}</span></td>
  <td class="muted">{{ c.detail }}</td>
- <td>{% if c.configured %}<button hx-post="/channels/{{ c.name }}/test" hx-target="#test-{{ c.name }}">테스트 발송</button> <span id="test-{{ c.name }}"></span>{% endif %}</td>
+ <td>{% if c.configured and me.role == 'admin' %}<button hx-post="/channels/{{ c.name }}/test" hx-target="#test-{{ c.name }}">테스트 발송</button> <span id="test-{{ c.name }}"></span>{% endif %}</td>
 </tr>
 {% endfor %}
 </table>

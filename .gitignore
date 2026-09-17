@@ -17,3 +17,4 @@ scalping_signals.log
 signal_tracking.csv
 trade_log.csv
 binance_signals.log
+supervisor.log

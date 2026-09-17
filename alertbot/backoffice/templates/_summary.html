@@ -50,8 +50,8 @@
 </table>
 </div>
 <div class="latest">
- <div class="card"><h4>가장 최근 시황 · {{ s.latest.sent_at|kst }} KST</h4><pre>{{ s.latest.body.split('\n내 보유')[0].split('\n내 포지션')[0] }}</pre></div>
- <div class="card"><h4>{{ '내 포지션' if title.startswith('코인') else '내 보유' }} · 계좌 현황 (공개 채널에는 가지 않음)</h4>
+ <div class="card"><h4>가장 최근 시황 · {{ s.latest.sent_at|kst }} KST</h4><pre>{{ s.latest.body.split('\n가상 보유')[0].split('\n가상 포지션')[0].split('\n내 보유')[0].split('\n내 포지션')[0] }}</pre></div>
+ <div class="card"><h4>{{ '가상 포지션' if title.startswith('코인') else '가상 보유' }} · 공용 가상 장부</h4>
   {% if s.mine %}<pre>{{ s.mine|join('\n') }}</pre>{% else %}<span class="muted">없음</span>{% endif %}</div>
 </div>
 {% endif %}

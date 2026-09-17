@@ -320,3 +320,72 @@ def vwap_position(price: float, vwap: float, band: float = None) -> str:
     if diff < -b:
         return "below"
     return "neutral"
+
+
+# -- 미국 프리마켓 -------------------------------------------------------------
+
+def _minute_of(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def premarket_history(candles: list, market: str, start_min: int, end_min: int,
+                      exclude_session: str = None) -> dict:
+    """과거 세션별 프리마켓 봉 → {날짜: [(자정 이후 분, 거래량), ...]}.
+
+    프리마켓 거래량은 정규장 프로파일과 스케일이 전혀 달라 따로 모은다. 오늘(exclude_session)은 뺀다.
+    """
+    out = {}
+    for c in candles:
+        b = _bucket(c, market)
+        if b is None or (exclude_session and b[0] == exclude_session):
+            continue
+        t = _minute_of(b[1])
+        if not start_min <= t < end_min:
+            continue
+        try:
+            out.setdefault(b[0], []).append((t, float(c["volume"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def premarket_stats(candles: list, market: str, session: str, start_min: int, end_min: int,
+                    history: dict = None, min_sessions: int = 2) -> dict:
+    """오늘 프리마켓 봉으로 VWAP·누적 거래량·고저, 과거 같은 시각까지의 누적 거래량 대비 배수.
+
+    거래량 배수는 '지금 시각까지 쌓인 양'끼리 비교한다. 프리마켓은 1분봉 하나가 체결 몇 건이라
+    봉 단위 RVOL 은 0 과 수십 배 사이를 오간다. 과거 세션이 min_sessions 개 미만이면 배수는 None.
+    오늘 봉이 없으면 None.
+    """
+    pv = vol = 0.0
+    hi, lo, last_t = None, None, None
+    for c in candles:
+        b = _bucket(c, market)
+        if b is None or b[0] != session:
+            continue
+        t = _minute_of(b[1])
+        if not start_min <= t < end_min:
+            continue
+        try:
+            v, close = float(c["volume"]), float(c["closePrice"])
+            h, l = float(c.get("highPrice") or close), float(c.get("lowPrice") or close)
+        except (KeyError, TypeError, ValueError):
+            continue
+        pv += (h + l + close) / 3 * v
+        vol += v
+        hi = h if hi is None else max(hi, h)
+        lo = l if lo is None else min(lo, l)
+        last_t = t
+    if last_t is None:
+        return None
+    ratio, n = None, 0
+    if history:
+        past = [sum(v for t, v in bars if t <= last_t) for bars in history.values()]
+        past = [p for p in past if p > 0]
+        n = len(past)
+        base = _median(past)
+        if n >= min_sessions and base > 0:
+            ratio = round(vol / base, 2)
+    return {"vwap": round(pv / vol, 4) if vol > 0 else 0.0, "volume": vol, "high": hi, "low": lo,
+            "vol_ratio": ratio, "sessions": n}

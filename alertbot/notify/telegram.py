@@ -8,31 +8,33 @@ import logging
 
 import requests
 
-from ..models import PUBLIC_KINDS
 from .base import Channel
 
 log = logging.getLogger("scalper")
 
 
 class TelegramChannel(Channel):
-    """내 채널(기본)은 전부 받는다. public 채널은 시장 신호(PUBLIC_KINDS)만, 그중 내 계좌 일(Signal.private)은 빼고,
-    본문의 계좌 줄을 빼고 받는다."""
+    """봇 토큰 하나 + 수신 채팅들. account_id 가 None 이면 공용 채널(.env 공개 텔레그램)로 계정 없는 신호를 전부 받고,
+    숫자면 그 계정의 채널(DB 에 암호화된 계정 키)로 그 계정의 신호만 받는다 — 계정 알림이 공용 채널로, 공용 알림이 계정 채널로 새지 않는다."""
     name = "telegram"
 
-    def __init__(self, token: str, chat_ids: list, min_severity: str = "info", timeout: int = 5, public: bool = False):
+    def __init__(self, token: str, chat_ids: list, min_severity: str = "info", timeout: int = 5, account_id: int = None):
         super().__init__(min_severity)
         self.token = token
         self.chat_ids = list(chat_ids)
         self.timeout = timeout
-        self.public = public
-        if public:
-            self.name = "telegram_public"
+        self.account_id = account_id
+        self.name = "telegram_public" if account_id is None else "telegram_account"
 
     def accepts(self, signal) -> bool:
-        return super().accepts(signal) and (not self.public or (signal.kind in PUBLIC_KINDS and not signal.private))
+        return super().accepts(signal) and signal.account_id == self.account_id
+
+    def _redact(self, text: str) -> str:
+        """요청 URL 에 봇 토큰이 들어가 통신 오류 문구에 그대로 찍힌다. 로그·이력(DB)에 토큰이 남지 않게 가린다."""
+        return str(text).replace(self.token, "<bot-token>") if self.token else str(text)
 
     def send(self, signal) -> str:
-        text = signal.text(public=self.public)
+        text = signal.text()
         ok, errors = 0, []
         # 한 명에게 실패해도 나머지에게는 보내야 한다.
         for chat in self.chat_ids:
@@ -46,8 +48,8 @@ class TelegramChannel(Channel):
                     errors.append(f"{chat}: {body.get('description')}")
                     log.warning("텔레그램 전송 실패(%s): %s", chat, body.get("description"))
             except (requests.RequestException, ValueError) as e:
-                errors.append(f"{chat}: {e}")
-                log.warning("텔레그램 전송 오류(%s): %s", chat, e)
+                errors.append(f"{chat}: {self._redact(e)}")
+                log.warning("텔레그램 전송 오류(%s): %s", chat, self._redact(e))
         if not errors:
             return "ok"
         return ("partial: " if ok else "error: ") + "; ".join(errors)

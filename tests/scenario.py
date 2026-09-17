@@ -1,6 +1,6 @@
 """엔진 시나리오 — 원본과 분리본이 같은 알림을 내는지 비교하는 데 쓴다.
 
-가짜 클라이언트는 고정 캔들·현재가·보유를 돌려주고, 가짜 알림기는 쿨다운 없이
+가짜 클라이언트는 고정 캔들·현재가를 돌려주고(엔진은 계좌를 읽지 않는다 — 보유는 evaluate 에 넘기는 가상 장부), 가짜 알림기는 쿨다운 없이
 모든 send 호출을 기록한다. 시각은 2026-03-25 10:10 KST 로 고정한다.
 """
 from datetime import datetime, timedelta
@@ -36,7 +36,6 @@ class FakeClient:
         self.candles = candles
         self.daily = daily or []          # 일봉 (전일 종가용)
         self.history = history or []      # 프로파일용 긴 이력
-        self.account_seq = "1"
 
     def get_candles(self, symbol, interval="1m", count=120):
         if interval == "1d":
@@ -52,14 +51,8 @@ class FakeClient:
     def get_prices(self, symbols):
         return {}
 
-    def get_holdings(self):
-        return {}
-
     def us_regular_close(self):
         return None
-
-    def load_account(self):
-        return True
 
 
 class CaptureNotifier:

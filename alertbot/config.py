@@ -8,11 +8,12 @@
 --------
 1. 토스증권 WTS > 설정 > Open API 에서 client_id / client_secret 발급
 2. 같은 화면 하단 '허용 IP 관리'에 현재 공인 IP 등록 (미등록 IP 는 403)
-3. 프로젝트 루트의 .env 파일 (따옴표 없이, 등호 앞뒤 공백 없이):
+3. 프로젝트 루트의 .env 파일 (따옴표 없이, 등호 앞뒤 공백 없이). 여기 키는 공용이다 — 시세·가상매매·공개 채널용.
+   계정별 토스·Binance·텔레그램 키(live 매매)는 백오피스 '내 API 키' 에서 넣고 DB 에 암호화해 둔다.
      TOSS_CLIENT_ID=...
      TOSS_CLIENT_SECRET=...
-     TELEGRAM_BOT_TOKEN=...
-     TELEGRAM_CHAT_ID=...
+     TELEGRAM_PUBLIC_BOT_TOKEN=...
+     TELEGRAM_PUBLIC_CHAT_ID=...
 4. Windows 는 IANA 타임존 DB 가 없어 zoneinfo 가 실패할 수 있다.
      pip install tzdata
    설치하지 않으면 고정 오프셋으로 대체하되, 미국 서머타임 전환 주간에 1시간 오차가 날 수 있다.
@@ -40,9 +41,9 @@ def load_config() -> dict:
             cfg[k.strip()] = v.strip().strip("'\"")
     # 환경변수 폴백: Docker(env_file) 처럼 .env 파일이 없이 환경변수로만 줄 때. 이 접두어의 키는 전부 받는다.
     for key, value in os.environ.items():
-        if key.startswith(("TOSS_", "TELEGRAM_", "MYSQL_", "ALERT_", "AUTOTRADE_")) and not cfg.get(key):
+        if key.startswith(("TOSS_", "TELEGRAM_", "MYSQL_", "ALERT_", "AUTOTRADE_", "OAUTH_GOOGLE_")) and not cfg.get(key):
             cfg[key] = value
-    for key in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    for key in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET",
                 "MYSQL_HOST", "MYSQL_PORT", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD"):
         cfg.setdefault(key, "")
     return cfg
@@ -55,28 +56,32 @@ _CFG = load_config()
 # ---------------------------------------------------------------------------
 
 API_BASE = "https://openapi.tossinvest.com"
+# 공용 토스 키 — 시세·캔들·장 캘린더·심볼 검증만. 실계좌 보유는 읽지 않는다 (계정별 live 는 그 계정 키로)
 CLIENT_ID = _CFG["TOSS_CLIENT_ID"]
 CLIENT_SECRET = _CFG["TOSS_CLIENT_SECRET"]
-TG_TOKEN = _CFG["TELEGRAM_BOT_TOKEN"]
-# 쉼표로 여러 명을 넣을 수 있다: TELEGRAM_CHAT_ID=111111,222222
-# 각 수신자는 봇에게 먼저 /start 를 보내야 한다. 텔레그램 봇은 먼저 말을 건
-# 상대에게만 메시지를 보낼 수 있어서, 이 단계를 빼먹으면 chat not found 가 난다.
-TG_CHATS = [c.strip() for c in _CFG["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
-# 받을 최소 등급 (info | review | action). info 면 시황 요약까지 전부 받는다.
-TG_MIN_SEVERITY = _CFG.get("TELEGRAM_MIN_SEVERITY") or "info"
-# 공개 채널 — 다른 봇·채팅으로 시장 신호(매수·매도·코인 신호)와 장 시작·시황을 보낸다. 내 계좌 정보(손익·평단·보유 수량·내 포지션·주문)는 가지 않는다.
-# 비워 두면 만들지 않는다. 종류 목록은 models.PUBLIC_KINDS.
+# 공용 채널(공개 텔레그램) — 계정 없는 신호를 전부 보낸다: 시장 신호·장 시작·마감·시황·시스템·가상매매 주문·체결·청산·성적표.
+# 쉼표로 여러 채팅을 넣을 수 있고, 각 수신자는 봇에게 먼저 /start 를 보내야 한다. 비워 두면 만들지 않는다.
 TG_PUBLIC_TOKEN = (_CFG.get("TELEGRAM_PUBLIC_BOT_TOKEN") or "").strip()
 TG_PUBLIC_CHATS = [c.strip() for c in (_CFG.get("TELEGRAM_PUBLIC_CHAT_ID") or "").split(",") if c.strip()]
 
 # 백오피스. 같은 .env 를 쓰는 다른 프로젝트의 BACKOFFICE_* 키와 겹치지 않게 ALERT_ 접두어를 쓴다.
 BACKOFFICE_HOST = _CFG.get("ALERT_BACKOFFICE_HOST") or "127.0.0.1"
 BACKOFFICE_PORT = int(_CFG.get("ALERT_BACKOFFICE_PORT") or 8000)
+# 로그인: Google OAuth. 클라이언트는 .env 에 이미 있는 OAUTH_GOOGLE_* 를 같이 쓴다.
+# 리다이렉트 URL 은 OAUTH_GOOGLE_REDIRECT_URL 그대로 보낸다 — Google 콘솔의 '승인된 리디렉션 URI' 와 글자 하나까지 같아야 한다
+# (다르면 400 redirect_uri_mismatch). 콜백은 이 URL 의 경로에 열리고, 이 URL 의 호스트·포트가 브라우저가 접속하는 주소다 (https 면 세션 쿠키에 Secure).
+# 들어올 수 있는 계정은 DB alert_accounts 에 있는 활성 이메일뿐이다. 첫 관리자만 ALERT_ADMIN_EMAIL 로 정하고 나머지는 '계정' 화면에서 추가한다.
+GOOGLE_CLIENT_ID = (_CFG.get("OAUTH_GOOGLE_CLIENT_ID") or "").strip()
+GOOGLE_CLIENT_SECRET = (_CFG.get("OAUTH_GOOGLE_CLIENT_SECRET") or "").strip()
+GOOGLE_REDIRECT_URL = (_CFG.get("OAUTH_GOOGLE_REDIRECT_URL") or "").strip()
+ADMIN_EMAIL = (_CFG.get("ALERT_ADMIN_EMAIL") or "").strip().lower()
+SESSION_HOURS = 12
+# 계정별 API 키 암호화 마스터 키 (base64url 32바이트). DB 에는 없다 — python -m alertbot.crypto genkey
+MASTER_KEY = (_CFG.get("ALERT_MASTER_KEY") or "").strip()
 
-# 자동매매 — 기본 off. 코드 배포만으로는 절대 live 가 되지 않는다.
-#   off : 실행기를 만들지 않는다 (알림만)
-#   dry : 정책 검사·주문 의도 기록까지 실제와 같고, 브로커만 가짜(참조가로 가상 체결)
-#   live: 실제 주문. DB 킬 스위치(autotrade_enabled)와 종목별 auto_trade 까지 켜져야 나간다
+# 자동매매 — 가상매매는 늘 돈다. 코드 배포만으로는 절대 live 가 되지 않는다.
+#   off·dry: 공용 가상 장부만 — 확정 신호마다 가상 체결 (실계좌와 격리, 킬 스위치·한도 없음)
+#   live   : 가상 장부 + 계정별 실제 주문. 계정의 토스 live 스위치와 종목별 auto_trade 까지 켜져야 그 계정 계좌로 나간다
 AUTOTRADE_MODE = (_CFG.get("AUTOTRADE_MODE") or "off").strip().lower()
 if AUTOTRADE_MODE not in ("off", "dry", "live"):
     raise SystemExit(f"AUTOTRADE_MODE 는 off|dry|live 중 하나: {AUTOTRADE_MODE}")
@@ -85,6 +90,8 @@ AUTOTRADE_BUY_TTL_MIN = int(_CFG.get("AUTOTRADE_BUY_TTL_MIN") or 3)            #
 # 하드캡: 1회 주문 금액 상한. DB 설정(max_order_amount_*)보다 우선하는 최후의 안전망이다.
 AUTOTRADE_HARD_MAX_AMOUNT_KRW = float(_CFG.get("AUTOTRADE_HARD_MAX_AMOUNT_KRW") or 2_000_000)
 AUTOTRADE_HARD_MAX_AMOUNT_USD = float(_CFG.get("AUTOTRADE_HARD_MAX_AMOUNT_USD") or 2_000)
+# 가상매매 1회 매수 금액 — 종목 금액(auto_amount)이 0 일 때. 가상은 최소 1주를 산다 (한 주가 이 금액보다 비싸도 기록이 남게)
+VIRTUAL_AMOUNT = {"KRW": 1_000_000, "USD": 1_000}
 
 # 저장소: 이미 쓰고 있는 MySQL (.env 의 MYSQL_*). 테이블은 alert_ 접두어로 만든다.
 MYSQL = {
@@ -95,7 +102,6 @@ MYSQL = {
     "database": _CFG["MYSQL_DATABASE"],
 }
 
-WATCH_HOLDINGS = True          # 보유 조회(읽기 전용). False 면 ENTRY 알림만
 ENABLE_EXIT_SIGNAL = True      # 거래량 소진 기반 익절 알림. 끄려면 False
 
 # 감시 종목 — 초기 시딩용. 운영 목록은 MySQL alert_watchlist 이고 백오피스에서 바꾼다.
@@ -173,7 +179,9 @@ ENTRY_CONFIRM_MIN = 3
 EXIT_PORTION_STRONG = "전량"    # 연료 완전 소진
 EXIT_PORTION_HALF = "절반"      # 둔화 진행
 EXIT_PORTION_THIRD = "1/3"      # 근거만 흐려짐
-PROFILE_PAGES = 16             # 거래량 프로파일용 페이지 수 (200봉/페이지, 약 8세션)
+# 토스 미국 1분봉엔 주간거래·프리·애프터 봉이 섞여 16페이지(3200봉)는 약 2세션뿐 — 시각당 표본 2개로
+# MIN_PROFILE_SESSIONS 에 못 미쳐 늘 이동평균으로 떨어졌다. 40페이지면 미국 6세션·한국 11세션 (종목당 약 12초, 세션당 한 번)
+PROFILE_PAGES = 40             # 거래량 프로파일용 페이지 수 (200봉/페이지)
 MIN_PROFILE_SESSIONS = 3       # 같은 시각 표본 최소 개수
 ALERT_COOLDOWN_MIN = 15        # 강한 알림(손절·익절·매도) 재발송 간격
 WEAK_COOLDOWN_MIN = 45         # 약한 알림(검토 권유) 재발송 간격. 자주 오면 무시하게 된다
@@ -203,6 +211,10 @@ ENTRY_MIN_PEAK_RATIO = 0.6
 CLOSE_WARN_MIN = 30
 STATS_REPORT_MIN = 60
 SUMMARY_INTERVAL_MIN = 30      # 전 종목 시황 요약 발송 주기 (주식·코인 공통)
+# 미국 프리마켓 분석 (04:00 ET~개장). 시황과 같은 30분 칸(KST :00/:30)에 붙는다. 매수·매도 알림은 내지 않는다
+PREMARKET_GAP_PCT = 0.5        # 전일 종가 대비 이 % 이상 벌어져야 갭상승/갭하락으로 부른다
+PREMARKET_MIN_SESSIONS = 2     # 거래량 배수를 내려면 과거 프리마켓이 이만큼 있어야 한다
+PREMARKET_PAGES = 2            # 오늘 프리마켓 봉 조회 페이지 (200봉/페이지, 프리마켓 330분)
 
 # 불타기(추세 지속 확인 후 추가 매수) 알림
 ENABLE_ADD_ON = True
@@ -290,17 +302,29 @@ FOLLOW_SPECS = [
      "regime": "bear", "kinds": ("CRASH_WATCH_1D", "CRASH_SHORT_1D")},
 ]
 
+# 급변 감시 (alertbot/binance_scan.py) — 거래대금 상위 코인의 급등·급락 감지 알림 (관찰, 매매 없음). 같은 워커 프로세스가 돌린다.
+# 2026-05-17~09-17 4개월 분석(보고서 「최근 4개월 코인 신호 재검증」): 하루 알림 중앙값 10건에 맞춘 설계 가운데
+# 큰 움직임(24시간 극값 대비 +15% / −12%)을 가장 많이 잡은 조합이다. 알림이 많으면 SCAN_ATR_MULT 를 올린다 (최근 두 달은 하루 중앙 13건).
+SCAN_TOP_N = 30                # 직전 24시간 거래대금 상위 N 개 USDT 무기한 코인 (백오피스 '종목' 에서 추가·제외)
+SCAN_EXCLUDE = ("USDCUSDT", "PAXGUSDT", "XAUTUSDT")   # 스테이블·금 연동 토큰 — 거래소 분류는 코인이지만 급변 감시 대상이 아니다
+SCAN_REFRESH_MIN = 60          # 유니버스 갱신 주기. 15분 갱신도 포착률이 같았다
+SCAN_INTERVAL = "1h"           # 판정 봉. 15분봉은 포착률이 비슷하고 알림이 몰리는 날이 더 많았다 (하루 최대 51건 vs 26건)
+SCAN_WINDOW_BARS = 4           # 직전 4봉(4시간) 저점·고점 대비 이동. 한 번 알린 코인은 방향과 무관하게 같은 길이 동안 쉰다
+SCAN_BASE_ATR_BARS = 720       # 기준 ATR = 직전 30일 ATR14% 중앙값. 7일은 한 주 내내 들썩인 코인(9-16 LSK)의 급등을 놓쳤다
+SCAN_ATR_MULT = 10.3           # 급변 문턱 (기준 ATR 배수) — 4개월 하루 알림 중앙값 10건
+SCAN_KLINES = 1000             # 코인당 받는 1시간봉 (기준 ATR 30일 + 여유, weight 5)
+SCAN_MAX_LINES = 10            # 한 알림에 싣는 코인 수. 나머지는 '외 N종목'
 
-# Binance 자동매매 (alertbot/binance_trade.py) — 기본 off.
-#   dry : 공개 시세로 가상 체결 (API 키 불필요)
-#   live: 실제 주문 (binance_broker). 키 + 기동 시 헤지 모드·격리·배율 설정 + DB 킬 스위치(binance_trade_enabled)가 켜져야 진입한다
+
+# Binance 자동매매 (alertbot/binance_trade.py) — 공용 가상 장부는 늘 돈다 (공개 시세로 가상 체결, 키 불필요).
+#   off·dry: 가상 장부만
+#   live   : 가상 장부 + 계정별 실제 주문 (binance_broker). 그 계정 키 + 기동(또는 키 변경) 때 헤지 모드·격리·배율 설정 +
+#            계정의 Binance live 스위치가 켜져야 진입한다. 자본은 계정별(백오피스). 공용 Binance 키는 읽지 않는다 — 시세는 공개 API 다
 BINANCE_TRADE_MODE = (_CFG.get("ALERT_BINANCE_TRADE_MODE") or "off").strip().lower()
 if BINANCE_TRADE_MODE not in ("off", "dry", "live"):
     raise SystemExit(f"ALERT_BINANCE_TRADE_MODE 는 off|dry|live 중 하나: {BINANCE_TRADE_MODE}")
-BINANCE_API_KEY = (_CFG.get("ALERT_BINANCE_API_KEY") or "").strip()        # 선물 거래 권한만 (출금 권한 없이)
-BINANCE_API_SECRET = (_CFG.get("ALERT_BINANCE_API_SECRET") or "").strip()
 BINANCE_TRADE_EXCHANGE_LEV = 3         # live 심볼 배율 (격리·헤지 모드). 청산 거리 33% — 가장 넓은 손절(일봉 숏 +25%)보다 밖
-BINANCE_TRADE_CAPITAL = float(_CFG.get("ALERT_BINANCE_TRADE_CAPITAL") or 1000)   # 전략별 배분 자본 (USDT, 가상)
+BINANCE_TRADE_CAPITAL = float(_CFG.get("ALERT_BINANCE_TRADE_CAPITAL") or 1000)   # 가상 장부의 전략별 배분 자본 (USDT). live 는 계정별 자본
 # 전략(진입 신호 종류)별 유효 배율 = 명목가 ÷ 배분 자본. 레버리지 분석의 시작값 — 최대는 3 / 1.5 / 2 / 1
 BINANCE_TRADE_LEVERAGE = {"CRASH_BUY": 2.0, "SURGE_ENTRY": 1.0, "SURGE_ENTRY_1D": 1.5, "CRASH_SHORT_1D": 0.5}
 BINANCE_TRADE_FEE = 0.0005                                    # 테이커 편도

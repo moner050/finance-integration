@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% set nav = "ops" %}
+{% block content %}
+<div class="page-head"><div><h2>운영</h2><p>python run.py 가 띄운 서비스 — 5초마다 갱신. 버튼은 요청만 남기고 관리 프로세스가 몇 초 안에 처리한다. 콘솔에서는 <code>python run.py status</code> · <code>python run.py start|stop|restart 서비스</code>.</p></div></div>
+<div id="ops" hx-get="/partials/ops" hx-trigger="every 5s" hx-swap="innerHTML">
+{% include "_ops.html" %}
+</div>
+{% endblock %}

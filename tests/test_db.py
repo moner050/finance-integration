@@ -74,12 +74,12 @@ def test_engine_status_and_signal_log():
 def test_settings_and_orders():
     d = fresh()
     st = DBM.get_settings(d)
-    assert st["autotrade_enabled"] == "0" and st["max_positions"] == "3"
-    DBM.set_setting(d, "autotrade_enabled", 1)
+    assert "autotrade_enabled" not in st and st["max_positions"] == "3"          # live 스위치는 계정별 (alert_accounts)
     DBM.set_setting(d, "max_positions", "5")
-    assert DBM.get_settings(d)["autotrade_enabled"] == "1" and DBM.get_settings(d)["max_positions"] == "5"
-    with pytest.raises(ValueError):
-        DBM.set_setting(d, "nope", 1)
+    assert DBM.get_settings(d)["max_positions"] == "5"
+    for key in ("nope", "autotrade_enabled", "binance_trade_enabled"):
+        with pytest.raises(ValueError):
+            DBM.set_setting(d, key, 1)
 
     DBM.upsert_watch(d, "AAA", "KR", auto_trade=True, auto_amount=500000)
     assert DBM.load_watchlist(d)["AAA"]["auto_trade"] is True and DBM.load_watchlist(d)["AAA"]["auto_amount"] == 500000.0
@@ -98,3 +98,65 @@ def test_settings_and_orders():
     assert len(DBM.orders_since(d, "2026-09-09T00:00:00+00:00", mode="dry")) == 1
     assert DBM.orders_since(d, "2026-09-10T00:00:00+00:00") == []
     assert DBM.recent_orders(d, 5)[0]["price"] == 100.0
+
+
+def test_reset_paper_backs_up_and_clears_only_dry(tmp_path):
+    d = fresh()
+    base = {"symbol": "AAA", "market": "KR", "side": "BUY", "kind": "ENTRY", "order_type": "LIMIT", "price": 100.0,
+            "quantity": 1, "amount": 100.0, "bar_key": None, "ref_avg": None, "status": "filled", "reason": None,
+            "order_id": "o", "filled_qty": 1, "avg_price": 100.0, "pnl": None, "created_at": "2026-09-09T01:00:00+00:00",
+            "updated_at": None}
+    DBM.insert_order(d, {**base, "intent_id": "dry-1", "mode": "dry"})
+    DBM.insert_order(d, {**base, "intent_id": "live-1", "mode": "live"})
+    DBM.insert_binance_position(d, {"mode": "dry", "strategy": "CRASH_BUY", "symbol": "ETCUSDT", "side": "long", "qty": 1,
+                                    "entry_price": 7.0, "notional": 7.0, "leverage": 2, "stop": 6.8,
+                                    "deadline": "2026-09-09T09:00:00+00:00", "status": "open",
+                                    "opened_at": "2026-09-09T01:00:00+00:00", "funding": 0})
+    DBM.save_engine_status(d, [], [], {"AAA": {"state": "보유", "last_seen": {"avg": 90, "qty": 380}},
+                                       "BBB": {"state": "관망"}}, {})
+    (tmp_path / "trade_log.csv").write_text("closed_at\n", encoding="utf-8-sig")
+
+    out = DBM.reset_paper(d, tmp_path, stamp="t1")
+    assert out == {"alert_orders": 1, "alert_binance_positions": 1, "last_seen": 1, "trade_log": "trade_log.paper-bak-t1.csv"}
+    assert [o["intent_id"] for o in DBM.recent_orders(d)] == ["live-1"]                 # live 는 남는다
+    assert DBM.binance_positions(d) == []
+    assert d.fetchone("SELECT COUNT(*) AS n FROM alert_orders_paper_bak_t1")["n"] == 1
+    assert d.fetchone("SELECT COUNT(*) AS n FROM alert_binance_positions_paper_bak_t1")["n"] == 1
+    assert "last_seen" not in DBM.load_engine_status(d)["state"]["AAA"]
+    assert not (tmp_path / "trade_log.csv").exists() and (tmp_path / "trade_log.paper-bak-t1.csv").exists()
+    assert DBM.reset_paper(d, tmp_path, stamp="t2") == {"alert_orders": 0, "alert_binance_positions": 0, "last_seen": 0,
+                                                         "trade_log": None}
+
+
+def test_books_are_scoped_by_account():
+    """주문·포지션·신호 이력은 장부(account_id)로 갈린다 — None 은 공용 가상 장부, 숫자는 그 계정."""
+    d = fresh()
+    base = {"symbol": "AAA", "market": "KR", "side": "BUY", "kind": "ENTRY", "order_type": "LIMIT", "price": 100.0,
+            "quantity": 1, "amount": 100.0, "bar_key": "b", "ref_avg": None, "status": "open", "reason": None,
+            "order_id": "o", "filled_qty": 0, "avg_price": None, "pnl": None, "created_at": "2026-09-09T01:00:00+00:00",
+            "updated_at": None}
+    DBM.insert_order(d, {**base, "intent_id": "v", "mode": "dry"})
+    DBM.insert_order(d, {**base, "intent_id": "a7", "mode": "live", "account_id": 7})
+    DBM.insert_order(d, {**base, "intent_id": "a8", "mode": "live", "account_id": 8})
+    assert [o["intent_id"] for o in DBM.open_orders(d)] == ["v"]
+    assert [o["intent_id"] for o in DBM.open_orders(d, account_id=7)] == ["a7"]
+    assert [o["intent_id"] for o in DBM.orders_since(d, "2026-09-09T00:00:00+00:00", "live", 8)] == ["a8"]
+    assert sorted(o["intent_id"] for o in DBM.recent_orders(d, account_ids=[None, 7])) == ["a7", "v"]
+    assert len(DBM.recent_orders(d)) == 3 and DBM.recent_orders(d, account_ids=[]) == []
+    DBM.update_order(d, "v", status="filled", filled_qty=1, avg_price=100.0)
+    DBM.update_order(d, "a7", status="filled", filled_qty=1, avg_price=100.0)
+    assert DBM.dry_positions(d) == {"AAA": {"qty": 1.0, "avg": 100.0, "market": "KR"}}     # live 체결은 가상 보유에 섞이지 않는다
+
+    DBM.log_signal(d, Signal("ORDER_FILLED", "✅ 체결", "AAA", "b", "AAA", account_id=7), {"telegram_account": "ok"})
+    DBM.log_signal(d, Signal("ENTRY", "🔵 매수하세요", "AAA", "b", "AAA"), {"telegram_public": "ok"})
+    assert [r["kind"] for r in DBM.recent_signals(d, account_ids=[None, 8])] == ["ENTRY"]
+    assert [r["account_id"] for r in DBM.recent_signals(d)] == [None, 7]
+    row = {"strategy": "CRASH_BUY", "symbol": "ETCUSDT", "side": "long", "qty": 1, "entry_price": 7.0, "notional": 7.0,
+           "leverage": 2, "stop": 6.8, "deadline": "2026-09-09T09:00:00+00:00", "funding": 0, "status": "closed",
+           "opened_at": "2026-09-09T01:00:00+00:00"}
+    DBM.insert_binance_position(d, {**row, "mode": "dry"})
+    pid = DBM.insert_binance_position(d, {**row, "mode": "live", "account_id": 7})
+    DBM.update_binance_position(d, pid, pnl=-5.0, closed_at="2026-09-09T02:00:00+00:00")
+    assert DBM.binance_pnl_since(d, "2026-09-09T00:00:00+00:00", "live", 7) == -5.0
+    assert DBM.binance_pnl_since(d, "2026-09-09T00:00:00+00:00", "live") == 0.0
+    assert [p["account_id"] for p in DBM.binance_positions(d, account_ids=[None])] == [None]

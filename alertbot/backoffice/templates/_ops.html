@@ -1,0 +1,37 @@
+{% if not alive %}
+<div class="stat alert" style="margin-bottom:16px"><div class="k">관리 프로세스</div><div class="v warn">run.py 가 돌고 있지 않다</div>
+ <p class="sub" style="margin:6px 0 0">{% if supervisor %}마지막 heartbeat {{ supervisor.heartbeat_at|kst }} KST ({{ supervisor.host }} pid {{ supervisor.pid }}). {% endif %}버튼은 동작하지 않는다 — 서버에서 <code>python run.py</code> 로 실행할 것.</p></div>
+{% else %}
+<div class="stats">
+ <div class="stat"><div class="k">관리 프로세스</div><div class="v ok">실행 중<small>{{ supervisor.host }} · pid {{ supervisor.pid }}</small></div></div>
+ <div class="stat"><div class="k">시작 (KST)</div><div class="v">{{ supervisor.started_at|kst }}</div></div>
+</div>
+{% endif %}
+<div class="panel">
+<table>
+<tr><th>서비스</th><th>상태</th><th>PID</th><th>시작 (KST)</th><th>heartbeat</th><th>재시작</th><th>종료 코드</th><th></th></tr>
+{% for s in services %}{% set r = s.row %}
+<tr>
+ <td><strong>{{ labels[s.name] }}</strong><br><span class="muted">{{ s.name }}</span></td>
+ {% if r %}
+ <td><span class="badge {{ 'ok-badge' if r.state == 'running' else ('action' if r.state == 'backoff' else ('review' if r.state == 'stopping' else '')) }}">{{ state_labels.get(r.state, r.state) }}</span>
+  {% if r.request %}<br><span class="muted">요청 대기: {{ r.request }} ({{ r.requested_by }})</span>{% endif %}</td>
+ <td>{{ r.pid or '-' }}</td>
+ <td style="white-space:nowrap">{{ r.started_at|kst }}</td>
+ <td style="white-space:nowrap">{% if s.name == 'backoffice' %}<span class="muted">-</span>{% elif r.heartbeat_at %}{{ s.age }}초 전{% else %}<span class="muted">없음</span>{% endif %}</td>
+ <td>{{ r.restarts }}회</td>
+ <td>{{ r.exit_code if r.exit_code is not none else '-' }}</td>
+ <td style="white-space:nowrap">{% if alive %}
+  {% if r.state in ('stopped', 'backoff') %}<button hx-post="/ops/{{ s.name }}/start" hx-target="#ops">켜기</button>{% endif %}
+  {% if r.state == 'running' %}<button hx-post="/ops/{{ s.name }}/restart" hx-target="#ops" hx-confirm="{{ labels[s.name] }} 를 재시작할까요?">재시작</button>{% endif %}
+  {% if r.state in ('running', 'backoff') and s.name != 'backoffice' %}<button class="danger" hx-post="/ops/{{ s.name }}/stop" hx-target="#ops" hx-confirm="{{ labels[s.name] }} 를 끌까요? 켜기 전까지 알림이 없다">끄기</button>{% endif %}
+ {% endif %}</td>
+ {% else %}
+ <td colspan="7" class="muted">기록 없음 — run.py 가 한 번도 돌지 않았다</td>
+ {% endif %}
+</tr>
+{% if r and r.last_output %}<tr><td colspan="8"><details><summary class="muted">{{ labels[s.name] }} 마지막 종료 때 출력</summary><pre>{{ r.last_output }}</pre></details></td></tr>{% endif %}
+{% endfor %}
+</table>
+</div>
+<p class="sub" style="margin-top:14px">비정상 종료는 5·30·120·300초 뒤 자동으로 다시 켜고, heartbeat 가 끊긴 채 멈춘 워커(주식 엔진 15분·코인 워커 10분)도 다시 켠다. 백오피스는 화면에서 끌 수 없다 — 재시작만.</p>

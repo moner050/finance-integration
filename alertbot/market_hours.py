@@ -3,7 +3,7 @@
 세션당 한 번 캘린더 API(/api/v1/market-calendar/{KR|US})를 읽어 휴장일과 조기폐장을
 반영한다. 요일만 보면 추석·미국 휴일에도 폴링하고 '장 시작' 알림을 보낸다.
 캘린더를 못 읽거나 형식을 모르면 고정 시간으로 판단한다
-(KR 09:00~15:30, US 09:30~16:00, 앞뒤 10분 여유).
+(KR 09:00~15:30, US 09:30~16:00, 앞뒤 10분 여유, 미국 프리마켓 04:00~).
 """
 
 import logging
@@ -16,7 +16,7 @@ log = logging.getLogger("scalper")
 
 DEFAULT_MINUTES = {"KR": (9 * 60, 15 * 60 + 30), "US": (9 * 60 + 30, 16 * 60)}
 OPEN_MARGIN_MIN = 10            # 개장 직후 봉도 잡도록 앞뒤 여유
-PREMARKET_START_MIN = 8 * 60    # 미국 프리마켓 표시 시작 (08:00 ET)
+PREMARKET_START_MIN = 4 * 60    # 미국 프리마켓 시작 (04:00 ET = 서머타임 KST 17:00). 캘린더에 preMarket 이 있으면 그것을 쓴다
 
 
 def _to_minutes(value, market: str):
@@ -35,7 +35,7 @@ def _to_minutes(value, market: str):
 
 
 def parse_calendar(data, market: str, date: str):
-    """캘린더 응답(result 벗긴 것) → {"closed": bool, "open": 분, "close": 분}. 형식 불명이면 None.
+    """캘린더 응답(result 벗긴 것) → {"closed": bool, "open": 분, "close": 분[, "pre": 분]}. 형식 불명이면 None.
 
     KR: today.integrated 가 null 이면 휴장, 아니면 regularMarket.startTime/endTime.
     US: today/previousBusinessDay/nextBusinessDay 또는 days/marketDays 목록에서 오늘 항목의
@@ -80,7 +80,12 @@ def parse_calendar(data, market: str, date: str):
         o, c = _to_minutes(start, market), _to_minutes(end, market)
         if o is None or c is None:
             return None
-        return {"closed": False, "open": o, "close": c}
+        out = {"closed": False, "open": o, "close": c}
+        pre = d.get("preMarket") or d.get("preMarketSession")
+        p = _to_minutes(pre.get("startTime") or pre.get("startDateTime") or pre.get("start"), market)             if isinstance(pre, dict) else None
+        if p is not None and p < o:
+            out["pre"] = p
+        return out
     return None
 
 
@@ -99,6 +104,8 @@ class MarketHours:
             return cached
         o, c = DEFAULT_MINUTES[market]
         info = {"date": date, "closed": t.weekday() >= 5, "open": o, "close": c, "source": "고정"}
+        if market == "US":
+            info["pre"] = PREMARKET_START_MIN
         if self.client is not None:
             try:
                 raw = self.client.get_market_calendar(market)
@@ -134,11 +141,22 @@ class MarketHours:
         hm = self._hm(market)
         return info["open"] - OPEN_MARGIN_MIN <= hm <= info["close"] + OPEN_MARGIN_MIN
 
+    def session_open(self, market: str) -> bool:
+        """정규장이 실제로 열려 있는지 (여유 없음). '장 시작'/'장 마감' 알림 시각에 쓴다.
+
+        감시(market_open)는 개장봉을 잡으려 앞뒤 10분 여유를 두지만, 알림까지 그 기준을 따르면
+        미국장 '장 시작'이 22:20, '장 마감'이 05:10 KST 에 나간다.
+        """
+        info = self.info(market)
+        if info["closed"]:
+            return False
+        return info["open"] <= self._hm(market) < info["close"]
+
     def market_premarket(self, market: str) -> bool:
-        """프리마켓 시간대인지.
+        """프리마켓 시간대인지 (미국 04:00 ET ~ 개장 여유 직전).
 
         프리마켓은 유동성이 정규장의 수십 분의 일이라 거래 몇 건으로 RVOL 이
-        크게 튄다. 그래서 알림 판단에는 쓰지 않고 시황 표시에만 쓴다.
+        크게 튄다. 그래서 매수·매도 알림 판단에는 쓰지 않고 30분 프리마켓 분석에만 쓴다.
         한국장 장전 동시호가는 체결 구조가 달라 아예 제외한다.
         """
         if market != "US":
@@ -146,7 +164,7 @@ class MarketHours:
         info = self.info(market)
         if info["closed"]:
             return False
-        return PREMARKET_START_MIN <= self._hm(market) < info["open"] - OPEN_MARGIN_MIN
+        return info.get("pre", PREMARKET_START_MIN) <= self._hm(market) < info["open"] - OPEN_MARGIN_MIN
 
     def near_close(self, market: str) -> bool:
         """마감 CLOSE_WARN_MIN 분 전 여부. 조기폐장이면 캘린더의 마감 시각을 따른다."""

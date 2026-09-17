@@ -7,7 +7,10 @@
  .res h3{margin-top:30px}
  .res h3 small{font-weight:500;color:var(--muted);margin-left:8px}
 </style>
-<div class="page-head"><div><h2>매매 결과</h2><p>위는 실전(live) 체결, 아래는 dry 모의매매 체결, 맨 아래는 신호 포지션의 모의 성적. 일별 시계열은 오래된 날부터, 건별은 최신순.</p></div></div>
+<div class="page-head"><div><h2>매매 결과</h2><p>위는 계정의 실전(live) 체결, 아래는 공용 가상 장부 체결, 맨 아래는 신호 포지션의 모의 성적. 일별 시계열은 오래된 날부터, 건별은 최신순.</p></div>
+ {% if me.role == 'admin' %}<form class="toolbar" method="get" action="/results" style="margin:0"><label>live 계정
+  <select name="account" onchange="this.form.submit()">{% for aid, email in emails.items() %}<option value="{{ aid }}" {{ 'selected' if aid == target else '' }}>{{ email }}</option>{% endfor %}</select></label></form>{% endif %}
+</div>
 <div class="res">
 
 {% macro order_results(r, title, note) %}
@@ -46,9 +49,9 @@
 {% endif %}
 {% endmacro %}
 
-{{ order_results(live, '실전 매매 (live)', '실제 주문의 체결 기록 — 실현손익은 체결가 기준') }}
+{{ order_results(live, '실전 매매 (live)', emails.get(target, '') ~ ' 계정의 실제 주문 체결 기록 — 실현손익은 체결가 기준') }}
 
-{{ order_results(dry, '모의 매매 (dry)', '가상 체결 — 수수료·슬리피지 없음. 지금 모드: ' ~ mode) }}
+{{ order_results(dry, '모의 매매 (공용 가상 장부)', '확정 신호마다 가상 체결 — 실계좌와 격리, 수수료·슬리피지 없음') }}
 {% if dry_positions %}
 <p><strong>모의 보유 중</strong>
 {% for sym, p in dry_positions.items() %}<span class="badge">{{ sym|kname(names) }} · {{ '{:g}'.format(p.qty) }}주 @ {{ p.avg }}</span> {% endfor %}</p>

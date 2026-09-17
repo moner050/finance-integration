@@ -1,40 +1,23 @@
-# 우분투 배포: 엔진 + 백오피스 + Binance 급락 알림 워커. MySQL 은 이미 쓰는 외부 서버(.env 의 MYSQL_*)를 쓴다.
+# 우분투 배포: run.py 하나가 엔진 + Binance 워커 + 백오피스를 띄우고 지킨다. MySQL 은 이미 쓰는 외부 서버(.env 의 MYSQL_*)를 쓴다.
+#   docker compose down --remove-orphans     (예전 3개 서비스 구성에서 넘어올 때 한 번 — 안 하면 옛 컨테이너가 남아 알림·주문이 두 번 나간다)
 #   docker compose up -d --build
-#   docker compose logs -f engine     (Binance 워커는 binance)
+#   docker compose logs -f alertbot          ([engine] / [binance] / [backoffice] 접두어)
+#   docker compose exec alertbot python run.py status
+#   docker compose exec alertbot python run.py restart binance
 services:
-  engine:
+  alertbot:
     build: .
-    container_name: alertbot-engine
-    env_file: .env
-    environment:
-      ALERT_DATA_DIR: /data
-    volumes:
-      - ./data:/data                 # scalping_signals.log, signal_tracking.csv, trade_log.csv
-    restart: unless-stopped
-    command: ["python", "run_engine.py"]
-
-  backoffice:
-    build: .
-    container_name: alertbot-backoffice
+    container_name: alertbot
     env_file: .env
     environment:
       ALERT_DATA_DIR: /data
       ALERT_BACKOFFICE_HOST: 0.0.0.0   # 컨테이너 안에서는 모든 인터페이스. 밖으로는 아래 ports 로 localhost 만 연다
       ALERT_BACKOFFICE_PORT: "8000"
     ports:
-      - "127.0.0.1:8000:8000"        # 서버 밖에서 보려면 SSH 터널: ssh -L 8000:127.0.0.1:8000 user@server
+      - "127.0.0.1:8000:8000"        # Google 로그인 필요. 서버 밖에서는 SSH 터널: ssh -L 8000:127.0.0.1:8000 user@server → http://localhost:8000
+                                     # .env 에 OAUTH_GOOGLE_*·ALERT_ADMIN_EMAIL·ALERT_MASTER_KEY 가 없으면 백오피스만 재시작 대기에 머문다
     volumes:
-      - ./data:/data
+      - ./data:/data                 # scalping_signals.log, binance_signals.log, supervisor.log, CSV
     restart: unless-stopped
-    command: ["python", "run_backoffice.py"]
-
-  binance:
-    build: .
-    container_name: alertbot-binance
-    env_file: .env
-    environment:
-      ALERT_DATA_DIR: /data
-    volumes:
-      - ./data:/data                 # binance_signals.log
-    restart: unless-stopped
-    command: ["python", "run_binance.py"]
+    stop_grace_period: 150s          # docker stop → 워커가 사이클을 마칠 때까지 (엔진 유예 120초)
+    command: ["python", "run.py"]

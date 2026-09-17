@@ -73,15 +73,16 @@ def test_trader_open_lines_and_summary_signal(monkeypatch):
     fetched = {"ETCUSDT": make_bars(), "BTCUSDT": make_bars(close=78000)}
     w = CrashWorker(["ETCUSDT"], rec, fetch_bars=lambda s: fetched[s], fetch_fund=lambda s: None, fetch_h4=lambda s: make_h4())
     w.poll_once(T)
-    sig = summary_signal([w], t, T)
+    assert summary_signal([w], T).body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT")     # 가상 트레이더 없이도 조건 줄
+    sig = summary_signal([w], T, paper=t)
     assert sig.kind == "SUMMARY" and sig.title == "📊 코인 시황" and sig.label == "12:00"
-    assert sig.body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT") and "[DRY]" not in sig.body
+    assert sig.body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT") and "\n가상 포지션 (dry)\n📥 [DRY] ETCUSDT" in sig.body
     assert sig.body.endswith("※ 참고용. 진입·청산은 개별 알림(🔵🔴📥📤)이 왔을 때만")
-    assert sig.account.startswith("\n내 포지션\n📥 [DRY] ETCUSDT")                 # 내 포지션은 계좌 줄 — 공개 채널엔 빠진다
+    assert sig.account is None and sig.account_id is None                        # 공용 채널 — 계정 live 포지션은 싣지 않는다
 
 
 def test_start_message_lists_symbols_not_rules():
     import run_binance
     lines = run_binance.watch_list()
-    assert lines[0].startswith("급락 매수 5분봉: ") and len(lines) == 1 + len(FOLLOW_SPECS)
+    assert lines[0].startswith("급락 매수 5분봉: ") and len(lines) == 2 + len(FOLLOW_SPECS)        # + 급변 감시 줄
     assert all("기준ATR" not in ln and "RSI" not in ln for ln in lines)

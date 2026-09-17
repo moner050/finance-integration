@@ -1,9 +1,9 @@
 """백오피스 — 라우트와 DB 연동. 메모리 SQLite 를 앱의 저장소로 끼운다."""
 import pytest
-from fastapi.testclient import TestClient
 
 import alertbot.backoffice.app as A
 from alertbot import db as DBM
+from tests.backoffice_login import logged_in
 from alertbot.models import Signal
 from tests.test_notify import Recorder
 
@@ -16,7 +16,7 @@ def client(monkeypatch):
         "SOXL": {"market": "US", "leaders": None, "inverse": False, "pair": "SOXS", "hold_only": True},
     })
     monkeypatch.setattr(A, "_store", store)
-    return TestClient(A.app), store
+    return logged_in(A, store), store
 
 
 def test_status_without_engine(client):
@@ -124,11 +124,11 @@ def test_signals_page(client):
 
 def test_channel_test_send(client, monkeypatch):
     c, store = client
-    rec = Recorder("telegram", "review")
+    rec = Recorder("telegram_public", "review")
     monkeypatch.setattr(A, "build_channels", lambda: [rec])
-    r = c.post("/channels/telegram/test")
+    r = c.post("/channels/telegram_public/test")
     assert "ok" in r.text and len(rec.got) == 1 and rec.got[0].kind == "SYSTEM"
     assert DBM.recent_signals(store)[0]["kind"] == "SYSTEM"
     assert "설정되어 있지 않다" in c.post("/channels/nope/test").text
     r = c.get("/channels")
-    assert r.status_code == 200 and "telegram" in r.text
+    assert r.status_code == 200 and "telegram_public" in r.text

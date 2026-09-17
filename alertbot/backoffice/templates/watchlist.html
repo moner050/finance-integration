@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% set nav = "watchlist" %}
 {% block content %}
-<div class="page-head"><div><h2>감시 종목</h2><p>저장하면 엔진이 다음 사이클(30초 안)에 반영한다. 삭제보다 '중지'를 권장한다 — 이력이 남는다.</p></div></div>
+{% set admin = me.role == 'admin' %}
+<div class="page-head"><div><h2>감시 종목</h2><p>{% if admin %}저장하면 엔진이 다음 사이클(30초 안)에 반영한다. 삭제보다 '중지'를 권장한다 — 이력이 남는다.{% else %}종목은 관리자만 바꿀 수 있다.{% endif %}</p></div></div>
 {% if error %}<p class="warn">{{ error }}</p>{% endif %}
+{% if admin %}
 <form class="card" method="post" action="/watchlist">
+ <input type="hidden" name="csrf" value="{{ csrf }}">
  <label>심볼 <input type="text" name="symbol" value="{{ edit.symbol if edit else '' }}" required {{ 'readonly' if edit else '' }} placeholder="SOXX / 005930"></label>
  <label>시장
   <select name="market">
@@ -20,7 +23,7 @@
  <label><span><input type="checkbox" name="inverse" value="1" {{ 'checked' if edit and edit.inverse else '' }}> 인버스 (선행 방향 반전)</span></label>
  <label><span><input type="checkbox" name="hold_only" value="1" {{ 'checked' if edit and edit.hold_only else '' }}> 보유 중에만 감시 (매수 신호 없음)</span></label>
  <label><span><input type="checkbox" name="day_trade" value="1" {{ 'checked' if edit and edit.day_trade else '' }}> 당일 청산 (마감 30분 전 정리 알림 · 자동매매면 전량 매도)</span></label>
- <label><span><input type="checkbox" name="auto_trade" value="1" {{ 'checked' if edit and edit.auto_trade else '' }}> 자동매매 대상 (모드·킬 스위치도 켜져야 함)</span></label>
+ <label><span><input type="checkbox" name="auto_trade" value="1" {{ 'checked' if edit and edit.auto_trade else '' }}> live 자동매매 대상 (계정별 live 스위치도 켜져야 함 · 가상매매는 체크와 무관하게 모든 확정 신호)</span></label>
  <div class="full">
   <button type="submit" class="primary">{{ '수정 저장' if edit else '추가' }}</button>
   <button type="button" hx-post="/watchlist/validate" hx-include="closest form" hx-target="#validate-result">심볼 검증 (토스 현재가 조회)</button>
@@ -28,9 +31,10 @@
   {% if edit %}<a href="/watchlist">취소</a>{% endif %}
  </div>
 </form>
+{% endif %}
 <div class="panel">
 <table>
-<tr><th>심볼</th><th>시장</th><th>표시명</th><th>선행</th><th>인버스</th><th>페어</th><th>보유시만</th><th>당일청산</th><th>자동매매</th><th>메모</th><th>상태</th><th>수정</th><th></th></tr>
+<tr><th>심볼</th><th>시장</th><th>표시명</th><th>선행</th><th>인버스</th><th>페어</th><th>보유시만</th><th>당일청산</th><th>자동매매</th><th>메모</th><th>상태</th><th>수정</th>{% if admin %}<th></th>{% endif %}</tr>
 {% for r in rows %}
 <tr class="{{ '' if r.enabled else 'muted' }}">
  <td><strong>{{ r.symbol }}</strong></td>
@@ -45,15 +49,43 @@
  <td>{{ r.note or '' }}</td>
  <td><span class="badge {{ 'ok-badge' if r.enabled else '' }}">{{ '활성' if r.enabled else '중지' }}</span></td>
  <td style="white-space:nowrap">{{ r.updated_at|kst }}</td>
- <td style="white-space:nowrap">
+ {% if admin %}<td style="white-space:nowrap">
   <a href="/watchlist?edit={{ r.symbol }}">편집</a>
-  <form class="inline" method="post" action="/watchlist/{{ r.symbol }}/toggle"><button>{{ '중지' if r.enabled else '재개' }}</button></form>
-  <form class="inline" method="post" action="/watchlist/{{ r.symbol }}/delete" onsubmit="return confirm('{{ r.symbol }} 을 삭제할까요? 중지를 권장합니다.')"><button class="danger">삭제</button></form>
- </td>
+  <form class="inline" method="post" action="/watchlist/{{ r.symbol }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ '중지' if r.enabled else '재개' }}</button></form>
+  <form class="inline" method="post" action="/watchlist/{{ r.symbol }}/delete" onsubmit="return confirm('{{ r.symbol }} 을 삭제할까요? 중지를 권장합니다.')"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">삭제</button></form>
+ </td>{% endif %}
 </tr>
 {% else %}
 <tr><td colspan="13" class="muted">종목이 없다</td></tr>
 {% endfor %}
 </table>
+</div>
+
+<div class="page-head" style="margin-top:28px"><div><h2>코인 급변 감시</h2><p>Binance USDT 무기한 코인 중 직전 24시간 거래대금 상위 {{ coins.top_n }}개를 코인 워커가 한 시간마다 다시 고르고, 1시간봉 급등·급락을 알린다 (관찰 알림 — 매매는 하지 않는다). 스테이블·금 연동 토큰({{ coins.fixed_exclude|join(', ') }})은 늘 뺀다.</p></div></div>
+{% if coins.error %}<p class="warn">{{ coins.error }}</p>{% endif %}
+{% if admin %}
+<form class="card" method="post" action="/watchlist/coins">
+ <input type="hidden" name="csrf" value="{{ csrf }}">
+ <label style="grid-column:span 2">더할 코인 (쉼표 · USDT 생략 가능) <input type="text" name="include" value="{{ coins.include }}" placeholder="LSK, ARB"></label>
+ <label style="grid-column:span 2">뺄 코인 <input type="text" name="exclude" value="{{ coins.exclude }}" placeholder="AIN, POWER"></label>
+ <div class="full"><button type="submit" class="primary">저장</button><span class="muted">코인 워커가 다음 사이클(20초 안)에 반영한다. 상위 순위는 한 시간마다 다시 매긴다.</span></div>
+</form>
+{% else %}
+<p class="sub">더한 코인: {{ coins.include or '없음' }} · 뺀 코인: {{ coins.exclude or '없음' }} — 관리자만 바꿀 수 있다.</p>
+{% endif %}
+{% set snap = coins.snapshot %}
+<div class="panel">
+{% if not snap.top %}
+<p class="muted" style="padding:14px 16px;margin:0">아직 목록이 없다 — 코인 워커(run.py 또는 run_binance.py)가 돌면 채워진다.</p>
+{% else %}
+{% set ranked = snap.top|map(attribute='symbol')|list %}
+<p class="sub" style="padding:12px 16px 0;margin:0">갱신 {{ snap.at|kst }} KST · 감시 {{ snap.symbols|length }}개{% if snap.invalid %} · <span class="warn">거래할 수 없는 추가 코인: {{ snap.invalid|join(', ') }}</span>{% endif %}</p>
+<table>
+<tr><th>순위</th><th>코인</th><th>24시간 거래대금 (USDT)</th></tr>
+{% for r in snap.top %}<tr><td>{{ r.rank }}</td><td><strong>{{ r.symbol }}</strong></td><td>{{ '{:,.0f}'.format(r.quote_volume) }}</td></tr>
+{% endfor %}{% for sym in snap.symbols if sym not in ranked %}<tr><td class="muted">추가</td><td><strong>{{ sym }}</strong></td><td class="muted">-</td></tr>
+{% endfor %}
+</table>
+{% endif %}
 </div>
 {% endblock %}

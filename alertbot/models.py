@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-# 등급은 채널이 어디까지 받을지 고르는 기준이다 (TELEGRAM_MIN_SEVERITY).
+# 등급은 채널이 어디까지 받을지 고르는 기준이다 (Channel.min_severity).
 #   action — 지금 행동해야 한다 (매수·손절·매도·익절·추가매수·마감 정리)
 #   review — 살펴볼 일이 생겼다 (일부 익절 검토, 매수 취소, 청산 완료)
 #   info   — 정기·시스템 (시황, 장 시작/마감, 성적, 기동)
@@ -24,6 +24,8 @@ KINDS = {
     "SURGE_ENTRY_1D": ("action", "strong"), # 일봉 급등 뒤 눌림 재돌파 — 추종 진입 후보 (20일 쿨다운)
     "CRASH_WATCH_1D": ("review", "strong"), # 일봉 급락 확인 — 추종 관찰 (약세 국면)
     "CRASH_SHORT_1D": ("action", "strong"), # 일봉 급락 뒤 반등 실패(EMA9 재이탈) — 추종 숏 후보 (20일 쿨다운)
+    "SCAN_SURGE": ("review", "none"),       # 급변 감시 — 거래대금 상위 코인 급등 감지 (관찰, 매매 없음). 쿨다운은 워커가 코인마다 건다
+    "SCAN_CRASH": ("review", "none"),       # 급변 감시 — 급락 감지
     "STOP": ("action", "strong"),
     "SELL": ("action", "strong"),
     "EXIT_FULL": ("action", "strong"),      # '익절하세요'/'정리하세요' 문구가 달라도 같은 청산 신호다
@@ -35,16 +37,16 @@ KINDS = {
     "MARKET_OPEN": ("info", "none"),
     "MARKET_CLOSE": ("info", "none"),
     "DAILY_REPORT": ("info", "none"),
-    "SIGNAL_REPORT": ("info", "none"),    # 신호 포지션 모의 성적표 (장 마감 · 코인은 자정 KST). 공개 채널로 보내려면 PUBLIC_KINDS 에 넣는다
+    "SIGNAL_REPORT": ("info", "none"),    # 신호 포지션 모의 성적표 (장 마감 · 코인은 자정 KST)
     "SUMMARY": ("info", "none"),
     "SYSTEM": ("info", "none"),
-    # 자동매매. 주문 관련은 쿨다운 없이 매번 보낸다 — 같은 종목의 연속 주문도 각각 알아야 한다.
+    # 자동매매(공용 가상 장부 · 계정별 live). 주문 관련은 쿨다운 없이 매번 보낸다 — 같은 종목의 연속 주문도 각각 알아야 한다.
     "ORDER_SENT": ("action", "none"),
     "ORDER_FILLED": ("action", "none"),
     "ORDER_CANCELED": ("review", "none"),
     "ORDER_FAILED": ("action", "none"),
     "AUTOTRADE_DISABLED": ("action", "none"),
-    # Binance 자동매매 (dry, run_binance.py). 포지션 사건은 쿨다운 없이 매번 보낸다
+    # Binance 자동매매 (공용 가상 장부 · 계정별 live, run_binance.py). 포지션 사건은 쿨다운 없이 매번 보낸다
     "BN_ENTRY": ("action", "none"),
     "BN_EXIT": ("action", "none"),
     "BN_SKIP": ("review", "none"),
@@ -52,15 +54,11 @@ KINDS = {
 }
 
 
-# 공개 채널(TELEGRAM_PUBLIC_*)이 받는 종류 — 시장 데이터만으로 성립하는 매수·매도 신호, 장 시작·마감, 시황.
-# 손절 한도(내 평단 기준), 청산 완료, 주문·포지션 사건, 성적표, 시스템은 계좌 정보라 보내지 않는다.
-# 본문에서도 계좌 줄(Signal.account — 손익·평단·보유 수량·내 포지션)은 공개 채널에 빠진다.
-PUBLIC_KINDS = {
-    "ENTRY", "ENTRY_WATCH", "ENTRY_CANCEL", "SELL", "EXIT_FULL", "EXIT_HALF", "EXIT_THIRD", "EXIT_WATCH", "EXIT_CANCEL",
-    "ADDON", "CLOSE_WARN",
-    "CRASH_BUY", "SURGE_WATCH", "SURGE_ENTRY", "SURGE_WATCH_1D", "SURGE_ENTRY_1D", "CRASH_WATCH_1D", "CRASH_SHORT_1D",
-    "MARKET_OPEN", "MARKET_CLOSE", "SUMMARY",
-}
+def price_text(value, market: str) -> str:
+    """알림에 싣는 가격. 한국 주식은 원 단위라 소수점 없이 천 단위 쉼표(1,766,000), 그 밖의 시장은 값 그대로."""
+    if market == "KR" and value is not None:
+        return f"{float(value):,.0f}"
+    return f"{value}"
 
 
 @dataclass
@@ -68,12 +66,12 @@ class Signal:
     kind: str
     title: str              # 알림 제목 (이모지 포함). 예: "🔵 매수하세요"
     label: str              # 종목 표시명, 또는 시장/시각
-    body: str               # 시장 근거 — 공개 채널에도 나간다
+    body: str               # 시장 근거
     symbol: str = None      # 종목 코드. 쿨다운 키와 이력 조회에 쓴다
-    account: str = None     # 계좌 줄(손익·평단·보유 수량). 내 채널·로그·이력에만 붙는다
-    # 종류는 공개 대상이어도 이 건은 내 계좌 일일 때 — 확정 청산 뒤 내 보유가 남아 반복되는 '매도 대기'·'청산 신호 해제'.
-    # 독자의 신호는 이미 끝났으니 공개 채널에는 가지 않는다.
-    private: bool = False
+    account: str = None     # 장부 줄(가상 보유 수량·평단·손익). 본문 뒤에 붙는다
+    # 알림 경로. None 이면 공용 채널(.env 공개 텔레그램 — 시장 신호·시황·시스템·가상매매·성적표), 숫자면 그 계정의 텔레그램으로만 간다
+    # (계정별 live 주문·체결·실패·성적). 채널은 자기 account_id 와 같은 신호만 받는다 (notify/telegram.py).
+    account_id: int = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -89,12 +87,13 @@ class Signal:
 
     @property
     def key(self) -> str:
-        return f"{self.kind}:{self.symbol or self.label}"
+        """쿨다운 키. 계정 알림은 계정마다 따로 센다."""
+        return f"{self.kind}:{self.symbol or self.label}" + (f"@{self.account_id}" if self.account_id is not None else "")
 
     def full_body(self) -> str:
-        """계좌 줄까지 붙인 본문 (내 채널·이력용)."""
+        """장부 줄까지 붙인 본문 (채널·이력용)."""
         return f"{self.body}\n{self.account}" if self.account else self.body
 
-    def text(self, public: bool = False) -> str:
-        """텔레그램·로그에 쓰는 원본 형식. public 이면 계좌 줄을 뺀다."""
-        return f"{self.title} | {self.label}\n{self.body if public else self.full_body()}"
+    def text(self) -> str:
+        """텔레그램·로그에 쓰는 원본 형식."""
+        return f"{self.title} | {self.label}\n{self.full_body()}"

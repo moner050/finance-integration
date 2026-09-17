@@ -5,7 +5,7 @@ import pytest
 
 import alertbot.notify.dispatcher as D
 import alertbot.notify.telegram as T
-from alertbot.models import KINDS, Signal
+from alertbot.models import KINDS, Signal, price_text
 from alertbot.notify.base import Channel
 
 
@@ -34,6 +34,14 @@ def test_signal_model():
         Signal("NOPE", "x", "y", "z")
     assert {k for k, (sev, _) in KINDS.items() if sev == "info"} == {
         "MARKET_OPEN", "MARKET_CLOSE", "DAILY_REPORT", "SIGNAL_REPORT", "SUMMARY", "SYSTEM"}
+
+
+def test_price_text_korean_won_without_decimals():
+    """한국 주식 가격은 원 단위 정수 + 천 단위 쉼표, 미국 주식은 받은 값 그대로."""
+    assert price_text(1766000.0, "KR") == "1,766,000"
+    assert price_text(1754980.6018, "KR") == "1,754,981"
+    assert price_text(985.0, "KR") == "985"
+    assert price_text(63.3742, "US") == "63.3742" and price_text(None, "KR") == "None"
 
 
 def test_cooldown_by_kind_and_symbol():
@@ -73,36 +81,38 @@ def test_channel_isolation_and_severity_filter():
     assert d.send(sig(symbol="CCC"))["strict"] == "skip"
 
 
-def test_public_channel_gets_market_signals_without_account_lines(monkeypatch):
-    """공개 채널은 PUBLIC_KINDS 만 받고 본문의 계좌 줄(account)을 뺀다. 내 채널은 전부, 계좌 줄까지 받는다."""
+def test_common_and_account_channels_are_isolated(monkeypatch):
+    """공용 채널(.env 공개 텔레그램)은 계정 없는 신호를 장부 줄까지 전부 받고, 계정 채널은 자기 계정 신호만 받는다."""
     calls = []
 
     def fake_post(url, json=None, timeout=None, **kw):
         calls.append((url, json["text"]))
         return FakeResp(body={"ok": True})
     monkeypatch.setattr(T.requests, "post", fake_post)
-    mine, pub = T.TelegramChannel("MINE", ["1"]), T.TelegramChannel("PUB", ["9"], public=True)
-    assert (mine.name, pub.name) == ("telegram", "telegram_public")
-    d = D.Dispatcher([mine, pub])
+    pub, acc1, acc2 = T.TelegramChannel("PUB", ["9"]), T.TelegramChannel("A1", ["1"], account_id=1), T.TelegramChannel("A2", ["2"], account_id=2)
+    assert (pub.name, acc1.name) == ("telegram_public", "telegram_account")
     sell = Signal("SELL", "🔴 매도하세요", "테스트", "종가 100.2가 매수 신호봉 저점 100.3 아래로 내려감", "AAA",
-                  account="손익 -0.6%  (평단 100.8 → 현재 100.2)")
-    assert d.send(sell) == {"telegram": "ok", "telegram_public": "ok"}
-    assert calls[0][0].startswith("https://api.telegram.org/botMINE/") and "손익 -0.6%" in calls[0][1]
-    assert calls[1][0].startswith("https://api.telegram.org/botPUB/") and "손익" not in calls[1][1] and "저점 100.3" in calls[1][1]
-    assert sell.full_body().endswith("손익 -0.6%  (평단 100.8 → 현재 100.2)")
-    # 계좌 정보만 담는 종류는 공개 채널이 받지 않는다
-    for kind, title in (("STOP", "🔴 손절하세요"), ("CLOSED", "✅ 손절 완료"), ("SYSTEM", "⚪ 시스템"),
-                        ("ORDER_SENT", "📤 주문 접수"), ("BN_ENTRY", "📥 진입"), ("DAILY_REPORT", "📈 오늘 성적")):
-        r = d.send(Signal(kind, title, "x", "b", "BBB"))
-        assert r["telegram"] == "ok" and r["telegram_public"] == "skip", kind
-    assert d.send(Signal("CRASH_BUY", "🔵 급락 매수 후보", "ETCUSDT 5분봉", "b", "ETCUSDT"))["telegram_public"] == "ok"
-    # 공개 종류여도 내 계좌 일(private)이면 공개 채널은 받지 않는다 — 확정 청산 뒤 내 보유 때문에 나가는 반복·해제
-    r = d.send(Signal("EXIT_CANCEL", "⚪ 청산 신호 해제", "테스트", "b", "CCC", private=True))
-    assert r == {"telegram": "ok", "telegram_public": "skip"}
-    # 장 시작·시황은 공개로 가지만 시황의 보유 현황(account)은 빠진다
-    assert d.send(Signal("MARKET_OPEN", "🔔 장 시작", "한국", "감시 시작"))["telegram_public"] == "ok"
-    r = d.send(Signal("SUMMARY", "📊 시황", "10:00", "▲ 삼성전자  기준선 위 | 2/3", account="\n내 보유\n🔴 속쓰  보유 380주 -31%"))
-    assert r["telegram_public"] == "ok" and "보유 380주" in calls[-2][1] and "보유" not in calls[-1][1]
+                  account="가상 손익 -0.6%  (가상 평단 100.8 → 현재 100.2)")
+    assert D.Dispatcher([pub, acc1]).send(sell) == {"telegram_public": "ok", "telegram_account": "skip"}
+    assert calls[-1][0].startswith("https://api.telegram.org/botPUB/") and "가상 손익 -0.6%" in calls[-1][1] and "저점 100.3" in calls[-1][1]
+    # 시스템·가상매매·성적표도 공용 채널로 간다 (계정 채널은 받지 않는다)
+    for kind, title in (("SYSTEM", "⚪ 시스템"), ("ORDER_FILLED", "✅ 체결"), ("CLOSED", "✅ 손절 완료"),
+                        ("DAILY_REPORT", "📈 오늘 가상매매 성적"), ("BN_ENTRY", "📥 진입"), ("SUMMARY", "📊 시황")):
+        assert D.Dispatcher([pub, acc1]).send(Signal(kind, title, "x", "b", "BBB")) == {"telegram_public": "ok", "telegram_account": "skip"}, kind
+    # 계정 live 사건은 그 계정 채널로만 — 공용 채널과 다른 계정은 받지 않는다
+    live = Signal("ORDER_FILLED", "✅ 체결", "AAA", "SELL 3주 @ 101", "AAA", account_id=1)
+    assert live.key == "ORDER_FILLED:AAA@1"
+    assert D.Dispatcher([pub, acc1]).send(live) == {"telegram_public": "skip", "telegram_account": "ok"}
+    assert calls[-1][0].startswith("https://api.telegram.org/botA1/")
+    assert D.Dispatcher([pub, acc2]).send(live) == {"telegram_public": "skip", "telegram_account": "skip"}
+
+
+def test_telegram_errors_do_not_leak_bot_token(monkeypatch):
+    def down(url, json=None, timeout=None, **kw):
+        raise T.requests.ConnectionError(f"Max retries exceeded with url: {url}")
+    monkeypatch.setattr(T.requests, "post", down)
+    out = T.TelegramChannel("123:SECRET-TOKEN", ["42"], account_id=7).send(sig())
+    assert out.startswith("error: 42:") and "SECRET-TOKEN" not in out and "<bot-token>" in out
 
 
 def test_record_failure_does_not_break_send():
