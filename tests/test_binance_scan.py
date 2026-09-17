@@ -46,6 +46,13 @@ class FakeUniverse:
         return self.current
 
 
+class StoreUniverse(FakeUniverse):
+    """상태(쿨다운·소진 숏 대기)를 DB 에 두는 워커용."""
+    def __init__(self, symbols, store):
+        super().__init__(symbols)
+        self.store = store
+
+
 # -- 유니버스 ----------------------------------------------------------------------
 
 def info(*rows):
@@ -142,6 +149,17 @@ def test_single_pump_alerts_once_with_time_gate_and_cooldown():
     assert [(s.kind, s.symbol) for s in later] == [("SCAN_CRASH", "AAAUSDT")]
 
 
+def test_cooldown_survives_restart():
+    """재시작한 워커가 방금 알린 봉·쿨다운 안의 코인을 다시 알리지 않는다 (2026-09-17 재시작 직후 같은 급락을 다시 보낸 일)."""
+    store = DBM.DB.sqlite().init_schema()
+    bars = {"AAAUSDT": pumped(12)}
+    now = at(bars["AAAUSDT"])
+    first = SC.ScanWorker(StoreUniverse(["AAAUSDT"], store), Recorder(), fetch_bars=lambda s, i, n: bars[s])
+    assert [s.kind for s in first.poll_once(now)] == ["SCAN_SURGE"]
+    again = SC.ScanWorker(StoreUniverse(["AAAUSDT"], store), Recorder(), fetch_bars=lambda s, i, n: bars[s])
+    assert again.poll_once(now + timedelta(seconds=30)) == [] and again.status_lines(now)[0].endswith("24시간 감지 1종목")
+
+
 def test_simultaneous_moves_are_grouped_per_direction(monkeypatch):
     monkeypatch.setattr(SC, "SCAN_MAX_LINES", 2)
     bars = {"AAAUSDT": pumped(12), "BBBUSDT": pumped(25), "CCCUSDT": pumped(15), "DDDUSDT": pumped(-14), "EEEUSDT": hour_bars()}
@@ -187,3 +205,77 @@ def test_start_message_includes_scan_line():
     from alertbot.config import FOLLOW_SPECS
     lines = run_binance.watch_list()
     assert len(lines) == 2 + len(FOLLOW_SPECS) and lines[-1].startswith("급변 감시 1시간봉: 거래대금 상위 30")
+
+
+# -- 급등 소진 숏 (공용 가상 장부) ----------------------------------------------------------
+
+class TraderSpy:
+    def __init__(self):
+        self.calls = []
+
+    def on_entry(self, *args, **kw):
+        self.calls.append((args, kw))
+
+
+
+
+def test_surge_queues_fade_and_shorts_on_first_close_below_ema():
+    store = DBM.DB.sqlite().init_schema()
+    bars = {"AAAUSDT": pumped(12)}
+    spy, rec = TraderSpy(), Recorder()
+    w = SC.ScanWorker(StoreUniverse(["AAAUSDT"], store), rec, fetch_bars=lambda s, i, n: bars[s], trader=spy)
+    sent = w.poll_once(at(bars["AAAUSDT"]))
+    pump = bars["AAAUSDT"][-1]["open_time"]
+    wait = {"AAAUSDT": {"deadline": pump + H1 + 48 * H1, "after": pump}}
+    assert [s.kind for s in sent] == ["SCAN_SURGE"] and "가상 장부가 48시간 안에" in sent[0].body and "EMA50" in sent[0].body
+    assert w.pending == wait and json.loads(DBM.get_settings(store)[SC.FADE_KEY]) == wait
+    assert SC.ScanWorker(StoreUniverse(["AAAUSDT"], store), rec, trader=spy).pending == wait           # 재시작해도 이어진다
+    bars["AAAUSDT"] = path(bars["AAAUSDT"], [11.0], step=H1)                  # EMA50(약 10) 위 — 계속 기다린다
+    w.poll_once(at(bars["AAAUSDT"]))
+    assert spy.calls == [] and "AAAUSDT" in w.pending
+    bars["AAAUSDT"] = path(bars["AAAUSDT"], [9.8], step=H1)                   # EMA50 아래로 마감 → 가상 숏
+    w.poll_once(at(bars["AAAUSDT"]))
+    (args, kw), = spy.calls
+    assert args[:3] == ("SCAN_FADE", "AAAUSDT", "short") and args[4] == 48 and kw == {"notify_skip": False}
+    assert args[3]["stop"] == pytest.approx(9.8 * 1.2) and args[3]["take_profit"] == pytest.approx(9.8 * 0.8)
+    assert args[3]["open_time"] == bars["AAAUSDT"][-1]["open_time"]
+    assert w.pending == {} and json.loads(DBM.get_settings(store)[SC.FADE_KEY]) == {}
+
+
+def test_fade_wait_expires_and_crash_is_not_queued(monkeypatch):
+    monkeypatch.setattr(SC, "SCAN_FADE_WAIT_HOURS", 2)
+    bars = {"AAAUSDT": pumped(12), "BBBUSDT": pumped(-14)}
+    spy = TraderSpy()
+    w = SC.ScanWorker(FakeUniverse(list(bars)), Recorder(), fetch_bars=lambda s, i, n: bars[s], trader=spy)
+    now = at(bars["AAAUSDT"])
+    assert [s.kind for s in w.poll_once(now)] == ["SCAN_SURGE", "SCAN_CRASH"] and list(w.pending) == ["AAAUSDT"]  # 급락은 매매하지 않는다
+    for i in range(1, 4):                                                     # EMA 위에서 3봉 — 2시간 대기가 끝난다
+        bars = {s: path(b, [b[-1]["close"]], step=H1) for s, b in bars.items()}
+        w.poll_once(now + timedelta(hours=i))
+        assert ("AAAUSDT" in w.pending) == (i < 3)
+    assert spy.calls == []
+
+
+def test_pending_coin_is_watched_after_leaving_universe():
+    bars = {"AAAUSDT": pumped(12)}
+    fetched, spy, u = [], TraderSpy(), FakeUniverse(["AAAUSDT"])
+
+    def fetch(symbol, interval, limit):
+        fetched.append(symbol)
+        return bars[symbol]
+
+    w = SC.ScanWorker(u, Recorder(), fetch_bars=fetch, trader=spy)
+    now = at(bars["AAAUSDT"])
+    w.poll_once(now)
+    u.current = []                                                            # 상위 30 에서 빠졌다
+    bars["AAAUSDT"] = path(bars["AAAUSDT"], [9.5], step=H1)
+    assert w.poll_once(now + timedelta(hours=1)) == [] and fetched == ["AAAUSDT", "AAAUSDT"]
+    assert [c[0][:3] for c in spy.calls] == [("SCAN_FADE", "AAAUSDT", "short")] and "AAAUSDT" not in w.status
+
+
+def test_status_line_counts_fade_waits():
+    bars = {"AAAUSDT": pumped(12)}
+    w = SC.ScanWorker(FakeUniverse(list(bars)), Recorder(), fetch_bars=lambda s, i, n: bars[s], trader=TraderSpy())
+    now = at(bars["AAAUSDT"])
+    w.poll_once(now)
+    assert w.status_lines(now)[0].endswith("24시간 감지 1종목 · 숏 대기 1종목")

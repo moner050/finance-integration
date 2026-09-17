@@ -1,4 +1,5 @@
-"""Binance 선물 알림 워커 진입점 — 5분봉 급락 매수 + 상위 봉 추종 알림(급등 추종 롱·급락 추종 숏) + 거래대금 상위 30 코인 급변 감시를 한 프로세스에서.
+"""Binance 선물 알림 워커 진입점 — 5분봉 급락 매수 + 상위 봉 추종 알림(급등 추종 롱·급락 추종 숏) + 거래대금 상위 30 코인 급변 감시
+(급등 소진 숏은 공용 가상 장부 전용)를 한 프로세스에서.
 
 실행:  python run_binance.py   (보통은 python run.py 가 엔진·Binance 워커·백오피스를 함께 띄우고 지킨다)
 감시 심볼은 .env 의 ALERT_BINANCE_SYMBOLS(5분봉 급락 매수, 기본 ETCUSDT) 와 추종 사양별 키
@@ -21,7 +22,7 @@ from alertbot.binance_summary import summary_signal
 from alertbot.binance_trade import AccountTraders, Trader, TraderGroup
 from alertbot.config import (BINANCE_LOG_PATH, BINANCE_POLL_SEC, BINANCE_SIGNAL_TRADE_FILE, BINANCE_SYMBOLS,
                              BINANCE_TRADE_CAPITAL, BINANCE_TRADE_EXCHANGE_LEV, BINANCE_TRADE_MODE, CRASH_H4_KLINES, DATA_DIR,
-                             FOLLOW_KLINES, FOLLOW_SPECS, SCAN_TOP_N, SUMMARY_INTERVAL_MIN, setup_logging)
+                             FOLLOW_KLINES, FOLLOW_SPECS, SCAN_FADE_EMA, SCAN_TOP_N, SUMMARY_INTERVAL_MIN, setup_logging)
 from alertbot.models import Signal
 from alertbot.notify import build_channels
 from alertbot.notify.dispatcher import Dispatcher
@@ -50,7 +51,7 @@ def watch_list() -> list:
     """기동 로그용 — 전략별 감시 심볼. 판정 조건은 코드·README 에 있으니 싣지 않는다."""
     return [f"급락 매수 5분봉: {', '.join(BINANCE_SYMBOLS)}"] + \
            [f"{spec['name']} {spec['label']}: {', '.join(spec['symbols'])}" for spec in FOLLOW_SPECS] + \
-           [f"급변 감시 1시간봉: 거래대금 상위 {SCAN_TOP_N} 코인 (백오피스 '종목' 에서 추가·제외, 관찰 알림)"]
+           [f"급변 감시 1시간봉: 거래대금 상위 {SCAN_TOP_N} 코인 (백오피스 '종목' 에서 추가·제외) · 급등 뒤 EMA{SCAN_FADE_EMA} 이탈 시 가상 숏"]
 
 
 def trade_symbols() -> list:
@@ -135,7 +136,7 @@ def main():
     log.info("Binance 감시 시작\n%s", "\n".join(body))       # 공용 채널로는 보내지 않는다 — 로그(콘솔·파일)에만
     run([CrashWorker(BINANCE_SYMBOLS, notifier, trader=trader, book=book)]
         + [FollowWorker(spec, notifier, trader=trader, book=book) for spec in FOLLOW_SPECS]
-        + [ScanWorker(Universe(store), notifier)], trader, notifier, book, paper, live)
+        + [ScanWorker(Universe(store), notifier, trader=trader)], trader, notifier, book, paper, live)
 
 
 if __name__ == "__main__":

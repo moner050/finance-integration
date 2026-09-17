@@ -67,6 +67,7 @@ SCHEMA = {
              notional     DECIMAL(18,4) NOT NULL,
              leverage     DECIMAL(6,2)  NOT NULL,
              stop         DECIMAL(18,6) NOT NULL,
+             take_profit  DECIMAL(18,6),
              deadline     VARCHAR(32) NOT NULL,
              signal_bar   BIGINT,
              next_funding BIGINT,
@@ -177,7 +178,7 @@ SCHEMA = {
         """CREATE TABLE IF NOT EXISTS alert_binance_positions (
              id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, strategy TEXT NOT NULL, symbol TEXT NOT NULL,
              side TEXT NOT NULL, qty REAL NOT NULL, entry_price REAL NOT NULL, notional REAL NOT NULL,
-             leverage REAL NOT NULL, stop REAL NOT NULL, deadline TEXT NOT NULL, signal_bar INTEGER, next_funding INTEGER,
+             leverage REAL NOT NULL, stop REAL NOT NULL, take_profit REAL, deadline TEXT NOT NULL, signal_bar INTEGER, next_funding INTEGER,
              funding REAL NOT NULL DEFAULT 0, status TEXT NOT NULL, exit_price REAL, exit_reason TEXT, pnl REAL,
              opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT, entry_order_id TEXT, stop_order_id TEXT,
              account_id INTEGER)""",
@@ -214,9 +215,10 @@ EXTRA_COLUMNS = {
         "sqlite": [("auto_trade", "INTEGER NOT NULL DEFAULT 0"), ("auto_amount", "REAL NOT NULL DEFAULT 0"),
                    ("day_trade", "INTEGER NOT NULL DEFAULT 0")],
     },
-    "alert_binance_positions": {                     # live 주문번호 (dry 행은 비어 있다), 계정 (NULL = 공용 가상 장부)
-        "mysql": [("entry_order_id", "VARCHAR(32)"), ("stop_order_id", "VARCHAR(32)"), ("account_id", "BIGINT")],
-        "sqlite": [("entry_order_id", "TEXT"), ("stop_order_id", "TEXT"), ("account_id", "INTEGER")],
+    "alert_binance_positions": {                     # live 주문번호 (dry 행은 비어 있다), 계정 (NULL = 공용 가상 장부), 목표가 (없으면 NULL)
+        "mysql": [("entry_order_id", "VARCHAR(32)"), ("stop_order_id", "VARCHAR(32)"), ("account_id", "BIGINT"),
+                  ("take_profit", "DECIMAL(18,6)")],
+        "sqlite": [("entry_order_id", "TEXT"), ("stop_order_id", "TEXT"), ("account_id", "INTEGER"), ("take_profit", "REAL")],
     },
     "alert_orders": {                                # 계정 (NULL = 공용 가상 장부)
         "mysql": [("account_id", "BIGINT")],
@@ -251,6 +253,8 @@ SETTING_DEFAULTS = {
     "binance_scan_include": "",          # 급변 감시에 더할 코인 (쉼표 목록, 관리자) — alertbot/binance_scan.py
     "binance_scan_exclude": "",          # 급변 감시에서 뺄 코인 (쉼표 목록, 관리자)
     "binance_scan_universe": "{}",       # 워커가 고른 급변 감시 목록 스냅샷 (JSON) — 백오피스 표시용
+    "binance_scan_fade_pending": "{}",   # 급등 소진 숏 대기 목록 {심볼: {deadline, after}} (JSON) — 워커가 쓴다, 재시작해도 이어진다
+    "binance_scan_last_alert": "{}",     # 급변 감시 코인별 마지막 알림 시각 {심볼: ms} (JSON) — 재시작해도 쿨다운이 이어진다
 }
 
 # upsert 는 방언이 다르다. MySQL 은 8.0.19+ 의 행 별칭(AS new) 구문 — VALUES() 는 8.0.20 부터 폐기 예정.
@@ -682,9 +686,9 @@ def dry_positions(db: DB) -> dict:
 
 # -- Binance 가상 포지션 (alertbot/binance_trade.py) --------------------------------
 
-BN_COLUMNS = ("mode", "strategy", "symbol", "side", "qty", "entry_price", "notional", "leverage", "stop", "deadline",
+BN_COLUMNS = ("mode", "strategy", "symbol", "side", "qty", "entry_price", "notional", "leverage", "stop", "take_profit", "deadline",
               "signal_bar", "next_funding", "funding", "status", "opened_at", "entry_order_id", "stop_order_id", "account_id")
-BN_FLOATS = ("qty", "entry_price", "notional", "leverage", "stop", "funding", "exit_price", "pnl")
+BN_FLOATS = ("qty", "entry_price", "notional", "leverage", "stop", "take_profit", "funding", "exit_price", "pnl")
 
 
 def insert_binance_position(db: DB, row: dict) -> int:

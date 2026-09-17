@@ -78,14 +78,14 @@
 <h3>Binance 선물 포지션 <span class="muted" style="font-weight:500">가상 장부{{ ' + 모든 계정 live' if admin else ' + 내 live' }} · 최근 100건</span></h3>
 <div class="panel">
 <table>
-<tr><th>열림 (KST)</th><th>장부</th><th>전략</th><th>심볼</th><th>방향</th><th>수량</th><th>진입가</th><th>명목 USDT</th><th>배율</th><th>손절</th><th>보유 한도 (KST)</th><th>상태</th><th>종료가 / 사유</th><th>펀딩</th><th>손익 USDT</th></tr>
+<tr><th>열림 (KST)</th><th>장부</th><th>전략</th><th>심볼</th><th>방향</th><th>수량</th><th>진입가</th><th>명목 USDT</th><th>배율</th><th>손절 / 목표가</th><th>보유 한도 (KST)</th><th>상태</th><th>종료가 / 사유</th><th>펀딩</th><th>손익 USDT</th></tr>
 {% for p in bn_positions %}
 <tr>
  <td style="white-space:nowrap">{{ p.opened_at|kst }}</td>
  <td>{% if p.account_id %}<span class="badge action">LIVE</span> {{ emails.get(p.account_id, p.account_id) }}{% else %}<span class="badge">가상</span>{% endif %}</td>
  <td>{{ p.strategy }}</td><td><strong>{{ p.symbol }}</strong></td><td>{{ p.side }}</td>
  <td>{{ '{:g}'.format(p.qty) }}</td><td>{{ p.entry_price }}</td><td>{{ '{:,.0f}'.format(p.notional) }}</td><td>{{ '{:g}'.format(p.leverage) }}</td>
- <td>{{ p.stop }}</td><td style="white-space:nowrap">{{ p.deadline|kst }}</td>
+ <td>{{ p.stop }}{% if p.take_profit is not none %} <span class="muted">/ {{ p.take_profit }}</span>{% endif %}</td><td style="white-space:nowrap">{{ p.deadline|kst }}</td>
  <td><span class="badge {{ 'info' if p.status == 'closed' else 'ok-badge' }}">{{ p.status }}</span></td>
  <td>{% if p.exit_price %}{{ p.exit_price }} <span class="muted">{{ p.exit_reason }}</span>{% endif %}</td>
  <td>{{ '{:+.2f}'.format(p.funding) }}</td>

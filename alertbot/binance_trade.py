@@ -6,8 +6,11 @@ TraderGroup 으로 워커들에 넘긴다. 워커는 진입 후보(action) 알�
 
 공통 규칙
   크기   명목가 = 전략 배분 자본 × 전략별 유효 배율(config.BINANCE_TRADE_LEVERAGE). 펀딩 게이트(롱 > 3bp, 숏 < -3bp)면 절반.
-  손절   알림의 손절 참고선, 마크 가격 기준. 종료는 보유 한도(5시간 / 7일 / 20일). 목표 지정가는 없다.
-  한도   전략당 열린 포지션 하나 · 합산 명목 ≤ 자본 합 × 3 · 오늘(KST) 실현손실이 자본 합의 6% 를 넘으면 신규 진입 중단.
+  손절   알림의 손절 참고선, 마크 가격 기준. 종료는 보유 한도(5시간 / 7일 / 20일 / 급등 소진 숏 48시간).
+  목표가 진입 후보가 take_profit 을 주면(급등 소진 숏 SCAN_FADE) 마크가 닿을 때 종료. 나머지 전략은 목표 지정가가 없다.
+  한도   전략·심볼당 열린 포지션 하나(SCAN_FADE 는 전략 전체 동시 8개까지) · 합산 명목 ≤ 자본 합 × 3 ·
+         오늘(KST) 실현손실이 자본 합의 6% 를 넘으면 신규 진입 중단.
+  live 전략 config.BINANCE_LIVE_STRATEGIES 만 계정 live 로 주문한다. SCAN_FADE 는 공용 가상 장부 전용이다.
 dry    공개 시세만 쓴다(키 불필요). 체결 = 마지막 체결가 ± 슬리피지, 마크가 손절에 닿으면 종료.
 live   binance_broker.BinanceFutures 로 시장가 진입 → 즉시 STOP_MARKET 알고 주문(마크 트리거, closePosition) 손절.
        계정의 Binance live 스위치가 켜져 있어야 진입한다. 진입 주문이 3회 연속 실패하면 그 계정 스위치를 끈다.
@@ -27,8 +30,9 @@ import requests
 from . import accounts, db
 from .binance_broker import BinanceFutures, BrokerError
 from .binance_crash import KST, fmt_price
-from .config import (BINANCE_FAPI, BINANCE_TRADE_CAPITAL, BINANCE_TRADE_DAILY_LOSS_PCT, BINANCE_TRADE_FEE,
-                     BINANCE_TRADE_LEVERAGE, BINANCE_TRADE_MAX_TOTAL_LEV, BINANCE_TRADE_SLIP, SURGE_FUNDING_WARN)
+from .config import (BINANCE_FAPI, BINANCE_LIVE_STRATEGIES, BINANCE_TRADE_CAPITAL, BINANCE_TRADE_DAILY_LOSS_PCT, BINANCE_TRADE_FEE,
+                     BINANCE_TRADE_LEVERAGE, BINANCE_TRADE_MAX_OPEN, BINANCE_TRADE_MAX_TOTAL_LEV, BINANCE_TRADE_SLIP,
+                     SURGE_FUNDING_WARN)
 from .models import Signal
 from .notify import account_channels
 from .notify.dispatcher import Dispatcher
@@ -36,7 +40,7 @@ from .notify.dispatcher import Dispatcher
 log = logging.getLogger("binance")
 
 MAX_FAILURES = 3
-REASON = {"stop": "손절 (마크 도달)", "time": "보유 한도", "manual": "거래소에서 직접 종료됨"}
+REASON = {"stop": "손절 (마크 도달)", "tp": "목표가 (마크 도달)", "time": "보유 한도", "manual": "거래소에서 직접 종료됨"}
 
 
 def fetch_price(symbol: str, session=None) -> float:
@@ -74,7 +78,8 @@ class Trader:
         self.account_id = account["id"] if account else None
         self.fetch_price, self.fetch_premium, self.fetch_settled = fetch_price, fetch_premium, fetch_settled_funding
         self.capital = float(account["binance_capital"]) if account else BINANCE_TRADE_CAPITAL
-        self.capital_total = self.capital * len(BINANCE_TRADE_LEVERAGE)
+        # 자본 합 = 전략 수 × 배분 자본. live 는 실제로 주문하는 전략만 센다 (가상 전용 전략이 계정 한도를 키우지 않게)
+        self.capital_total = self.capital * len(BINANCE_LIVE_STRATEGIES if account else BINANCE_TRADE_LEVERAGE)
         self.failures = 0
         self.tag = "[DRY] " if mode == "dry" else "[LIVE] "
         log.info("Binance 자동매매 %s%s: 전략별 자본 %.0f USDT · 유효 배율 %s · 합산 명목 한도 %.0f · 일손실 한도 %.0f",
@@ -82,8 +87,13 @@ class Trader:
                  self.capital_total * BINANCE_TRADE_MAX_TOTAL_LEV, self.capital_total * BINANCE_TRADE_DAILY_LOSS_PCT / 100)
 
     # -- 진입 -------------------------------------------------------------------
-    def on_entry(self, strategy: str, symbol: str, side: str, result: dict, hold_hours: float, now: datetime = None):
-        """진입 후보 알림 하나 → 포지션 행. 막히거나 실패하면 알림을 보내고 None."""
+    def on_entry(self, strategy: str, symbol: str, side: str, result: dict, hold_hours: float, now: datetime = None,
+                 notify_skip: bool = True):
+        """진입 후보 알림 하나 → 포지션 행. 막히거나 실패하면 알림을 보내고 None.
+        result: stop(필수)·take_profit(선택)·open_time·funding. notify_skip=False 면 보류를 로그에만 남긴다 — 급변 감시처럼 같은 코인이
+        보유 중에 다시 감지되거나 동시 보유 상한이 차는 일이 잦은 전략이 공용 채널을 '진입 보류' 로 채우지 않게."""
+        if self.mode == "live" and strategy not in BINANCE_LIVE_STRATEGIES:
+            return None                                         # 가상 장부 전용 전략 — 계정 live 는 주문하지 않는다
         now = now or datetime.now(timezone.utc)
         lev = BINANCE_TRADE_LEVERAGE[strategy]
         notional, note = self.capital * lev, ""
@@ -99,7 +109,10 @@ class Trader:
             except Exception as e:
                 why = f"시세 조회 실패 {e}"
         if why:
-            self._emit("BN_SKIP", "⏸ 진입 보류", symbol, f"{strategy} {symbol} {side.upper()}: {why}")
+            if notify_skip:
+                self._emit("BN_SKIP", "⏸ 진입 보류", symbol, f"{strategy} {symbol} {side.upper()}: {why}")
+            else:
+                log.info("%s%s %s %s 진입 보류: %s", self.tag, strategy, symbol, side.upper(), why)
             return None
         sgn = 1 if side == "long" else -1
         ids = {"entry_order_id": None, "stop_order_id": None}
@@ -113,8 +126,9 @@ class Trader:
                 self._entry_failed(f"{strategy} {symbol} {side.upper()} 진입 주문 실패: {e}", symbol)
                 return None
         deadline = now + timedelta(hours=hold_hours)
+        tp = float(result["take_profit"]) if result.get("take_profit") is not None else None
         row = dict(mode=self.mode, account_id=self.account_id, strategy=strategy, symbol=symbol, side=side, qty=qty, entry_price=price,
-                   notional=round(qty * price, 4), leverage=lev, stop=stop, deadline=deadline.isoformat(timespec="seconds"),
+                   notional=round(qty * price, 4), leverage=lev, stop=stop, take_profit=tp, deadline=deadline.isoformat(timespec="seconds"),
                    signal_bar=result.get("open_time"), next_funding=prem["next_funding"], funding=0.0, status="open",
                    opened_at=now.isoformat(timespec="seconds"), **ids)
         row["id"] = db.insert_binance_position(self.store, row)
@@ -122,7 +136,8 @@ class Trader:
                    f"{strategy} {side.upper()} {qty:g} @ {fmt_price(price)} · 명목 {row['notional']:,.0f} USDT "
                    f"(자본 {self.capital:,.0f} × {lev:g}배){note}\n"
                    f"손절 {fmt_price(stop)} (마크 기준{'' if ids['stop_order_id'] or self.mode == 'dry' else ' — 주문 실패, 재시도 중'}) · "
-                   f"보유 한도 {deadline.astimezone(KST):%m-%d %H:%M} KST 까지")
+                   + (f"목표가 {fmt_price(tp)} · " if tp is not None else "")
+                   + f"보유 한도 {deadline.astimezone(KST):%m-%d %H:%M} KST 까지")
         return row
 
     def _live_open(self, symbol, side, notional, last, stop):
@@ -163,6 +178,9 @@ class Trader:
         opened = self.open_rows()
         if any(p["strategy"] == strategy and p["symbol"] == symbol for p in opened):
             return "같은 전략의 포지션이 열려 있다"
+        max_open = BINANCE_TRADE_MAX_OPEN.get(strategy)
+        if max_open is not None and sum(1 for p in opened if p["strategy"] == strategy) >= max_open:
+            return f"이 전략의 동시 보유 {max_open}개가 다 찼다"
         total, cap = sum(p["notional"] for p in opened) + notional, self.capital_total * BINANCE_TRADE_MAX_TOTAL_LEV
         if total > cap:
             return f"합산 명목 {total:,.0f} > 한도 {cap:,.0f} USDT"
@@ -185,7 +203,8 @@ class Trader:
             deadline = datetime.fromisoformat(p["deadline"]).astimezone(KST)
             out.append(f"📥 {self.tag.strip()} {p['symbol']} {p['strategy']} {'롱' if p['side'] == 'long' else '숏'} "
                        f"{p['qty']:g} @ {fmt_price(p['entry_price'])} · {pnl} · 손절 {fmt_price(p['stop'])} · "
-                       f"한도 {deadline:%m-%d %H:%M} KST")
+                       + (f"목표 {fmt_price(p['take_profit'])} · " if p.get("take_profit") is not None else "")
+                       + f"한도 {deadline:%m-%d %H:%M} KST")
         return out
 
     # -- 감시 -------------------------------------------------------------------
@@ -207,12 +226,14 @@ class Trader:
         return closed
 
     def _check_dry(self, p, prem, now):
-        hit = prem["mark"] <= p["stop"] if p["side"] == "long" else prem["mark"] >= p["stop"]
-        if not hit and now < datetime.fromisoformat(p["deadline"]):
+        long, mark, tp = p["side"] == "long", prem["mark"], p.get("take_profit")
+        hit = mark <= p["stop"] if long else mark >= p["stop"]
+        reached = tp is not None and (mark >= tp if long else mark <= tp)
+        if not hit and not reached and now < datetime.fromisoformat(p["deadline"]):
             return None
-        sgn = 1 if p["side"] == "long" else -1
+        sgn = 1 if long else -1
         price = self.fetch_price(p["symbol"]) * (1 - sgn * BINANCE_TRADE_SLIP.get(p["symbol"], 0.0005))
-        return self._record_close(p, price, "stop" if hit else "time", now)
+        return self._record_close(p, price, "stop" if hit else "tp" if reached else "time", now)
 
     def _check_live(self, p, prem, now):
         b, symbol, side = self.broker, p["symbol"], p["side"]

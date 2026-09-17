@@ -108,7 +108,7 @@ def test_funding_settles_once_per_period(store):
 def test_daily_loss_and_total_notional_block_entries(store, monkeypatch):
     t, q, rec = make(store)
     t.on_entry("CRASH_BUY", "ETCUSDT", "long", RES, 5, now=T)
-    q["mark"] = q["price"] = 85.0                                        # -15% 손절 → 자본 합 4,000 의 6% 넘는 손실
+    q["mark"] = q["price"] = 85.0                                        # -15% 손절 → 자본 합 5,000 (전략 5개) 의 6% 넘는 손실
     t.poll(T + timedelta(minutes=1))
     assert t.on_entry("SURGE_ENTRY", "BTCUSDT", "long", RES, 168, now=T + timedelta(hours=1)) is None
     assert "실현손익" in rec.sent[-1].body
@@ -153,3 +153,31 @@ def test_workers_hand_entries_to_trader():
     kinds = [s.kind for s in rec.sent]
     assert kinds.count("CRASH_WATCH_1D") == 1 and kinds.count("CRASH_SHORT_1D") == 1
     assert [c[:3] for c in st.calls[1:]] == [("CRASH_SHORT_1D", "ETCUSDT", "short")] and st.calls[1][4] == 480
+
+
+def test_take_profit_on_mark_closes_scan_fade_short(store):
+    t, q, rec = make(store)
+    res = dict(RES, stop=120.0, take_profit=80.0, funding=None)
+    p = t.on_entry("SCAN_FADE", "LSKUSDT", "short", res, 48, now=T, notify_skip=False)
+    assert abs(p["notional"] - CAP * 0.125) < 1 and p["take_profit"] == 80.0 and "목표가 80.000" in rec.sent[-1].body
+    q["mark"], q["price"] = 80.5, 79.0                                   # 마크가 목표가 위 — 유지
+    assert t.poll(T + timedelta(hours=1)) == []
+    q["mark"], q["price"] = 79.9, 79.8                                   # 마크 목표가 도달 → 최종가 + 슬리피지로 종료
+    closed = t.poll(T + timedelta(hours=2))
+    assert closed[0]["exit_reason"] == "tp" and closed[0]["pnl"] > 0 and "목표가 (마크 도달)" in rec.sent[-1].body
+    assert db.binance_positions(store)[0]["take_profit"] == 80.0
+
+
+def test_scan_fade_cap_and_quiet_skips(store, monkeypatch):
+    monkeypatch.setitem(BT.BINANCE_TRADE_MAX_OPEN, "SCAN_FADE", 2)
+    t, q, rec = make(store)
+    res = dict(RES, stop=120.0, take_profit=80.0, funding=None)
+    for s in ("AAAUSDT", "BBBUSDT"):
+        assert t.on_entry("SCAN_FADE", s, "short", res, 48, now=T, notify_skip=False) is not None
+    n = len(rec.sent)
+    assert t.on_entry("SCAN_FADE", "CCCUSDT", "short", res, 48, now=T, notify_skip=False) is None     # 동시 보유 상한
+    assert t.on_entry("SCAN_FADE", "AAAUSDT", "short", res, 48, now=T, notify_skip=False) is None     # 같은 코인
+    assert len(rec.sent) == n                                                                         # 보류는 로그에만
+    assert t.on_entry("SCAN_FADE", "CCCUSDT", "short", res, 48, now=T) is None
+    assert rec.sent[-1].kind == "BN_SKIP" and "2개가 다 찼다" in rec.sent[-1].body
+    assert t.on_entry("CRASH_BUY", "ETCUSDT", "long", RES, 5, now=T) is not None                      # 다른 전략은 상한과 무관

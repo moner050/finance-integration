@@ -211,3 +211,11 @@ def test_account_traders_follow_switches_and_keep_open_positions(store, monkeypa
     assert live.refresh() == [trader]
     db.update_binance_position(store, db.binance_positions(store)[0]["id"], status="closed")
     assert live.refresh() == []                                                   # 포지션이 닫히면 치운다
+
+
+def test_live_skips_paper_only_strategies(store):
+    t, fb, rec, q = make(store)
+    assert t.capital_total == 1000.0 * 4                                  # live 한도는 실제로 주문하는 전략만 센다
+    res = dict(RES, stop=120.0, take_profit=80.0)
+    assert t.on_entry("SCAN_FADE", "LSKUSDT", "short", res, 48, now=T, notify_skip=False) is None
+    assert fb.orders == [] and rec.sent == [] and db.binance_positions(store) == []

@@ -302,7 +302,7 @@ FOLLOW_SPECS = [
      "regime": "bear", "kinds": ("CRASH_WATCH_1D", "CRASH_SHORT_1D")},
 ]
 
-# 급변 감시 (alertbot/binance_scan.py) — 거래대금 상위 코인의 급등·급락 감지 알림 (관찰, 매매 없음). 같은 워커 프로세스가 돌린다.
+# 급변 감시 (alertbot/binance_scan.py) — 거래대금 상위 코인의 급등·급락 감지 알림. 급등은 공용 가상 장부의 소진 숏(아래)으로 이어진다. 같은 워커 프로세스가 돌린다.
 # 2026-05-17~09-17 4개월 분석(보고서 「최근 4개월 코인 신호 재검증」): 하루 알림 중앙값 10건에 맞춘 설계 가운데
 # 큰 움직임(24시간 극값 대비 +15% / −12%)을 가장 많이 잡은 조합이다. 알림이 많으면 SCAN_ATR_MULT 를 올린다 (최근 두 달은 하루 중앙 13건).
 SCAN_TOP_N = 30                # 직전 24시간 거래대금 상위 N 개 USDT 무기한 코인 (백오피스 '종목' 에서 추가·제외)
@@ -314,6 +314,16 @@ SCAN_BASE_ATR_BARS = 720       # 기준 ATR = 직전 30일 ATR14% 중앙값. 7�
 SCAN_ATR_MULT = 10.3           # 급변 문턱 (기준 ATR 배수) — 4개월 하루 알림 중앙값 10건
 SCAN_KLINES = 1000             # 코인당 받는 1시간봉 (기준 ATR 30일 + 여유, weight 5)
 SCAN_MAX_LINES = 10            # 한 알림에 싣는 코인 수. 나머지는 '외 N종목'
+# 급등 소진 숏 SCAN_FADE — 공용 가상 장부 전용, 실제 주문 없음 (BINANCE_LIVE_STRATEGIES 에 없다).
+# 2026-09-17 4개월 분석(보고서 「급등 코인 소진 숏」): 급등 감지 코인은 72시간 중앙 −11.6% 흘러내렸지만 감지 직후 24시간 안에 중앙 +15% 더 올라
+# 곧바로 숏은 손절에 걸렸다. 1시간 종가가 EMA50 아래로 꺾인 뒤의 숏이 설정 주변(EMA20·50, 대기 24·48h, 손절 15~20%, 보유 48~72h)에서 고르게 이익 —
+# 최종안 405건 건당 +1.68% (수수료·펀딩 뒤)·승률 59.5%·최대 낙폭 −14.7%. 설정 선택에 전 기간을 봐서, 전진 검증 기대치는 건당 +0.66~1.15% 다.
+SCAN_FADE_EMA = 50             # 감지 뒤 1시간봉 종가가 이 EMA 아래로 마감하면 진입. EMA10 은 급등 중의 짧은 눌림에 걸려 손실
+SCAN_FADE_WAIT_HOURS = 48      # 감지 뒤 이 시간 안에 안 꺾이면 포기 (12시간은 짧았다)
+SCAN_FADE_STOP_PCT = 20.0      # 손절: 진입 기준가 +20% (마크 가격)
+SCAN_FADE_TP_PCT = 20.0        # 목표가: 진입 기준가 −20% (마크 가격)
+SCAN_FADE_HOLD_HOURS = 48      # 보유 한도
+SCAN_FADE_MAX_OPEN = 8         # 이 전략 동시 보유 상한 (같은 코인은 하나). 크기는 BINANCE_TRADE_LEVERAGE 의 1/8
 
 
 # Binance 자동매매 (alertbot/binance_trade.py) — 공용 가상 장부는 늘 돈다 (공개 시세로 가상 체결, 키 불필요).
@@ -325,8 +335,12 @@ if BINANCE_TRADE_MODE not in ("off", "dry", "live"):
     raise SystemExit(f"ALERT_BINANCE_TRADE_MODE 는 off|dry|live 중 하나: {BINANCE_TRADE_MODE}")
 BINANCE_TRADE_EXCHANGE_LEV = 3         # live 심볼 배율 (격리·헤지 모드). 청산 거리 33% — 가장 넓은 손절(일봉 숏 +25%)보다 밖
 BINANCE_TRADE_CAPITAL = float(_CFG.get("ALERT_BINANCE_TRADE_CAPITAL") or 1000)   # 가상 장부의 전략별 배분 자본 (USDT). live 는 계정별 자본
-# 전략(진입 신호 종류)별 유효 배율 = 명목가 ÷ 배분 자본. 레버리지 분석의 시작값 — 최대는 3 / 1.5 / 2 / 1
-BINANCE_TRADE_LEVERAGE = {"CRASH_BUY": 2.0, "SURGE_ENTRY": 1.0, "SURGE_ENTRY_1D": 1.5, "CRASH_SHORT_1D": 0.5}
+# 전략(진입 신호 종류)별 유효 배율 = 명목가 ÷ 배분 자본. 레버리지 분석의 시작값 — 최대는 3 / 1.5 / 2 / 1.
+# SCAN_FADE 는 포지션당 1/8 (동시 SCAN_FADE_MAX_OPEN 개를 다 열면 자본 1배)
+BINANCE_TRADE_LEVERAGE = {"CRASH_BUY": 2.0, "SURGE_ENTRY": 1.0, "SURGE_ENTRY_1D": 1.5, "CRASH_SHORT_1D": 0.5, "SCAN_FADE": 0.125}
+# 계정 live 로 실제 주문을 내는 전략. 나머지(SCAN_FADE)는 공용 가상 장부에서만 돌고, live 한도(자본 합)에도 넣지 않는다
+BINANCE_LIVE_STRATEGIES = ("CRASH_BUY", "SURGE_ENTRY", "SURGE_ENTRY_1D", "CRASH_SHORT_1D")
+BINANCE_TRADE_MAX_OPEN = {"SCAN_FADE": SCAN_FADE_MAX_OPEN}    # 전략별 동시 보유 상한 (없는 전략은 심볼마다 하나)
 BINANCE_TRADE_FEE = 0.0005                                    # 테이커 편도
 BINANCE_TRADE_SLIP = {"ETCUSDT": 0.0005, "BTCUSDT": 0.0002}   # dry 체결 슬리피지 편도 (없는 심볼은 0.0005)
 BINANCE_TRADE_MAX_TOTAL_LEV = 3.0                             # 합산 명목 ≤ 자본 합 × 3

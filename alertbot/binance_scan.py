@@ -1,4 +1,4 @@
-"""Binance 무기한 선물 급변 감시 — 거래대금 상위 코인의 급등·급락 감지 알림 (관찰, 매매 신호 아님).
+"""Binance 무기한 선물 급변 감시 — 거래대금 상위 코인의 급등·급락 감지 알림과 급등 소진 숏(공용 가상 장부 전용).
 
 2026-09-16 LSK·SYN·BR·BULLA 같은 알트 급등을 ETC·BTC 만 보던 워커가 하나도 알리지 못해 추가했다. run_binance.py 가 다른 워커와 같은 프로세스에서 돌린다.
 
@@ -11,7 +11,12 @@
 근거      2026-05-17~09-17 4개월 분석 (보고서 「최근 4개월 코인 신호 재검증」, README 3.5):
           - 1시간봉·4시간 창·기준ATR 30일·종목 단위 쿨다운이 하루 알림 중앙값 10건 기준에서 큰 움직임(24시간 극값 대비 +15%/−12%)을 가장 많이 잡았다.
             1시간 안 포착률은 기준ATR 7일·방향별 쿨다운이 조금 높았지만, 한 주 내내 들썩인 코인(9-16 LSK)의 반복 급등을 놓쳤다.
-          - 감지 뒤 추종·반전·페이드 진입 8개 조합은 수수료·펀딩 뒤 우위가 검증되지 않아 매매에는 연결하지 않는다.
+          - 감지 뒤 곧바로 추종·반전·페이드하는 진입 8개 조합은 수수료·펀딩 뒤 우위가 검증되지 않았다.
+소진 숏    2026-09-17 4개월 분석(보고서 「급등 코인 소진 숏」): 급등 감지 코인은 72시간 중앙 −11.6% 흘러내렸지만 감지 직후 더 오르는 일이 많아,
+          감지 뒤 SCAN_FADE_WAIT_HOURS 안에 1시간봉 종가가 EMA(SCAN_FADE_EMA) 아래로 마감하는 첫 봉에서 숏을 연다 (전략 SCAN_FADE).
+          손절·목표가는 그 종가 기준 ±SCAN_FADE_STOP_PCT / SCAN_FADE_TP_PCT % (마크), 보유 SCAN_FADE_HOLD_HOURS 시간. 공용 가상 장부만 — 계정 live 는 주문하지 않는다.
+          대기 목록은 alert_settings binance_scan_fade_pending 에 두어 재시작해도 이어지고, 대기 코인은 상위 30 에서 빠져도 계속 본다.
+          급락 감지는 매매하지 않는다 (급락 뒤 숏·롱 모두 표본 밖에서 우위가 없었다).
 """
 
 import json
@@ -25,8 +30,9 @@ import requests
 from . import db
 from .binance_crash import KST, fetch_klines, fmt_price
 from .binance_follow import base_atr_pct
-from .config import (BINANCE_FAPI, SCAN_ATR_MULT, SCAN_BASE_ATR_BARS, SCAN_EXCLUDE, SCAN_INTERVAL, SCAN_KLINES, SCAN_MAX_LINES,
-                     SCAN_REFRESH_MIN, SCAN_TOP_N, SCAN_WINDOW_BARS)
+from .config import (BINANCE_FAPI, SCAN_ATR_MULT, SCAN_BASE_ATR_BARS, SCAN_EXCLUDE, SCAN_FADE_EMA, SCAN_FADE_HOLD_HOURS, SCAN_FADE_STOP_PCT,
+                     SCAN_FADE_TP_PCT, SCAN_FADE_WAIT_HOURS, SCAN_INTERVAL, SCAN_KLINES, SCAN_MAX_LINES, SCAN_REFRESH_MIN, SCAN_TOP_N,
+                     SCAN_WINDOW_BARS)
 from .models import Signal
 
 log = logging.getLogger("binance")
@@ -34,6 +40,9 @@ log = logging.getLogger("binance")
 STEP_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
 INTERVAL_TEXT = {"15m": "15분봉", "1h": "1시간봉", "4h": "4시간봉"}
 INCLUDE_KEY, EXCLUDE_KEY, SNAPSHOT_KEY = "binance_scan_include", "binance_scan_exclude", "binance_scan_universe"
+FADE_KEY = "binance_scan_fade_pending"
+ALERT_KEY = "binance_scan_last_alert"
+FADE_STRATEGY = "SCAN_FADE"
 
 
 def window_text() -> str:
@@ -156,8 +165,19 @@ def move(bars: list, base_bars: int = SCAN_BASE_ATR_BARS, window: int = SCAN_WIN
             "up_mult": up / base, "down_mult": down / base, "rvol": sig["volume"] / vol_med if vol_med > 0 else 0.0}
 
 
-def build_signal(side: str, rows: list, ranks: dict) -> Signal:
-    """rows = [(symbol, 지표)] 배수 내림차순. 여러 코인이면 한 알림에 SCAN_MAX_LINES 줄까지."""
+def ema(values: list, period: int) -> float:
+    """지수이동평균의 마지막 값. indicators.compute_ema 와 같은 식이지만 반올림하지 않는다 — 1센트 미만 코인도 종가와 비교해야 한다.
+    표본이 period 보다 적으면 0."""
+    if len(values) < period:
+        return 0.0
+    k, e = 2 / (period + 1), sum(values[:period]) / period
+    for v in values[period:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def build_signal(side: str, rows: list, ranks: dict, fade: bool = False) -> Signal:
+    """rows = [(symbol, 지표)] 배수 내림차순. 여러 코인이면 한 알림에 SCAN_MAX_LINES 줄까지. fade 면 급등 알림에 가상 장부 소진 숏 규칙을 적는다."""
     up = side == "up"
     lines = []
     for symbol, m in rows[:SCAN_MAX_LINES]:
@@ -168,8 +188,11 @@ def build_signal(side: str, rows: list, ranks: dict) -> Signal:
                      + (f"거래대금 {rank}위" if rank else "추가 코인"))
     if len(rows) > SCAN_MAX_LINES:
         lines.append(f"외 {len(rows) - SCAN_MAX_LINES}종목")
+    rule = (f"가상 장부가 {SCAN_FADE_WAIT_HOURS}시간 안에 1시간 종가가 EMA{SCAN_FADE_EMA} 아래로 마감하면 숏 "
+            f"(손절 +{SCAN_FADE_STOP_PCT:g}% · 목표가 −{SCAN_FADE_TP_PCT:g}% · {SCAN_FADE_HOLD_HOURS}시간, 실제 주문 없음)" if up and fade
+            else "관찰 알림, 매매 신호 아님 (추격·역추세 진입은 4개월 검증에서 우위가 없었다)")
     lines.append(f"기준: {INTERVAL_TEXT[SCAN_INTERVAL]} 종가가 직전 {window_text()} {'저점' if up else '고점'} 대비 기준ATR × {SCAN_ATR_MULT:g} 이상 "
-                 f"— 관찰 알림, 매매 신호 아님 (추격·역추세 진입은 4개월 검증에서 우위가 없었다)")
+                 f"— {rule}")
     single = len(rows) == 1
     label = f"{rows[0][0]} {INTERVAL_TEXT[SCAN_INTERVAL]}" if single else f"코인 {len(rows)}종목 {INTERVAL_TEXT[SCAN_INTERVAL]}"
     return Signal("SCAN_SURGE" if up else "SCAN_CRASH", "🚀 급등 감지" if up else "💥 급락 감지", label, "\n".join(lines),
@@ -177,13 +200,18 @@ def build_signal(side: str, rows: list, ranks: dict) -> Signal:
 
 
 class ScanWorker:
-    """거래대금 상위 코인을 완성봉마다 한 번씩 본다. 새 봉이 아직 안 생긴 코인은 조회하지 않는다 (사이클 20초, 봉 1시간)."""
+    """거래대금 상위 코인을 완성봉마다 한 번씩 본다. 새 봉이 아직 안 생긴 코인은 조회하지 않는다 (사이클 20초, 봉 1시간).
+    trader 가 있으면 급등 감지 코인을 소진 숏 대기 목록에 올리고, 대기 코인의 새 완성봉마다 EMA 이탈을 확인해 가상 장부에 숏을 연다."""
 
-    def __init__(self, universe: Universe, notifier, fetch_bars=fetch_klines):
-        self.universe, self.notify, self.fetch_bars = universe, notifier, fetch_bars
+    def __init__(self, universe: Universe, notifier, fetch_bars=fetch_klines, trader=None):
+        self.universe, self.notify, self.fetch_bars, self.trader = universe, notifier, fetch_bars, trader
+        self.store = getattr(universe, "store", None)
         self.last_bar = {}          # symbol -> 마지막으로 판정한 완성봉 open_time
-        self.last_alert = {}        # symbol -> 마지막 알림 시각 (방향과 무관한 쿨다운)
+        # symbol -> 마지막 알림 시각 (방향과 무관한 쿨다운, 24시간 감지 수). DB 에 두어 재시작 직후 같은 봉·쿨다운 안의 코인을 다시 알리지 않는다
+        self.last_alert = {s: datetime.fromtimestamp(ms / 1000, tz=timezone.utc) for s, ms in self._load(ALERT_KEY).items()}
         self.status = {}            # symbol -> 마지막 완성봉 지표 (시황 요약용)
+        # symbol -> {deadline: 대기 끝 ms, after: 감지 봉 open_time} (소진 숏 대기)
+        self.pending = {s: {"deadline": int(p["deadline"]), "after": int(p["after"])} for s, p in self._load(FADE_KEY).items()}
 
     def poll_once(self, now: datetime = None) -> list:
         now = now or datetime.now(timezone.utc)
@@ -191,7 +219,8 @@ class ScanWorker:
         cooldown = timedelta(milliseconds=SCAN_WINDOW_BARS * step)
         symbols = self.universe.symbols(now)
         hits = {"up": [], "down": []}
-        for symbol in symbols:
+        changed = self._expire(now_ms, step)
+        for symbol in list(symbols) + [s for s in self.pending if s not in symbols]:     # 대기 코인은 상위 30 에서 빠져도 본다
             last = self.last_bar.get(symbol)
             if last is not None and now_ms < last + 2 * step + 3000:       # 다음 봉이 아직 안 끝났다
                 continue
@@ -200,6 +229,10 @@ class ScanWorker:
                 if not bars or bars[-1]["open_time"] == last:
                     continue
                 self.last_bar[symbol] = bars[-1]["open_time"]
+                if symbol in self.pending:
+                    changed |= self._check_fade(symbol, bars, now)
+                if symbol not in symbols:           # 대기 때문에만 본 코인은 감지·시황에 넣지 않는다
+                    continue
                 m = move(bars)
                 self.status[symbol] = m
                 if m is None:
@@ -219,12 +252,70 @@ class ScanWorker:
             rows = sorted(hits[side], key=lambda r: r[1][f"{side}_mult"], reverse=True)
             if not rows:
                 continue
-            signal = build_signal(side, rows, self.universe.ranks)
+            signal = build_signal(side, rows, self.universe.ranks, fade=self.trader is not None)
             self.notify.send(signal)
-            for symbol, _ in rows:
+            for symbol, m in rows:
                 self.last_alert[symbol] = now
+                if side == "up" and self.trader is not None:     # 같은 코인이 다시 급등하면 대기를 새로 잡는다
+                    self.pending[symbol] = {"deadline": m["open_time"] + step + SCAN_FADE_WAIT_HOURS * 3_600_000,
+                                            "after": m["open_time"]}
+                    changed = True
             sent.append(signal)
+        if sent:
+            self._save(ALERT_KEY, {s: int(t.timestamp() * 1000) for s, t in self.last_alert.items() if now - t < timedelta(hours=24)})
+        if changed:
+            self._save(FADE_KEY, self.pending)
         return sent
+
+    # -- 급등 소진 숏 ----------------------------------------------------------------
+    def _check_fade(self, symbol: str, bars: list, now: datetime) -> bool:
+        """대기 코인의 새 완성봉 — 대기 시간이 지났으면 거두고, 종가가 EMA 아래로 마감했으면 가상 장부에 숏을 연다. 대기 목록이 바뀌면 True.
+        첫 이탈 봉에서 대기를 끝낸다 — 같은 코인 보유 중·동시 보유 상한으로 보류돼도 다시 기다리지 않는다 (분석의 규칙과 같다)."""
+        p, last = self.pending[symbol], bars[-1]
+        if last["open_time"] <= p["after"]:
+            return False
+        if last["open_time"] + STEP_MS[SCAN_INTERVAL] > p["deadline"]:
+            del self.pending[symbol]
+            log.info("%s 소진 숏 대기 만료 — %d시간 안에 EMA%d 아래로 꺾이지 않았다", symbol, SCAN_FADE_WAIT_HOURS, SCAN_FADE_EMA)
+            return True
+        line = ema([b["close"] for b in bars], SCAN_FADE_EMA)
+        if line <= 0 or last["close"] >= line:
+            return False
+        del self.pending[symbol]
+        price = last["close"]
+        result = {"stop": price * (1 + SCAN_FADE_STOP_PCT / 100), "take_profit": price * (1 - SCAN_FADE_TP_PCT / 100),
+                  "open_time": last["open_time"], "funding": None}
+        log.info("%s 종가 %s 가 EMA%d %s 아래 — 소진 숏 진입", symbol, fmt_price(price), SCAN_FADE_EMA, fmt_price(line))
+        try:
+            self.trader.on_entry(FADE_STRATEGY, symbol, "short", result, SCAN_FADE_HOLD_HOURS, now, notify_skip=False)
+        except Exception as e:                  # 가상 장부 오류가 감시를 멈추면 안 된다
+            log.warning("%s 소진 숏 진입 처리 실패: %s", symbol, e)
+        return True
+
+    def _expire(self, now_ms: int, step: int) -> bool:
+        """조회가 계속 실패해 대기 끝을 두 봉 넘게 지난 코인을 거둔다."""
+        stale = [s for s, p in self.pending.items() if now_ms > p["deadline"] + 2 * step]
+        for s in stale:
+            del self.pending[s]
+        return bool(stale)
+
+    def _load(self, key: str) -> dict:
+        """alert_settings 의 JSON 상태 (쿨다운·소진 숏 대기). 못 읽으면 빈 상태로 시작한다 — 감지는 계속된다."""
+        if self.store is None:
+            return {}
+        try:
+            return json.loads(db.get_settings(self.store).get(key) or "{}")
+        except Exception as e:
+            log.warning("급변 감시 상태 복원 실패 (%s): %s", key, e)
+            return {}
+
+    def _save(self, key: str, value: dict):
+        if self.store is None:
+            return
+        try:
+            db.set_setting(self.store, key, json.dumps(value))
+        except Exception as e:
+            log.warning("급변 감시 상태 저장 실패 (%s): %s", key, e)
 
     def status_lines(self, now: datetime = None) -> list:
         """시황 요약 한 줄 — 감시 수, 가장 크게 오른·내린 코인, 24시간 동안 알린 코인 수. 이름 부분은 고정이라 백오피스 시계열의 한 행이 된다."""
@@ -237,5 +328,6 @@ class ScanWorker:
         dn_sym = max(seen, key=lambda s: seen[s]["down_mult"])
         u, d = seen[up_sym], seen[dn_sym]
         recent = sum(1 for t in self.last_alert.values() if now - t < timedelta(hours=24))
+        fade = f" · 숏 대기 {len(self.pending)}종목" if self.trader is not None else ""
         return [f"{head}  {len(self.universe.current)}종목 · 최대 상승 {up_sym} {u['up']:+.1f}% ({max(u['up_mult'], 0):.1f}/{SCAN_ATR_MULT:g}배) · "
-                f"최대 하락 {dn_sym} {-d['down']:+.1f}% ({max(d['down_mult'], 0):.1f}/{SCAN_ATR_MULT:g}배) | 24시간 감지 {recent}종목"]
+                f"최대 하락 {dn_sym} {-d['down']:+.1f}% ({max(d['down_mult'], 0):.1f}/{SCAN_ATR_MULT:g}배) | 24시간 감지 {recent}종목{fade}"]
