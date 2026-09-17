@@ -100,7 +100,7 @@ def test_capital_and_books_are_per_account(store):
     assert p1["notional"] == 200.0 and p2["notional"] == 4000.0                # 자본 × 유효 2배
     assert small.open_rows()[0]["id"] == p1["id"] and big.open_rows()[0]["id"] == p2["id"]
     assert small.on_entry("CRASH_BUY", "ETCUSDT", "long", RES, 5, now=T) is None     # 자기 장부의 같은 전략만 막는다
-    assert "× 2배" in rec2.sent[-1].body and "자본 2,000" in rec2.sent[-1].body
+    assert "명목 4,000 USDT" in rec2.sent[-1].body                                # 계정 자본 2,000 × 유효 2배
 
 
 def test_stop_fill_manual_close_and_deadline(store):
@@ -123,7 +123,7 @@ def test_stop_fill_manual_close_and_deadline(store):
     assert closed[0]["exit_reason"] == "time" and fb.orders[-1] == ("close", "BTCUSDT", "long", p3["qty"])
     assert fb.stops[p3["stop_order_id"]]["active"] is False and closed[0]["pnl"] > 0
     report = t.daily_report((T + timedelta(hours=480)).astimezone(KST).strftime("%Y-%m-%d"))
-    assert report.startswith("종료 1건: 1익절") and "SURGE_ENTRY_1D" in report
+    assert report.startswith("종료 1건: 1익절") and "BTCUSDT 일봉 추종 롱" in report
 
 
 def test_stop_failure_is_retried_and_open_failures_disable(store):

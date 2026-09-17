@@ -20,7 +20,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from statistics import median
 
-from .binance_crash import KST, atr_pct_series, fetch_funding, fetch_klines, fmt_price
+from .binance_crash import atr_pct_series, fetch_funding, fetch_klines, fmt_price
 from .config import FOLLOW_KLINES, SURGE_FUNDING_WARN
 from .indicators import compute_ema, compute_rsi
 from .models import Signal
@@ -71,15 +71,6 @@ def stop_line(spec: dict, close: float, pull: float, base: float) -> float:
     kind, v = spec["stop"]
     sgn = 1 if spec["side"] == "long" else -1
     return pull * (1 - sgn * v * base / 100) if kind == "pull_atr" else close * (1 - sgn * v / 100)
-
-
-def stop_text(spec: dict) -> str:
-    """메시지·시작 알림용 손절 규칙 설명."""
-    kind, v = spec["stop"]
-    long = spec["side"] == "long"
-    if kind == "pull_atr":
-        return f"{'눌림 저점' if long else '반등 고점'} {'-' if long else '+'}{v:g} 기준ATR"
-    return f"진입 {'-' if long else '+'}{v:g}%"
 
 
 def evaluate(bars: list, spec: dict, regime_bars: list = None, funding=None):
@@ -137,39 +128,29 @@ def evaluate(bars: list, spec: dict, regime_bars: list = None, funding=None):
 
 
 def build_signal(symbol: str, r: dict, spec: dict) -> Signal:
+    """주식 알림처럼 짧게: 현재가(룩백 저점/고점 대비) · 진입 근거(눌림 저점 뒤 EMA9 재돌파)·RSI·국면 · 손절·보유 한도.
+    관찰 단계는 기다리는 조건만 싣는다. 펀딩이 과열(롱)·과밀(숏)이면 경고 줄을 붙인다. 목표 지정가는 없다."""
     long = r["side"] == "long"
-    when = datetime.fromtimestamp(r["open_time"] / 1000, tz=timezone.utc).astimezone(KST)
-    lines = [f"{fmt_price(r['close'])} ({when:%m-%d %H:%M} KST 봉) · {spec['lookback']}봉 {'저점' if long else '고점'} "
-             f"{fmt_price(r['ref'])} 대비 {'+' if long else '-'}{r['move']:.2f}% (기준ATR {r['mult']:.1f}배) · "
-             f"RSI14 {r['rsi']:.1f} · RVOL {r['rvol']:.1f}배"]
+    lines = [f"현재가 {fmt_price(r['close'])} ({spec['lookback']}봉 {'저점' if long else '고점'} 대비 {'+' if long else '-'}{r['move']:.2f}%)"]
+    reg = ("강세" if r["bull"] else "약세") if "bull" in r else "국면 불명"
+    turn = "재돌파" if long else "재이탈"
     if r["stage"] == "entry":
-        pull = (r["pull"] / r["close"] - 1) * 100
-        lines.append(f"{'급등' if long else '급락'} 뒤 {r['ago']}봉 만에 EMA9 {fmt_price(r['ema9'])} "
-                     f"{'재돌파' if long else '재이탈'} · {'눌림 저점' if long else '반등 고점'} {fmt_price(r['pull'])} ({pull:+.2f}%)")
+        lines.append(f"{'눌림 저점' if long else '반등 고점'} {fmt_price(r['pull'])} 뒤 EMA9 {turn} · RSI {r['rsi']:.1f} · {reg}")
+        kind, v = spec["stop"]
+        pct = f" ({'-' if long else '+'}{v:g}%)" if kind == "pct" else ""
+        hold_days = spec["hold_bars"] * BAR_HOURS[spec["interval"]] / 24
+        lines.append(f"손절 {fmt_price(r['stop'])}{pct} · {hold_days:g}일 보유")
     else:
-        lines.append(f"EMA9 {fmt_price(r['ema9'])} · {'눌림 뒤 재돌파를' if long else '반등 뒤 재이탈을'} "
+        lines.append(f"RSI {r['rsi']:.1f} · {reg} — {'눌림' if long else '반등'} 뒤 EMA9 {turn}{'를' if long else '을'} "
                      f"{spec['reentry_bars']}봉 안에 기다린다")
-    if "bull" in r:
-        reg = f"국면 {'강세' if r['bull'] else '약세'} (일봉 {fmt_price(r['daily_close'])} / EMA200 {fmt_price(r['ema200'])})"
-    else:
-        reg = "국면 불명 (일봉 부족)"
-    if r.get("funding") is not None:
-        reg += f" · 펀딩 {r['funding'] * 100:+.4f}%/8h"
-        if long and r["funding"] > SURGE_FUNDING_WARN:
-            reg += " ⚠ 롱 과열 — 크기 축소"
-        elif not long and r["funding"] < -SURGE_FUNDING_WARN:
-            reg += " ⚠ 숏 과밀 — 크기 축소"
-    lines.append(reg)
-    hold_days = spec["hold_bars"] * BAR_HOURS[spec["interval"]] / 24
-    if r["stage"] == "entry":
-        lines.append(f"참고: 손절 {fmt_price(r['stop'])} ({stop_text(spec)}) · 보유 한도 {hold_days:g}일 · 목표 지정가 없음")
-    else:
-        lines.append(f"참고: 진입 후보가 뜨면 손절 = {stop_text(spec)} (지금 기준ATR {r['base']:.2f}%) · 보유 한도 {hold_days:g}일")
+    fund = r.get("funding")
+    if fund is not None and (fund > SURGE_FUNDING_WARN if long else fund < -SURGE_FUNDING_WARN):
+        lines.append(f"⚠ 펀딩 {'과열' if long else '과밀'} — 크기 축소")
     watch_kind, entry_kind = spec["kinds"]
     if r["stage"] == "entry":
-        title = "🔵 눌림 재돌파 — 추종 진입 후보" if long else "🔴 반등 실패 — 추종 숏 후보"
+        title = "🔵 추종 매수 후보" if long else "🔴 추종 숏 후보"
         return Signal(entry_kind, title, f"{symbol} {spec['label']}", "\n".join(lines), symbol)
-    title = "📈 급등 확인 — 추종 관찰" if long else "📉 급락 확인 — 추종 관찰"
+    title = "📈 급등 확인" if long else "📉 급락 확인"
     return Signal(watch_kind, title, f"{symbol} {spec['label']}", "\n".join(lines), symbol)
 
 
@@ -224,10 +205,9 @@ class FollowWorker:
                 else:
                     rsi_ok = m["rsi"] >= spec["rsi"] if long else m["rsi"] <= spec["rsi"]
                     miss = [n for n, ok in (("변동폭", m["mult"] >= spec["atr_mult"]), ("RSI", rsi_ok)) if not ok]
-                    tail = f"{'급등' if long else '급락'} 조건 {2 - len(miss)}/2 (부족: {', '.join(miss)})"
+                    tail = f"{2 - len(miss)}/2 (부족: {', '.join(miss)})"
             signed = m["move"] if long else -m["move"]               # 롱은 저점 대비 상승(+), 숏은 고점 대비 하락(-)
-            out.append(f"{head} {symbol}  {fmt_price(m['close'])} · {spec['lookback']}봉 {'저점' if long else '고점'} 대비 "
-                       f"{signed:+.2f}% (기준ATR {max(m['mult'], 0):.1f}/{spec['atr_mult']:g}배) · "
+            out.append(f"{head} {symbol}  {fmt_price(m['close'])} · {'저점' if long else '고점'} 대비 {signed:+.2f}% · "
                        f"RSI {m['rsi']:.1f} · {reg} | {tail}")
         return out
 

@@ -74,13 +74,14 @@ def test_4h_watch_fires_once_then_reentry():
     assert len(watches) == 1
     i, r = watches[0]
     assert r["mult"] >= SPEC_4H["atr_mult"] and r["rsi"] >= 70 and r["ago"] == 0 and r["stop"] is None
-    assert "진입 후보가 뜨면 손절 = 눌림 저점 -2.5 기준ATR" in build_signal("BTCUSDT", r, SPEC_4H).text()
+    assert "눌림 뒤 EMA9 재돌파를 10봉 안에 기다린다" in build_signal("BTCUSDT", r, SPEC_4H).text()
     assert all(res is None for j, res in stages if j > i)                          # 급등이 이어지는 동안은 다시 알리지 않는다
     assert all(evaluate(bars[:k], SPEC_4H) is None for k in range(len(bars) - 3, len(bars)))   # 눌림 중 무신호
     r = evaluate(bars, SPEC_4H)
     assert r["stage"] == "entry" and r["ago"] == 2 and r["pull"] == 74800 and r["close"] > r["ema9"]
     assert abs(r["stop"] - r["pull"] * (1 - 2.5 * r["base"] / 100)) < 1e-6 and r["stop"] < r["pull"]
-    assert "손절" in build_signal("BTCUSDT", r, SPEC_4H).text() and "(눌림 저점 -2.5 기준ATR)" in build_signal("BTCUSDT", r, SPEC_4H).text()
+    text = build_signal("BTCUSDT", r, SPEC_4H).text()
+    assert text.startswith("🔵 추종 매수 후보 | BTCUSDT 4시간봉\n현재가 ") and "손절 " in text and "· 7일 보유" in text and "기준ATR" not in text
 
 
 def test_daily_long_reentry_uses_own_bars_for_regime():
@@ -90,7 +91,7 @@ def test_daily_long_reentry_uses_own_bars_for_regime():
     assert r["bull"] is True and r["mult"] >= 4
     assert abs(r["stop"] - r["close"] * 0.9) < 1e-9
     s = build_signal("BTCUSDT", r, SPEC_1D_LONG)
-    assert s.kind == "SURGE_ENTRY_1D" and s.label == "BTCUSDT 일봉" and "보유 한도 20일" in s.text() and "(진입 -10%)" in s.text()
+    assert s.kind == "SURGE_ENTRY_1D" and s.label == "BTCUSDT 일봉" and "(-10%) · 20일 보유" in s.text()
     watch = [k for k in range(400, 410) if (x := evaluate(bars[:k + 1], SPEC_1D_LONG)) and x["stage"] == "watch"]
     assert len(watch) == 1
 
@@ -104,8 +105,8 @@ def test_daily_short_reexit_after_bounce():
     s = build_signal("ETCUSDT", r, SPEC_1D_SHORT)
     assert s.kind == "CRASH_SHORT_1D" and s.severity == "action"
     body = s.text()
-    assert "반등 실패" in body and "재이탈" in body and "약세" in body and "숏 과밀" in body
-    assert "(진입 +25%)" in body and "목표 지정가 없음" in body
+    assert s.title == "🔴 추종 숏 후보" and "반등 고점" in body and "재이탈" in body and "약세" in body and "펀딩 과밀" in body
+    assert "(+25%) · 20일 보유" in body
     watch = [k for k in range(400, 410) if (x := evaluate(bars[:k + 1], SPEC_1D_SHORT)) and x["stage"] == "watch"]
     assert len(watch) == 1 and build_signal("ETCUSDT", evaluate(bars[:watch[0] + 1], SPEC_1D_SHORT), SPEC_1D_SHORT).kind == "CRASH_WATCH_1D"
 

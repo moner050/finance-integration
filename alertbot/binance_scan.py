@@ -28,7 +28,7 @@ from statistics import median
 import requests
 
 from . import db
-from .binance_crash import KST, fetch_klines, fmt_price
+from .binance_crash import fetch_klines, fmt_price
 from .binance_follow import base_atr_pct
 from .config import (BINANCE_FAPI, SCAN_ATR_MULT, SCAN_BASE_ATR_BARS, SCAN_EXCLUDE, SCAN_FADE_EMA, SCAN_FADE_HOLD_HOURS, SCAN_FADE_STOP_PCT,
                      SCAN_FADE_TP_PCT, SCAN_FADE_WAIT_HOURS, SCAN_INTERVAL, SCAN_KLINES, SCAN_MAX_LINES, SCAN_REFRESH_MIN, SCAN_TOP_N,
@@ -179,22 +179,18 @@ def ema(values: list, period: int) -> float:
 def build_signal(side: str, rows: list, ranks: dict, fade: bool = False) -> Signal:
     """rows = [(symbol, 지표)] 배수 내림차순. 여러 코인이면 한 알림에 SCAN_MAX_LINES 줄까지. fade 면 급등 알림에 가상 장부 소진 숏 규칙을 적는다."""
     up = side == "up"
+    single = len(rows) == 1                 # 한 종목이면 제목에 이름이 있으니 본문은 '현재가' 로 시작한다
     lines = []
     for symbol, m in rows[:SCAN_MAX_LINES]:
-        when = datetime.fromtimestamp((m["open_time"] + STEP_MS[SCAN_INTERVAL]) / 1000, tz=timezone.utc).astimezone(KST)
         rank = ranks.get(symbol)
-        lines.append(f"{symbol} {fmt_price(m['close'])} ({when:%H:%M} KST 마감) · {window_text()} {'저점' if up else '고점'} 대비 "
-                     f"{'+' if up else '-'}{m[side]:.1f}% (기준ATR {m[f'{side}_mult']:.1f}배) · RVOL {m['rvol']:.1f}배 · "
+        lines.append(f"{'현재가' if single else symbol} {fmt_price(m['close'])} · {window_text()} {'+' if up else '-'}{m[side]:.1f}% · "
+                     f"거래량 {m['rvol']:.1f}배 · "
                      + (f"거래대금 {rank}위" if rank else "추가 코인"))
     if len(rows) > SCAN_MAX_LINES:
         lines.append(f"외 {len(rows) - SCAN_MAX_LINES}종목")
-    rule = (f"가상 장부가 {SCAN_FADE_WAIT_HOURS}시간 안에 1시간 종가가 EMA{SCAN_FADE_EMA} 아래로 마감하면 숏 "
-            f"(손절 +{SCAN_FADE_STOP_PCT:g}% · 목표가 −{SCAN_FADE_TP_PCT:g}% · {SCAN_FADE_HOLD_HOURS}시간, 실제 주문 없음)" if up and fade
-            else "관찰 알림, 매매 신호 아님 (추격·역추세 진입은 4개월 검증에서 우위가 없었다)")
-    lines.append(f"기준: {INTERVAL_TEXT[SCAN_INTERVAL]} 종가가 직전 {window_text()} {'저점' if up else '고점'} 대비 기준ATR × {SCAN_ATR_MULT:g} 이상 "
-                 f"— {rule}")
-    single = len(rows) == 1
-    label = f"{rows[0][0]} {INTERVAL_TEXT[SCAN_INTERVAL]}" if single else f"코인 {len(rows)}종목 {INTERVAL_TEXT[SCAN_INTERVAL]}"
+    lines.append(f"{SCAN_FADE_WAIT_HOURS}시간 안에 1시간 종가가 EMA{SCAN_FADE_EMA} 아래면 가상 숏 (실제 주문 없음)" if up and fade
+                 else "관찰 알림 — 매매 신호 아님")
+    label = rows[0][0] if single else f"코인 {len(rows)}종목"
     return Signal("SCAN_SURGE" if up else "SCAN_CRASH", "🚀 급등 감지" if up else "💥 급락 감지", label, "\n".join(lines),
                   rows[0][0] if single else None)
 
@@ -329,5 +325,4 @@ class ScanWorker:
         u, d = seen[up_sym], seen[dn_sym]
         recent = sum(1 for t in self.last_alert.values() if now - t < timedelta(hours=24))
         fade = f" · 숏 대기 {len(self.pending)}종목" if self.trader is not None else ""
-        return [f"{head}  {len(self.universe.current)}종목 · 최대 상승 {up_sym} {u['up']:+.1f}% ({max(u['up_mult'], 0):.1f}/{SCAN_ATR_MULT:g}배) · "
-                f"최대 하락 {dn_sym} {-d['down']:+.1f}% ({max(d['down_mult'], 0):.1f}/{SCAN_ATR_MULT:g}배) | 24시간 감지 {recent}종목{fade}"]
+        return [f"{head}  최대 상승 {up_sym} {u['up']:+.1f}% · 최대 하락 {dn_sym} {-d['down']:+.1f}% | 24시간 감지 {recent}종목{fade}"]

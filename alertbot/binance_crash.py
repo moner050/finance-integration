@@ -152,27 +152,18 @@ def fmt_price(x: float) -> str:
 
 
 def build_signal(symbol: str, r: dict, addon: bool = False) -> Signal:
-    """addon 은 같은 심볼의 급락 매수 신호가 아직 진행 중일 때(60분 쿨다운 < 8시간 보유) — 새 진입이 아니라 추가매수로 부른다."""
-    when = datetime.fromtimestamp(r["open_time"] / 1000, tz=timezone.utc).astimezone(KST)
-    lines = [
-        f"{fmt_price(r['close'])} ({when:%m-%d %H:%M} KST 봉) · 4시간 고점 {fmt_price(r['ref_high'])} 대비 "
-        f"{r['drop']:+.2f}% (기준ATR {r['mult']:.1f}배)",
-        f"RSI14 {r['rsi']:.1f} · RVOL {r['rvol']:.1f}배 · 종가위치 {r['close_pos']:.2f} · "
-        f"아래꼬리 {r['lower_wick'] * 100:.0f}% · 테이커 매수비 {r['taker']:.2f}",
-    ]
+    """주식 알림처럼 짧게: 현재가(4시간 고점 대비) · RSI·거래량·BTC 동반 여부 · 손절·보유 한도. 판정 세부는 로그·README 에 있다.
+    4시간봉 배열은 조회에 실패했을 때만 적는다 (하락 배열일 때만 알리므로). 목표 지정가는 없다.
+    addon 은 같은 심볼의 급락 매수 신호가 아직 진행 중일 때(60분 쿨다운 < 8시간 보유) — 새 진입이 아니라 추가매수로 부른다."""
+    facts = [f"RSI {r['rsi']:.1f}", f"거래량 {r['rvol']:.1f}배"]
     if "btc_drop" in r:
-        lines.append(f"BTC 같은 구간 {r['btc_drop']:+.2f}% → {r['btc_label']} (기여 {r['btc_share']:.2f})")
-    if r.get("funding") is not None:
-        lines.append(f"펀딩 {r['funding'] * 100:+.4f}%/8h")
-    if "h4" in r:
-        reg = r["h4"]
-        lines.append(f"4시간봉 EMA9 {fmt_price(reg['ema9'])} ≤ EMA21 {fmt_price(reg['ema21'])} (하락 배열 — 급락 매수 허용)" if reg
-                     else "4시간봉 배열 불명 (조회 실패) — 상승 배열이면 지나간다")
-    lines.append(f"참고: 손절 {fmt_price(r['stop'])} (종가 -{CRASH_STOP_PCT:g}%) · 보유 한도 {CRASH_HOLD_HOURS}시간 · "
-                 f"목표 지정가 없음 · 50% 되돌림선 {fmt_price(r['retrace50'])}")
+        facts.append(f"BTC {r['btc_drop']:+.2f}% ({r['btc_label']})")
+    lines = [f"현재가 {fmt_price(r['close'])} (4시간 고점 대비 {r['drop']:+.2f}%)", " · ".join(facts)]
+    if "h4" in r and not r["h4"]:
+        lines.append("4시간봉 배열 불명 (조회 실패)")
+    lines.append(f"손절 {fmt_price(r['stop'])} (-{CRASH_STOP_PCT:g}%) · {CRASH_HOLD_HOURS}시간 보유")
     if addon:
-        lines.append("진행 중인 급락 매수 신호에 추가 — 손절선·보유 한도는 이 봉 기준으로 갱신\n"
-                     "⚠ 물량 늘리면 손절 시 손실도 같은 배로 커짐")
+        lines.append("진행 중 신호에 추가 — 손절·보유 한도 갱신 (물량을 늘리면 손절 손실도 커진다)")
     return Signal("CRASH_BUY", "🔵 급락 추가매수 후보" if addon else "🔵 급락 매수 후보", f"{symbol} 5분봉", "\n".join(lines), symbol)
 
 
@@ -213,8 +204,7 @@ class CrashWorker:
             last = self.last_alert.get(symbol)
             if last and now - last < timedelta(minutes=CRASH_COOLDOWN_MIN):
                 tail += " · 알림 쿨다운 중"
-            out.append(f"급락 매수 5분봉 {symbol}  {fmt_price(m['close'])} · 4시간 고점 대비 {m['drop']:+.2f}% "
-                       f"(기준ATR {m['mult']:.1f}/{CRASH_ATR_MULT:g}배) · RSI {m['rsi']:.1f} | {tail}")
+            out.append(f"급락 매수 5분봉 {symbol}  {fmt_price(m['close'])} · 고점 대비 {m['drop']:+.2f}% · RSI {m['rsi']:.1f} | {tail}")
         return out
 
     def poll_once(self, now: datetime = None) -> list:

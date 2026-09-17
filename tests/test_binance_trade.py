@@ -51,7 +51,7 @@ def test_entry_sizes_by_capital_and_leverage(store):
     assert p["status"] == "open" and abs(p["notional"] - CAP * 2) < 1          # 유효 2배
     assert p["entry_price"] == 100 * 1.0005 and p["deadline"] == (T + timedelta(hours=5)).isoformat(timespec="seconds")
     assert p["stop"] == 97.0 and p["next_funding"] == 1_000 and p["signal_bar"] == RES["open_time"]
-    assert rec.sent[-1].kind == "BN_ENTRY" and rec.sent[-1].body.startswith("[DRY]") and "× 2배" in rec.sent[-1].body
+    assert rec.sent[-1].kind == "BN_ENTRY" and rec.sent[-1].body.startswith("[DRY] 급락 매수 롱 100.050 · 명목 2,000 USDT\n손절 97.000 · ")
     assert t.on_entry("CRASH_BUY", "ETCUSDT", "long", RES, 5, now=T) is None                     # 같은 전략은 하나만
     assert rec.sent[-1].kind == "BN_SKIP" and "열려 있다" in rec.sent[-1].body
     assert len(db.binance_positions(store, status="open")) == 1
@@ -164,7 +164,7 @@ def test_take_profit_on_mark_closes_scan_fade_short(store):
     assert t.poll(T + timedelta(hours=1)) == []
     q["mark"], q["price"] = 79.9, 79.8                                   # 마크 목표가 도달 → 최종가 + 슬리피지로 종료
     closed = t.poll(T + timedelta(hours=2))
-    assert closed[0]["exit_reason"] == "tp" and closed[0]["pnl"] > 0 and "목표가 (마크 도달)" in rec.sent[-1].body
+    assert closed[0]["exit_reason"] == "tp" and closed[0]["pnl"] > 0 and "급등 소진 숏" in rec.sent[-1].body and "목표가 도달" in rec.sent[-1].body
     assert db.binance_positions(store)[0]["take_profit"] == 80.0
 
 

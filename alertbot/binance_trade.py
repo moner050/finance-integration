@@ -40,7 +40,14 @@ from .notify.dispatcher import Dispatcher
 log = logging.getLogger("binance")
 
 MAX_FAILURES = 3
-REASON = {"stop": "손절 (마크 도달)", "tp": "목표가 (마크 도달)", "time": "보유 한도", "manual": "거래소에서 직접 종료됨"}
+REASON = {"stop": "손절", "tp": "목표가 도달", "time": "보유 한도", "manual": "거래소에서 직접 종료"}
+STRATEGY_NAMES = {"CRASH_BUY": "급락 매수", "SURGE_ENTRY": "4시간 추종", "SURGE_ENTRY_1D": "일봉 추종", "CRASH_SHORT_1D": "일봉 추종",
+                  "SCAN_FADE": "급등 소진"}
+
+
+def strategy_text(strategy: str, side: str) -> str:
+    """알림용 전략 이름 — 'SCAN_FADE short' → '급등 소진 숏'."""
+    return f"{STRATEGY_NAMES.get(strategy, strategy)} {'롱' if side == 'long' else '숏'}"
 
 
 def fetch_price(symbol: str, session=None) -> float:
@@ -99,7 +106,7 @@ class Trader:
         notional, note = self.capital * lev, ""
         fund = result.get("funding")
         if fund is not None and (fund > SURGE_FUNDING_WARN if side == "long" else fund < -SURGE_FUNDING_WARN):
-            notional, note = notional / 2, " · 펀딩 게이트로 크기 절반"
+            notional, note = notional / 2, " · 펀딩으로 크기 절반"
         why = self._blocked(strategy, symbol, notional, now)
         if why is None and self.mode == "live" and not self._live_on():
             why = "live 스위치 OFF (백오피스 자동매매 화면의 내 live 매매에서 켠다)"
@@ -110,7 +117,7 @@ class Trader:
                 why = f"시세 조회 실패 {e}"
         if why:
             if notify_skip:
-                self._emit("BN_SKIP", "⏸ 진입 보류", symbol, f"{strategy} {symbol} {side.upper()}: {why}")
+                self._emit("BN_SKIP", "⏸ 진입 보류", symbol, f"{strategy_text(strategy, side)}: {why}")
             else:
                 log.info("%s%s %s %s 진입 보류: %s", self.tag, strategy, symbol, side.upper(), why)
             return None
@@ -133,11 +140,10 @@ class Trader:
                    opened_at=now.isoformat(timespec="seconds"), **ids)
         row["id"] = db.insert_binance_position(self.store, row)
         self._emit("BN_ENTRY", "📥 진입", symbol,
-                   f"{strategy} {side.upper()} {qty:g} @ {fmt_price(price)} · 명목 {row['notional']:,.0f} USDT "
-                   f"(자본 {self.capital:,.0f} × {lev:g}배){note}\n"
-                   f"손절 {fmt_price(stop)} (마크 기준{'' if ids['stop_order_id'] or self.mode == 'dry' else ' — 주문 실패, 재시도 중'}) · "
-                   + (f"목표가 {fmt_price(tp)} · " if tp is not None else "")
-                   + f"보유 한도 {deadline.astimezone(KST):%m-%d %H:%M} KST 까지")
+                   f"{strategy_text(strategy, side)} {fmt_price(price)} · 명목 {row['notional']:,.0f} USDT{note}\n"
+                   f"손절 {fmt_price(stop)}{'' if ids['stop_order_id'] or self.mode == 'dry' else ' (주문 실패 — 재시도 중)'}"
+                   + (f" · 목표가 {fmt_price(tp)}" if tp is not None else "")
+                   + f" · {deadline.astimezone(KST):%m-%d %H:%M} 까지")
         return row
 
     def _live_open(self, symbol, side, notional, last, stop):
@@ -195,16 +201,15 @@ class Trader:
         out = []
         for p in self.open_rows():
             sgn = 1 if p["side"] == "long" else -1
-            try:
-                mark = self.fetch_premium(p["symbol"])["mark"]
-                pnl = f"마크 {fmt_price(mark)} ({sgn * (mark / p['entry_price'] - 1) * 100:+.2f}%)"
+            try:                                                        # 주식 시황의 '가상 보유' 줄처럼 손익 부호로 🟢/🔴
+                pnl = sgn * (self.fetch_premium(p["symbol"])["mark"] / p["entry_price"] - 1) * 100
+                mark, move = ("🟢" if pnl > 0 else "🔴"), f"{pnl:+.2f}%"
             except Exception as e:                                      # 시세 실패면 손익 없이 표기
-                pnl = f"마크 조회 실패 ({e})"
+                mark, move = "⚪", f"마크 조회 실패 ({e})"
             deadline = datetime.fromisoformat(p["deadline"]).astimezone(KST)
-            out.append(f"📥 {self.tag.strip()} {p['symbol']} {p['strategy']} {'롱' if p['side'] == 'long' else '숏'} "
-                       f"{p['qty']:g} @ {fmt_price(p['entry_price'])} · {pnl} · 손절 {fmt_price(p['stop'])} · "
-                       + (f"목표 {fmt_price(p['take_profit'])} · " if p.get("take_profit") is not None else "")
-                       + f"한도 {deadline:%m-%d %H:%M} KST")
+            out.append(f"{mark} {p['symbol']} {strategy_text(p['strategy'], p['side'])}  {move} · 손절 {fmt_price(p['stop'])}"
+                       + (f" · 목표 {fmt_price(p['take_profit'])}" if p.get("take_profit") is not None else "")
+                       + f" · {deadline:%m-%d %H:%M} 까지")
         return out
 
     # -- 감시 -------------------------------------------------------------------
@@ -270,10 +275,9 @@ class Trader:
         db.update_binance_position(self.store, p["id"], status="closed", exit_price=price, exit_reason=reason, pnl=pnl,
                                    closed_at=now.isoformat(timespec="seconds"))
         p.update(status="closed", exit_price=price, exit_reason=reason, pnl=pnl)
-        self._emit("BN_EXIT", "📤 종료", p["symbol"],
-                   f"{p['strategy']} {p['side'].upper()} {p['qty']:g} @ {fmt_price(price)} · {REASON[reason]}\n"
-                   f"손익{' 추정' if self.mode == 'live' else ''} {pnl:+,.2f} USDT (명목 대비 {pnl / p['notional'] * 100:+.2f}% · "
-                   f"자본 대비 {pnl / self.capital * 100:+.2f}%) · 수수료 {fees:.2f} · 펀딩 {p['funding']:+.2f}")
+        self._emit("BN_EXIT", "📤 종료", p["symbol"],                       # 손익은 수수료·펀딩을 뺀 값
+                   f"{strategy_text(p['strategy'], p['side'])} {fmt_price(price)} · {REASON[reason]}\n"
+                   f"손익{' 추정' if self.mode == 'live' else ''} {pnl:+,.2f} USDT ({pnl / p['notional'] * 100:+.2f}%)")
         return p
 
     def daily_report(self, day: str) -> str:
@@ -288,7 +292,7 @@ class Trader:
         wins = sum(1 for p in rows if (p["pnl"] or 0) > 0)
         total = sum(p["pnl"] or 0 for p in rows)
         lines = [f"종료 {len(rows)}건: {wins}익절 {len(rows) - wins}손절·본전 · 손익 추정 {total:+,.2f} USDT"]
-        lines += [f"· {p['symbol']} {p['strategy']} {'롱' if p['side'] == 'long' else '숏'} {fmt_price(p['entry_price'])} → "
+        lines += [f"· {p['symbol']} {strategy_text(p['strategy'], p['side'])} {fmt_price(p['entry_price'])} → "
                   f"{fmt_price(p['exit_price'])} {p['pnl']:+,.2f} ({REASON.get(p['exit_reason'], p['exit_reason'])})" for p in reversed(rows)]
         return "\n".join(lines + ["", "※ 이 계정의 실제 주문 기준 · 수수료·펀딩 포함 추정"])
 

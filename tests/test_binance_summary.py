@@ -29,7 +29,7 @@ def test_crash_status_lines_show_partial_conditions():
     assert w.status_lines(T) == ["급락 매수 5분봉 ETCUSDT  데이터 부족"]        # 아직 폴링 전
     w.poll_once(T)
     line = w.status_lines(T)[0]
-    assert line.startswith("급락 매수 5분봉 ETCUSDT  7.5") and "/10배" in line and "(부족: 낙폭, RSI" in line
+    assert line.startswith("급락 매수 5분봉 ETCUSDT  7.5") and " · 고점 대비 " in line and "(부족: 낙폭, RSI" in line
     fetched["ETCUSDT"] = make_bars(n=1001, crash_bars=20)                    # 새 봉에서 급락 + 반전봉 → 알림 → 쿨다운
     w.poll_once(T + timedelta(minutes=5))
     line = w.status_lines(T + timedelta(minutes=6))[0]
@@ -45,7 +45,7 @@ def test_follow_status_lines_track_stage_and_regime():
     w = FollowWorker(spec, Recorder(), fetch_bars=lambda s, i, n: daily if i == "1d" else q["bars"], fetch_fund=lambda s: None)
     w.poll_once(T)
     line = w.status_lines(T)[0]
-    assert line.startswith("급등 추종 4시간봉 BTCUSDT  70,") and "급등 조건" in line and "(부족:" in line
+    assert line.startswith("급등 추종 4시간봉 BTCUSDT  70,") and " · 저점 대비 +" in line and "/2 (부족:" in line
     q["bars"] = watch_bars
     w.poll_once(T + timedelta(hours=4))                                        # 급등이 이어지는 중
     line = w.status_lines(T + timedelta(hours=5))[0]
@@ -69,14 +69,14 @@ def test_trader_open_lines_and_summary_signal(monkeypatch):
     assert t.open_lines() == []
     t.on_entry("CRASH_BUY", "ETCUSDT", "long", {"stop": 97.0, "open_time": 1, "funding": 0.0}, 8, T)
     line = t.open_lines()[0]
-    assert line.startswith("📥 [DRY] ETCUSDT CRASH_BUY 롱") and "마크 98.000 (-2.05%)" in line and "한도 09-16 20:00 KST" in line
+    assert line == "🔴 ETCUSDT 급락 매수 롱  -2.05% · 손절 97.000 · 09-16 20:00 까지"          # 주식 시황의 가상 보유 줄처럼
     fetched = {"ETCUSDT": make_bars(), "BTCUSDT": make_bars(close=78000)}
     w = CrashWorker(["ETCUSDT"], rec, fetch_bars=lambda s: fetched[s], fetch_fund=lambda s: None, fetch_h4=lambda s: make_h4())
     w.poll_once(T)
     assert summary_signal([w], T).body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT")     # 가상 트레이더 없이도 조건 줄
     sig = summary_signal([w], T, paper=t)
     assert sig.kind == "SUMMARY" and sig.title == "📊 코인 시황" and sig.label == "12:00"
-    assert sig.body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT") and "\n가상 포지션 (dry)\n📥 [DRY] ETCUSDT" in sig.body
+    assert sig.body.splitlines()[0].startswith("급락 매수 5분봉 ETCUSDT") and "\n가상 포지션 (dry)\n🔴 ETCUSDT 급락 매수 롱" in sig.body
     assert sig.body.endswith("※ 참고용. 진입·청산은 개별 알림(🔵🔴📥📤)이 왔을 때만")
     assert sig.account is None and sig.account_id is None                        # 공용 채널 — 계정 live 포지션은 싣지 않는다
 

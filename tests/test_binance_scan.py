@@ -139,7 +139,8 @@ def test_single_pump_alerts_once_with_time_gate_and_cooldown():
     now = at(bars["AAAUSDT"])
     sent = w.poll_once(now)
     assert [s.kind for s in sent] == ["SCAN_SURGE"] and sent[0].symbol == "AAAUSDT" and sent[0].title == "🚀 급등 감지"
-    assert "AAAUSDT" in sent[0].body and "거래대금 1위" in sent[0].body and "매매 신호 아님" in sent[0].body
+    assert sent[0].label == "AAAUSDT" and sent[0].body.startswith("현재가 ") and "거래대금 1위" in sent[0].body
+    assert "매매 신호 아님" in sent[0].body                                              # 가상 장부 없이 돌면 관찰 알림
     assert w.poll_once(now + timedelta(seconds=20)) == [] and len(calls) == 2           # 새 봉 전엔 조회하지 않는다
     bars["AAAUSDT"] = path(bars["AAAUSDT"], [bars["AAAUSDT"][-1]["close"] * 1.15], step=H1)     # 다음 봉도 급등 — 4시간 쿨다운
     bars["BBBUSDT"] = path(bars["BBBUSDT"], [bars["BBBUSDT"][-1]["close"]], step=H1)
@@ -168,11 +169,11 @@ def test_simultaneous_moves_are_grouped_per_direction(monkeypatch):
     sent = w.poll_once(at(bars["AAAUSDT"]))
     assert [s.kind for s in sent] == ["SCAN_SURGE", "SCAN_CRASH"]
     surge, crash = sent
-    assert surge.symbol is None and surge.label == "코인 3종목 1시간봉"
+    assert surge.symbol is None and surge.label == "코인 3종목"
     lines = surge.body.splitlines()
     assert lines[0].startswith("BBBUSDT") and lines[1].startswith("CCCUSDT") and lines[2] == "외 1종목"
     assert "추가 코인" in lines[0]                                                        # 순위 밖(추가) 코인 표기
-    assert crash.symbol == "DDDUSDT" and crash.title == "💥 급락 감지" and "고점 대비 -" in crash.body
+    assert crash.symbol == "DDDUSDT" and crash.title == "💥 급락 감지" and "4시간 -" in crash.body
 
 
 def test_one_broken_symbol_does_not_block_others():
@@ -227,7 +228,7 @@ def test_surge_queues_fade_and_shorts_on_first_close_below_ema():
     sent = w.poll_once(at(bars["AAAUSDT"]))
     pump = bars["AAAUSDT"][-1]["open_time"]
     wait = {"AAAUSDT": {"deadline": pump + H1 + 48 * H1, "after": pump}}
-    assert [s.kind for s in sent] == ["SCAN_SURGE"] and "가상 장부가 48시간 안에" in sent[0].body and "EMA50" in sent[0].body
+    assert [s.kind for s in sent] == ["SCAN_SURGE"] and "48시간 안에 1시간 종가가 EMA50 아래면 가상 숏" in sent[0].body
     assert w.pending == wait and json.loads(DBM.get_settings(store)[SC.FADE_KEY]) == wait
     assert SC.ScanWorker(StoreUniverse(["AAAUSDT"], store), rec, trader=spy).pending == wait           # 재시작해도 이어진다
     bars["AAAUSDT"] = path(bars["AAAUSDT"], [11.0], step=H1)                  # EMA50(약 10) 위 — 계속 기다린다

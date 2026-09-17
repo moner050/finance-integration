@@ -89,8 +89,8 @@ def test_signal_text_contains_key_numbers():
     s = build_signal("ETCUSDT", r)
     assert s.kind == "CRASH_BUY" and s.severity == "action" and s.symbol == "ETCUSDT"
     body = s.text()
-    assert "기준ATR" in body and "RSI14" in body and "펀딩 -0.0100%/8h" in body and "손절" in body
-    assert "(종가 -3%)" in body and "보유 한도 8시간" in body and "목표 지정가 없음" in body and "50% 되돌림선" in body
+    assert body.splitlines()[1].startswith("현재가 ") and "4시간 고점 대비 -" in body and "RSI " in body and "거래량 " in body
+    assert "(-3%) · 8시간 보유" in body and "기준ATR" not in body and "펀딩" not in body       # 주식 알림처럼 짧게 — 분석 수치는 싣지 않는다
 
 
 class Recorder:
@@ -108,7 +108,7 @@ def test_worker_evaluates_each_bar_once_and_respects_cooldown():
     rec = Recorder()
     w = CrashWorker(["ETCUSDT"], rec, fetch_bars=lambda s: fetched[s], fetch_fund=lambda s: None, fetch_h4=lambda s: make_h4())
     t = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
-    assert len(w.poll_once(t)) == 1 and "하락 배열" in rec.sent[0].body
+    assert len(w.poll_once(t)) == 1 and "배열" not in rec.sent[0].body         # 하락 배열(알림 조건)은 따로 적지 않는다
     assert w.poll_once(t + timedelta(minutes=5)) == []           # 같은 완성봉은 다시 판정하지 않는다
     # 5분 뒤 새 봉도 급락 조건이면 쿨다운(60분) 안이라 보내지 않는다
     nxt = crash + [dict(crash[-1], open_time=crash[-1]["open_time"] + STEP, close_time=crash[-1]["close_time"] + STEP)]
@@ -136,7 +136,7 @@ def test_h4_regime_gate_holds_alert_in_uptrend():
     w.last_bar.clear()
     w.fetch_h4 = lambda s: make_h4(down=True)
     sent = w.poll_once(t)
-    assert len(sent) == 1 and "하락 배열" in sent[0].body and calls[0][4] == 8   # 보유 한도 8시간을 넘긴다
+    assert len(sent) == 1 and "배열" not in sent[0].body and calls[0][4] == 8   # 보유 한도 8시간을 넘긴다
     w.last_bar.clear()
     w.last_alert.clear()
 

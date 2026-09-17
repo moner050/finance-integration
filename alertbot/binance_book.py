@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from . import db
-from .binance_crash import KST, fmt_price
+from .binance_crash import fmt_price
 from .config import BINANCE_FAPI
 from .models import Signal
 
@@ -121,11 +121,9 @@ class SignalBook:
         else:
             kind = "EXIT_FULL"
             title = f"🟢 {'' if long else '숏 '}전량 {'익절' if pnl > 0 else '정리'}하세요"
-            why = f"보유 한도 {hold_text(p['hold_hours'])} 도달 — 목표 지정가 없이 시간 청산"
-        opened = datetime.fromisoformat(p["opened_at"]).astimezone(KST)
-        body = (f"{p['name']} 신호 종료 — {why}\n"
-                f"신호가 {fmt_price(p['price'])} ({opened:%m-%d %H:%M} KST) → 마크 {fmt_price(mark)} · "
-                f"신호가 대비 {pnl:+.2f}% · 보유 {held:.1f}시간")
+            why = f"보유 한도 {hold_text(p['hold_hours'])} 도달"
+        held_text = f"{held:.1f}시간" if held < 48 else f"{held / 24:.1f}일"
+        body = f"신호가 {fmt_price(p['price'])} 대비 {pnl:+.2f}% ({held_text})\n{why}"        # 주식 청산 알림처럼 첫 줄이 신호가 대비 손익
         return Signal(kind, title, p["label"], body, p["symbol"])
 
     def status_line(self, kind: str, symbol: str, now: datetime = None):
@@ -135,10 +133,8 @@ class SignalBook:
             return None
         head = "🔵 매수 신호 진행 중" if p["side"] == "long" else "🔴 숏 신호 진행 중"
         mark = p.get("mark")
-        move = f"대비 {self._pnl(p, mark):+.2f}% (마크 {fmt_price(mark)})" if mark else "(마크 조회 전)"
-        deadline = datetime.fromisoformat(p["deadline"]).astimezone(KST)
-        return (f"{head} — 신호가 {fmt_price(p['price'])} {move} · 손절 {fmt_price(p['stop'])} · "
-                f"한도 {deadline:%m-%d %H:%M} KST 까지")
+        move = f" 대비 {self._pnl(p, mark):+.2f}%" if mark else ""
+        return f"{head} — 신호가 {fmt_price(p['price'])}{move}, 손절 {fmt_price(p['stop'])}"
 
     # -- 저장 -------------------------------------------------------------------
     def _save(self):
