@@ -4,7 +4,7 @@
 세션 누적값(VWAP, 정점 RVOL)은 SessionState 가 봉을 하나씩 더해 유지한다.
 """
 
-from .config import (ATR_BAND_MULT, MIN_PROFILE_SESSIONS, OPEN_EXCLUDE_MIN,
+from .config import (ATR_BAND_MULT, ATR_BAND_MULT_KR, MIN_PROFILE_SESSIONS, OPEN_EXCLUDE_MIN,
                      RVOL_WINDOW, STRONG_BAR_MIN, VWAP_BAND_PCT)
 from .timeutil import parse_ts
 
@@ -164,9 +164,10 @@ class SessionState:
         self.vol = 0.0
         self.peak = 0.0          # 세션 정점 RVOL
         self.last_dt = None      # 마지막으로 반영한 봉의 현지시각
+        self.open_px = 0.0       # 정규장 첫 봉 시가 — 오늘 갭(추격 배제) 판정용
 
     def _reset(self, session: str):
-        self.session, self.pv, self.vol, self.peak, self.last_dt = session, 0.0, 0.0, 0.0, None
+        self.session, self.pv, self.vol, self.peak, self.last_dt, self.open_px = session, 0.0, 0.0, 0.0, None, 0.0
 
     def update(self, candles: list, profile: dict = None) -> int:
         """시간순 완성봉을 넣는다. 마지막(최신) 세션에 새로 반영한 봉 수를 돌려준다."""
@@ -192,6 +193,11 @@ class SessionState:
                 continue
             self.pv += tp * v
             self.vol += v
+            if self.open_px <= 0:
+                try:
+                    self.open_px = float(c.get("openPrice") or 0)
+                except (TypeError, ValueError):
+                    pass
             if _minutes_from_open(hhmm, self.market) >= OPEN_EXCLUDE_MIN:
                 self.peak = max(self.peak, rvol_at(candles, i, self.market, profile)[0])
             self.last_dt = dt
@@ -204,7 +210,7 @@ class SessionState:
         return round(self.pv / self.vol, 4) if self.vol > 0 else 0.0
 
     def to_dict(self) -> dict:
-        return {"session": self.session, "pv": self.pv, "vol": self.vol, "peak": self.peak,
+        return {"session": self.session, "pv": self.pv, "vol": self.vol, "peak": self.peak, "open_px": self.open_px,
                 "last_dt": self.last_dt.isoformat() if self.last_dt else None}
 
     @classmethod
@@ -212,6 +218,7 @@ class SessionState:
         s = cls(market)
         s.session = d.get("session")
         s.pv, s.vol, s.peak = float(d.get("pv", 0)), float(d.get("vol", 0)), float(d.get("peak", 0))
+        s.open_px = float(d.get("open_px", 0) or 0)
         s.last_dt = parse_ts(d["last_dt"], market) if d.get("last_dt") else None
         return s
 
@@ -287,10 +294,11 @@ def compute_atr_pct(candles: list, n: int = 20) -> float:
     return round(sum(ranges) / len(ranges), 3) if ranges else 0.0
 
 
-def effective_band(candles: list) -> float:
-    """실제 적용할 밴드 %. 고정값과 변동성 기반값 중 큰 쪽."""
+def effective_band(candles: list, market: str = None) -> float:
+    """실제 적용할 밴드 %. 고정값과 변동성 기반값 중 큰 쪽. 한국 종목은 배수가 다르다 (ATR_BAND_MULT_KR)."""
     atr = compute_atr_pct(candles)
-    return max(VWAP_BAND_PCT, round(atr * ATR_BAND_MULT, 3))
+    mult = ATR_BAND_MULT_KR if market == "KR" else ATR_BAND_MULT
+    return max(VWAP_BAND_PCT, round(atr * mult, 3))
 
 
 def strong_bar(candle: dict) -> bool:

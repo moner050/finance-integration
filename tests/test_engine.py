@@ -224,8 +224,8 @@ def test_entry_only_on_regular_session_bar(monkeypatch, tmp_path):
     monkeypatch.setattr(MH, "now_local", at_1545)
     eng.evaluate("AAA", {"AAA": 100.8}, {})
     assert cap.sent == [] and eng.snapshots["AAA"]["regular"] is False
-    # 같은 모양이 15:29 에 끝나면(정규장) 매수 신호가 난다
-    eng2, cap2 = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(14, 28))
+    # 같은 모양이 12:59 에 끝나면(정규장, 개장 4시간 안) 매수 신호가 난다
+    eng2, cap2 = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(11, 58))
     monkeypatch.setattr(E, "now_local", at_1545)
     monkeypatch.setattr(MH, "now_local", at_1545)
     eng2.evaluate("AAA", {"AAA": 100.8}, {})
@@ -324,18 +324,26 @@ def test_close_warn_only_for_day_trade_symbols(monkeypatch, tmp_path):
 # --- 확정 매수 신호 = 신호 포지션. 대기·취소·만료는 확인 항목이 모자란 대기 신호에만 ------------
 
 def weak_candles(start_hour: int = 9, start_minute: int = 0) -> list:
-    """돌파봉 거래량 2500(≈2.4배): 요건은 되지만 확인 항목(거래량 3배↑)이 모자라 '매수 대기하세요' 가 된다."""
+    """돌파봉 거래량 2500(≈2.4배): 요건은 된다. 확인 항목이 모자란 '매수 대기하세요' 는 weak_ema 로 만든다
+    ('거래량 3배↑' 확인 항목은 2026-09-17 재생 결과로 빠졌다)."""
     candles = sc.scenario_candles(start_hour, start_minute)
     last = datetime.fromisoformat(candles[-1]["timestamp"])
     candles[-1] = bar(last, 100.8, 2500, high=100.85, low=100.3)
     return candles
 
 
+def weak_ema(monkeypatch) -> dict:
+    """확인 항목(EMA 정배열)을 못 채운 상태. 돌려준 dict 의 align 을 '정배열' 로 바꾸면 항목이 채워진다."""
+    state = {"align": "혼조"}
+    monkeypatch.setattr(E, "ema_alignment", lambda candles: state["align"])
+    return state
+
+
 def test_confirmed_entry_opens_signal_position_without_wait_or_expiry(monkeypatch, tmp_path):
     """'매수하세요' 뒤에는 매수 대기·취소·만료가 없다 — 내 계좌가 안 샀어도 신호 포지션으로 추가매수·손절이 이어진다."""
     eng, cap = make_engine(monkeypatch, tmp_path)
     eng.evaluate("AAA", {"AAA": 100.8}, {})
-    assert cap.sent[0][0] == "🔵 매수하세요" and cap.signals[0].kind == "ENTRY" and "확인 3/3" in cap.sent[0][2]
+    assert cap.sent[0][0] == "🔵 매수하세요" and cap.signals[0].kind == "ENTRY" and "확인 1/1" in cap.sent[0][2]
     assert eng.state["AAA"] == "보유" and "AAA" not in eng.pending and "AAA" in eng.entry_at
     assert eng.signal_pos["AAA"]["price"] == 100.8 and eng.signal_pos["AAA"]["bar_key"] == eng.snapshots["AAA"]["bar_key"]
     eng.signal_pos["AAA"]["at"] = (datetime.now(timezone.utc) - timedelta(minutes=E.ENTRY_PENDING_MAX_MIN + 5)).isoformat()
@@ -346,29 +354,35 @@ def test_confirmed_entry_opens_signal_position_without_wait_or_expiry(monkeypatc
     assert "🔵 테스트  매수 신호 진행 중 — 신호가 101 대비 +0.05%, 기준선 위" in cap.signals[-1].body
     assert cap.signals[-1].account is None
     assert eng._signal_open_lines("KR") == ["테스트 신호가 100.8 → 현재 100.85 +0.05%"] and eng._signal_open_lines("US") == []
-    # 다음 봉에 거래량이 다시 붙고 +2% 위면 추가매수 (신호봉 자체에서는 내지 않는다). 손익은 신호가 기준, 계좌 줄엔 미보유 표기
+    # 다음 봉에 신호가 +1%(EXIT_TARGET_PCT) 를 넘으면 목표 익절 — 확정 청산이라 신호 포지션은 끝난다 (미보유라 반복 없이 관망).
+    # 손익은 신호가 기준, 계좌 줄엔 미보유 표기. 불타기(+2%)는 목표 익절이 먼저 걸려 나오지 않는다
     push_bar(eng, 100.9, 1000)
     eng.evaluate("AAA", {"AAA": 100.9}, {})
     push_bar(eng, 103.5, 4000, high=103.55, low=103.0)
     eng.evaluate("AAA", {"AAA": 103.5}, {})
-    assert cap.sent[-1][0] == "🔵 추가매수 검토" and cap.sent[-1][2].startswith("신호가 101 대비 +2.68%\n")
-    assert cap.signals[-1].account == "가상 미보유 — 신호가 기준" and eng.stop_ref["AAA"] == 103.0
-    # 신호가 -5% 는 시장 데이터만으로 성립하니 공개 신호(SELL)로 나가고, 신호 포지션은 끝난다 (미보유라 반복 없이 관망)
-    eng.evaluate("AAA", {"AAA": 95.0}, {})
-    assert cap.sent[-1][0] == "🔴 손절하세요" and cap.signals[-1].kind == "SELL"
-    assert cap.sent[-1][2] == f"신호가 101 대비 -5.75%\n손절 한도 {E.STOP_LOSS_PCT}% 도달 — 최후 안전망"
+    assert cap.sent[-1][0] == "🟢 전량 익절하세요" and cap.signals[-1].kind == "EXIT_FULL"
+    assert cap.sent[-1][2].startswith(f"신호가 101 대비 +2.68%\n목표 +{E.EXIT_TARGET_PCT:g}% 도달")
+    assert cap.signals[-1].account == "가상 미보유 — 신호가 기준"
     assert eng.state["AAA"] == "관망" and "AAA" not in eng.signal_pos and "AAA" not in eng.stop_ref and "AAA" in eng.exit_at
     # 닫힌 신호는 모의 성적으로 남고, 마감 성적표가 그것을 집계한다
     rows = eng.signal_trades.rows_on("KR")
-    assert [(r["label"], r["entry"], r["exit"], r["pnl"], r["reason"]) for r in rows] == [("테스트", 100.8, 95.0, -5.75, "손절")]
-    assert eng.signal_trades.daily_summary("KR", eng._signal_open_lines("KR")).startswith("청산 1건: 0익절 1손절 (승률 0%)")
+    assert [(r["label"], r["entry"], r["exit"], r["pnl"], r["reason"]) for r in rows] == [("테스트", 100.8, 103.5, 2.68, "익절")]
+    assert eng.signal_trades.daily_summary("KR", eng._signal_open_lines("KR")).startswith("청산 1건: 1익절 0손절 (승률 100%)")
+    # 신호가 -5% 손절은 시장 데이터만으로 성립하니 공개 신호(SELL)로 나가고, 신호 포지션은 끝난다
+    eng2, cap2 = make_engine(monkeypatch, tmp_path)
+    eng2.evaluate("AAA", {"AAA": 100.8}, {})
+    eng2.evaluate("AAA", {"AAA": 95.0}, {})
+    assert cap2.sent[-1][0] == "🔴 손절하세요" and cap2.signals[-1].kind == "SELL"
+    assert cap2.sent[-1][2] == f"신호가 101 대비 -5.75%\n손절 한도 {E.STOP_LOSS_PCT}% 도달 — 최후 안전망"
+    assert eng2.state["AAA"] == "관망" and "AAA" not in eng2.signal_pos and "AAA" not in eng2.stop_ref and "AAA" in eng2.exit_at
 
 
 def test_pending_watch_entry_repeats_then_expires(monkeypatch, tmp_path):
+    weak_ema(monkeypatch)
     eng, cap = make_engine(monkeypatch, tmp_path, candles=weak_candles())
     eng.evaluate("AAA", {"AAA": 100.8}, {})
     assert eng.state["AAA"] == "진입대기" and eng.pending["AAA"]["bar_key"] == eng.snapshots["AAA"]["bar_key"]
-    assert cap.sent[0][0] == "🔵 매수 대기하세요" and cap.signals[0].kind == "ENTRY_WATCH" and "확인 2/3" in cap.sent[0][2]
+    assert cap.sent[0][0] == "🔵 매수 대기하세요" and cap.signals[0].kind == "ENTRY_WATCH" and "확인 0/1" in cap.sent[0][2]
     assert "AAA" not in eng.signal_pos
     eng.evaluate("AAA", {"AAA": 100.85}, {})                   # 15분 안 → 반복 없음
     assert len(cap.sent) == 1
@@ -387,6 +401,8 @@ def test_pending_watch_entry_repeats_then_expires(monkeypatch, tmp_path):
 def test_pending_watch_entry_expires_when_session_ends(monkeypatch, tmp_path):
     def at_1545(market):
         return datetime(2026, 3, 25, 15, 45, tzinfo=TZ["KR"]).astimezone(TZ[market])
+    weak_ema(monkeypatch)
+    monkeypatch.setattr(E, "ENTRY_MAX_MIN_FROM_OPEN", 10_000)                        # 오후 진입 제한은 따로 본다
     eng, cap = make_engine(monkeypatch, tmp_path, candles=weak_candles(14, 28))   # 대기 신호봉 15:29 (정규장)
     monkeypatch.setattr(E, "now_local", at_1545)
     monkeypatch.setattr(MH, "now_local", at_1545)
@@ -407,8 +423,8 @@ def test_signal_position_exit_wait_recovers_or_confirms_then_closes(monkeypatch,
     assert cap.signals[-1].kind == "EXIT_WATCH" and cap.sent[-1][0] == "🔴 매도 대기하세요"
     assert cap.signals[-1].account == "가상 미보유 — 신호가 기준" and eng.state["AAA"] == "청산대기" and "AAA" in eng.signal_pos
     floor = round(100.3 * (1 + eng.snapshots["AAA"]["band"] / 100), 4)
-    push_bar(eng, floor + 0.01)
-    eng.evaluate("AAA", {"AAA": floor + 0.01}, {})             # 회복 → 보유(신호 포지션) 복귀
+    push_bar(eng, floor + 0.05)                                # 새 봉이 ATR 밴드를 조금 넓히므로 여유를 둔다
+    eng.evaluate("AAA", {"AAA": floor + 0.05}, {})             # 회복 → 보유(신호 포지션) 복귀
     assert cap.sent[-1][0] == "⚪ 청산 신호 해제" and eng.state["AAA"] == "보유" and "AAA" in eng.signal_pos
     push_bar(eng, 100.0)                                       # 밴드 폭보다 깊이 뚫림 → 매도 확정 → 신호 종료, 관망
     eng.evaluate("AAA", {"AAA": 100.0}, {})
@@ -463,24 +479,33 @@ def test_entry_blocked_right_after_open_and_near_close(monkeypatch, tmp_path):
     eng2.volume_profile["AAA"] = profile
     eng2.evaluate("AAA", {"AAA": 100.8}, {})
     assert [s[0] for s in cap2.sent] == ["🔵 매수하세요"]
-    # 마감 25분 전 (15:05, 신호봉 15:01) → 보류. 14:05 이면 정상 신호
+    # 마감 25분 전 (15:05, 신호봉 15:01) → 보류. 12:05 이면 정상 신호
     def at(h, m):
         return lambda market: datetime(2026, 3, 25, h, m, tzinfo=TZ["KR"]).astimezone(TZ[market])
+    monkeypatch.setattr(E, "ENTRY_MAX_MIN_FROM_OPEN", 10_000)                      # 마감 임박 판정만 본다
     eng3, cap3 = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(14, 0))
     monkeypatch.setattr(E, "now_local", at(15, 5))
     monkeypatch.setattr(MH, "now_local", at(15, 5))
     eng3.evaluate("AAA", {"AAA": 100.8}, {})
     assert cap3.sent == [] and eng3.snapshots["AAA"]["regular"] is True
-    eng4, cap4 = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(13, 0))
-    monkeypatch.setattr(E, "now_local", at(14, 5))
-    monkeypatch.setattr(MH, "now_local", at(14, 5))
+    eng4, cap4 = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(11, 0))
+    monkeypatch.setattr(E, "now_local", at(12, 5))
+    monkeypatch.setattr(MH, "now_local", at(12, 5))
     eng4.evaluate("AAA", {"AAA": 100.8}, {})
     assert [s[0] for s in cap4.sent] == ["🔵 매수하세요"]
+    # 개장 4시간(ENTRY_MAX_MIN_FROM_OPEN) 뒤의 돌파(신호봉 13:01)는 매수 신호를 내지 않는다
+    monkeypatch.setattr(E, "ENTRY_MAX_MIN_FROM_OPEN", 240)
+    eng5, cap5 = make_engine(monkeypatch, tmp_path, candles=sc.scenario_candles(12, 0))
+    monkeypatch.setattr(E, "now_local", at(13, 5))
+    monkeypatch.setattr(MH, "now_local", at(13, 5))
+    eng5.evaluate("AAA", {"AAA": 100.8}, {})
+    assert cap5.sent == [] and eng5.snapshots["AAA"]["since_open"] == 241
 
 
 # --- 매수 취소·매도 판정은 현재가 틱이 아니라 완성봉 종가 -----------------------------
 
 def test_cancel_and_sell_judged_on_bar_close(monkeypatch, tmp_path):
+    ema = weak_ema(monkeypatch)
     eng, cap = make_engine(monkeypatch, tmp_path, candles=weak_candles())
     eng.evaluate("AAA", {"AAA": 100.8}, {})
     eng.pending["AAA"]["next_at"] = "2000-01-01T00:00:00+00:00"          # 반복 시각이 됐다고 치자
@@ -490,6 +515,7 @@ def test_cancel_and_sell_judged_on_bar_close(monkeypatch, tmp_path):
     eng.evaluate("AAA", {"AAA": 99.5}, {})                     # 종가가 기준선 아래 → 대기 취소
     assert eng.state["AAA"] == "관망" and cap.sent[-1][0] == "⚪ 매수 대기 취소" and cap.sent[-1][2].startswith("종가 100가 기준선 ")
 
+    ema["align"] = "정배열"
     eng2, cap2 = make_engine(monkeypatch, tmp_path)
     sc.run_steps(eng2, range(3))                               # 보유, 손절선 100.3
     held = {"AAA": {"qty": 10.0, "avg": 100.8}}
@@ -515,6 +541,7 @@ def test_shallow_break_with_volume_is_confirmed_sell(monkeypatch, tmp_path):
 # --- 신호 없이 산 포지션의 손절선과 수익 구간 상향 ----------------------------------
 
 def test_stop_ref_from_first_seen_bar_and_trailing(monkeypatch, tmp_path):
+    monkeypatch.setattr(E, "EXIT_TARGET_PCT", 100.0)          # 목표 익절(+1%)이 먼저 걸리면 상향 로직을 볼 수 없다
     eng, cap = make_engine(monkeypatch, tmp_path)
     held = {"AAA": {"qty": 10.0, "avg": 98.5}}
     eng.evaluate("AAA", {"AAA": 100.9}, held)                  # 우리 신호 없이 보유 발견
@@ -528,6 +555,7 @@ def test_stop_ref_from_first_seen_bar_and_trailing(monkeypatch, tmp_path):
 # --- 불타기는 매수와 같은 돌파 기준, 손절선 상향 ------------------------------------
 
 def test_addon_needs_strong_bar_and_raises_stop(monkeypatch, tmp_path):
+    monkeypatch.setattr(E, "EXIT_TARGET_PCT", 100.0)          # 목표 익절(+1%)이 불타기 기준(+2%)보다 먼저 걸린다 — 여기선 끈다
     eng, cap = make_engine(monkeypatch, tmp_path)
     eng.stop_ref["AAA"], eng.stop_src["AAA"] = 99.0, "매수 신호봉 저점"
     eng.evaluate("AAA", {"AAA": 100.9}, {"AAA": {"qty": 10.0, "avg": 98.0}})    # +2.96%, 강봉 돌파
@@ -601,15 +629,66 @@ def test_entry_skips_bear_ema(monkeypatch, tmp_path):
 # --- 매수 확신도: 확인 항목이 모자라면 대기, 채워지면 승격 -----------------------------
 
 def test_entry_watch_then_upgrade_when_confirmations_fill(monkeypatch, tmp_path):
-    weak = sc.scenario_candles()
-    weak[-1] = bar(datetime(2026, 3, 25, 10, 1, tzinfo=TZ["KR"]), 100.8, 2500, high=100.85, low=100.3)   # 2.4배: 요건은 되지만 강한 거래량 아님
-    eng, cap = make_engine(monkeypatch, tmp_path, candles=weak)
+    ema = weak_ema(monkeypatch)                                               # 요건은 되지만 EMA 가 혼조
+    eng, cap = make_engine(monkeypatch, tmp_path, candles=weak_candles())
     eng.evaluate("AAA", {"AAA": 100.8}, {})
     assert cap.signals[-1].kind == "ENTRY_WATCH" and cap.sent[-1][0] == "🔵 매수 대기하세요"
-    assert "확인 2/3" in cap.sent[-1][2] and "거래량 3배↑ ✗" in cap.sent[-1][2] and eng.state["AAA"] == "진입대기"
-    push_bar(eng, 100.9, volume=4000, high=100.95, low=100.8)                 # 다음 봉에 거래량 3.9배가 붙음
+    assert "확인 0/1" in cap.sent[-1][2] and "EMA 정배열 ✗" in cap.sent[-1][2] and eng.state["AAA"] == "진입대기"
+    ema["align"] = "정배열"                                                    # 다음 봉에서 정배열로 돌아섬
+    push_bar(eng, 100.9, volume=4000, high=100.95, low=100.8)
     eng.evaluate("AAA", {"AAA": 100.9}, {})
     assert cap.signals[-1].kind == "ENTRY" and cap.sent[-1][0] == "🔵 매수하세요" and "승격" in cap.sent[-1][2]
     assert eng.state["AAA"] == "보유" and "AAA" not in eng.pending and eng.signal_pos["AAA"]["price"] == 100.9
     eng.evaluate("AAA", {"AAA": 100.9}, {})                                   # 승격 뒤엔 '대기' 반복이 없다
     assert cap.signals[-1].kind == "ENTRY" and len(cap.signals) == 2
+
+
+# --- 추격 배제: 갭·전일 대비·전일 등락·5세션·20세션 평균 -------------------------------
+
+def test_chase_filter_blocks_extended_entries(monkeypatch, tmp_path):
+    def rows(closes, opens=None):
+        opens = opens or closes
+        return [(f"2026-03-{i + 1:02d}", o, c) for i, (o, c) in enumerate(zip(opens, closes))]
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    assert eng._chase_reason("AAA", 100.8, 100.0) == ""                          # 일봉이 없으면 막지 않는다
+    eng.daily["AAA"] = rows([100.0] * 25)
+    assert eng._chase_reason("AAA", 100.8, 100.0) == ""                          # 전부 한도 안
+    assert eng._chase_reason("AAA", 100.8, 101.2).startswith("갭 +1.2%")          # 시가가 전일 종가 +1% 이상
+    assert eng._chase_reason("AAA", 103.5, 100.0).startswith("전일 종가 대비 +3.5%")
+    eng.daily["AAA"] = rows([100.0] * 24 + [100.0], opens=[100.0] * 24 + [97.5])  # 전일 시가 97.5 → 종가 100 (+2.6%)
+    assert eng._chase_reason("AAA", 100.8, 100.0).startswith("전일 +2.6%")
+    eng.daily["AAA"] = rows([100.0] * 19 + [92.0] + [100.0] * 5)                 # 5세션 전 종가 92 → 100 (+8.7%)
+    assert eng._chase_reason("AAA", 100.8, 100.0).startswith("5세션 +8.7%")
+    eng.daily["AAA"] = rows([88.0] * 14 + [100.0] * 6)                           # 5세션은 0% 지만 20세션 평균 91.6 대비 +10.0%
+    assert eng._chase_reason("AAA", 100.8, 100.0).startswith("20세션 평균 위 +10.0%")
+    # 돌파가 성립해도 추격 자리면 매수 신호 없이 보류 (집계 chase). 일봉 정상이면 신호가 난다
+    eng.evaluate("AAA", {"AAA": 100.8}, {})
+    assert cap.sent == [] and eng.stats["AAA"].get("chase") == 1 and eng.state.get("AAA", "관망") == "관망"
+    eng2, cap2 = make_engine(monkeypatch, tmp_path)
+    eng2.daily["AAA"] = rows([100.0] * 25)
+    eng2.evaluate("AAA", {"AAA": 100.8}, {})
+    assert [s[0] for s in cap2.sent] == ["🔵 매수하세요"]
+
+
+def test_refresh_daily_keeps_only_past_sessions_with_open(monkeypatch, tmp_path):
+    daily_bars = [bar(datetime.fromisoformat(d).replace(tzinfo=TZ["KR"]), c, 1, open_=o)
+                  for d, o, c in (("2026-03-23", 90.0, 91.0), ("2026-03-24", 92.0, 95.0), ("2026-03-25", 96.0, 100.0))]
+    eng, _ = make_engine(monkeypatch, tmp_path, client=sc.FakeClient(sc.scenario_candles(), daily=daily_bars))
+    eng.refresh_daily(["AAA"])
+    assert eng.daily["AAA"] == [("2026-03-23", 90.0, 91.0), ("2026-03-24", 92.0, 95.0)]    # 오늘(03-25) 일봉은 뺀다
+    assert eng.daily_date["AAA"] == "2026-03-25"
+    eng.client.daily = []
+    eng.refresh_daily(["AAA"])                                                                # 같은 세션은 다시 받지 않는다
+    assert len(eng.daily["AAA"]) == 2
+
+
+# --- 손실 중에는 거래량 소진 '정리' 알림이 없다 ------------------------------------------
+
+def test_fade_exit_only_when_in_profit(monkeypatch, tmp_path):
+    eng, cap = make_engine(monkeypatch, tmp_path)
+    eng.evaluate("AAA", {"AAA": 100.8}, {})
+    eng.entry_at.pop("AAA")                                                # 익절 유예를 지난 것으로
+    eng.sessions["AAA"].peak = 10.0                                        # 정점 10배 → 최근 1배는 소진
+    push_bar(eng, 100.6)                                                   # 신호가 대비 -0.2%, 기준선 중립대 → 예전엔 '전량 정리 대기'
+    eng.evaluate("AAA", {"AAA": 100.6}, {})
+    assert all(s.kind not in ("EXIT_FULL", "EXIT_WATCH", "EXIT_HALF") for s in cap.signals)

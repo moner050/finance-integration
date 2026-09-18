@@ -14,10 +14,11 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from . import db, lifecycle
-from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, ALERT_COOLDOWN_MIN, CLOSE_WARN_MIN, DATA_DIR,
+from .config import (ADDON_MAX_COUNT, ADDON_MIN_PROFIT_PCT, ALERT_COOLDOWN_MIN, CLOSE_WARN_MIN, DAILY_COUNT, DATA_DIR,
                      ENABLE_ADD_ON, ENABLE_AMBIGUOUS, ENABLE_EXIT_SIGNAL, ENABLE_TRACKING,
-                     ENTRY_CONFIRM_MIN, ENTRY_MIN_PEAK_RATIO, ENTRY_PENDING_MAX_MIN, ENTRY_SKIP_BEAR_EMA,
-                     ENTRY_STRONG_RVOL, EXIT_GRACE_MIN,
+                     ENTRY_CONFIRM_MIN, ENTRY_MAX_GAP_PCT, ENTRY_MAX_MA20_PCT, ENTRY_MAX_MIN_FROM_OPEN, ENTRY_MAX_PREV_DAY_PCT,
+                     ENTRY_MAX_RET5_PCT, ENTRY_MAX_VS_PREV_PCT, ENTRY_MIN_PEAK_RATIO, ENTRY_PENDING_MAX_MIN, ENTRY_SKIP_BEAR_EMA,
+                     EXIT_GRACE_MIN, EXIT_TARGET_PCT,
                      EXIT_PORTION_HALF, EXIT_PORTION_STRONG, EXIT_PORTION_THIRD, EXIT_REPEAT_MAX_MIN,
                      FADE_BARS, FADE_MIN_PEAK, FADE_STRONG_RATIO, FADE_WEAK_RATIO, LEADER_GAP_PCT,
                      LEADER_MOMENTUM_GATE, LEADER_MOMENTUM_MIN, OPEN_EXCLUDE_MIN, POLL_INTERVAL_SEC,
@@ -50,6 +51,8 @@ class SignalEngine:
         self.last_bar = {}              # ticker -> 마지막으로 평가한 완성봉 timestamp
         self.prev_close = {}
         self.prev_close_date = {}       # symbol -> 전일 종가를 받은 현지 세션 날짜
+        self.daily = {}                 # ticker -> [(날짜, 시가, 종가)] 오늘보다 앞선 일봉 (추격 배제 판정용)
+        self.daily_date = {}            # ticker -> 일봉을 받은 세션 날짜
         self.volume_profile = {}        # ticker -> {HH:MM: [거래량...]}
         self.profile_date = {}          # ticker -> 구축한 세션 날짜. 시장별로 세션이 달라 종목별로 관리
         self.pre_history = {}           # ticker -> {날짜: [(분, 거래량)]} 과거 프리마켓 (거래량 배수 기준)
@@ -178,7 +181,7 @@ class SignalEngine:
             log.warning("%s 보유 중인데 감시 목록에서 빠졌다 — 손절·매도 알림이 나가지 않는다", ticker)
         for d in (self.state, self.pending, self.signal_pos, self.stop_ref, self.stop_src, self.entry_at, self.exit_at,
                   self.addon_count, self.last_seen, self.last_bar, self.sessions, self.volume_profile, self.profile_date,
-                  self.snapshots, self.stats):
+                  self.snapshots, self.stats, self.daily, self.daily_date):
             d.pop(ticker, None)
 
     _SNAP_KEYS = ("label", "market", "price", "close", "vwap", "band", "pos", "pos_close", "prev_rvol",
@@ -327,6 +330,55 @@ class SignalEngine:
                 self.prev_close[s] = prev
             self.prev_close_date[s] = session
 
+    def refresh_daily(self, tickers: list):
+        """세션당 한 번 종목의 일봉을 받아 오늘보다 앞선 (날짜, 시가, 종가) 만 남긴다. 추격 배제(_chase_reason) 의 재료다.
+        실패하면 이전 값을 유지하고, 없으면 그 항목은 판정에서 빠진다 (막지 않는다)."""
+        for t in tickers:
+            market = self.watchlist[t]["market"]
+            session = now_local(market).strftime("%Y-%m-%d")
+            if self.daily_date.get(t) == session:
+                continue
+            rows = []
+            try:
+                for c in self.client.get_candles(t, interval="1d", count=DAILY_COUNT) or []:
+                    dt = parse_ts(c.get("timestamp"), market)
+                    if dt is None or dt.strftime("%Y-%m-%d") >= session:
+                        continue
+                    rows.append((dt.strftime("%Y-%m-%d"), float(c.get("openPrice") or 0), float(c["closePrice"])))
+            except Exception as e:
+                log.warning("일봉 %s 조회 실패 — 이전 값 유지: %s", t, e)
+                continue
+            if rows:
+                self.daily[t] = sorted(rows)
+            self.daily_date[t] = session
+
+    def _chase_reason(self, ticker: str, price: float, session_open: float) -> str:
+        """이미 많이 오른 자리인가. 넘은 항목의 설명을, 아니면 빈 문자열을 돌려준다.
+
+        2026-09-17 3개월 재생에서 두 시장·표본 안팎 모두 같은 방향이었던 유일한 필터다: 갭 +1% 이상, 전일 종가 대비 +3% 이상,
+        전일 +2% 이상, 5세션 +8% 이상, 20세션 평균 위 +10% 이상인 자리의 돌파는 다음날 종가까지 −1~−8% 였다.
+        일봉이 모자란 항목은 건너뛴다.
+        """
+        rows = self.daily.get(ticker) or []
+        if not rows:
+            return ""
+        prev_open, prev_close = rows[-1][1], rows[-1][2]
+        if prev_close <= 0:
+            return ""
+        if session_open > 0 and (session_open - prev_close) / prev_close * 100 >= ENTRY_MAX_GAP_PCT:
+            return f"갭 {(session_open - prev_close) / prev_close * 100:+.1f}% (한도 +{ENTRY_MAX_GAP_PCT:g}%)"
+        if (price - prev_close) / prev_close * 100 >= ENTRY_MAX_VS_PREV_PCT:
+            return f"전일 종가 대비 {(price - prev_close) / prev_close * 100:+.1f}% (한도 +{ENTRY_MAX_VS_PREV_PCT:g}%)"
+        if prev_open > 0 and (prev_close - prev_open) / prev_open * 100 >= ENTRY_MAX_PREV_DAY_PCT:
+            return f"전일 {(prev_close - prev_open) / prev_open * 100:+.1f}% (한도 +{ENTRY_MAX_PREV_DAY_PCT:g}%)"
+        if len(rows) >= 6 and rows[-6][2] > 0 and (prev_close - rows[-6][2]) / rows[-6][2] * 100 >= ENTRY_MAX_RET5_PCT:
+            return f"5세션 {(prev_close - rows[-6][2]) / rows[-6][2] * 100:+.1f}% (한도 +{ENTRY_MAX_RET5_PCT:g}%)"
+        if len(rows) >= 20:
+            ma = sum(r[2] for r in rows[-20:]) / 20
+            if ma > 0 and (price - ma) / ma * 100 >= ENTRY_MAX_MA20_PCT:
+                return f"20세션 평균 위 {(price - ma) / ma * 100:+.1f}% (한도 +{ENTRY_MAX_MA20_PCT:g}%)"
+        return ""
+
     def leader_strength(self, leaders: list, prices: dict) -> float:
         ch = []
         for s in leaders:
@@ -404,7 +456,7 @@ class SignalEngine:
         ss = self._session(ticker)
         ss.update(candles, prof)
         vwap = ss.vwap
-        band = effective_band(candles)
+        band = effective_band(candles, market)
 
         leaders = cfg.get("leaders") or []
         if leaders:
@@ -432,7 +484,7 @@ class SignalEngine:
         return {
             "cfg": cfg, "market": market, "label": cfg.get("name") or ticker,
             "candles": candles, "bar_key": candles[-1].get("timestamp"),
-            "price": price, "close": close, "vwap": vwap, "band": band,
+            "price": price, "close": close, "vwap": vwap, "band": band, "session_open": ss.open_px,
             "pos": vwap_position(price, vwap, band),
             # 매수 판정은 신호봉 종가로 한다. 현재가는 봉 중간값이라 종가가 기준선 아래인
             # 봉에서도 순간 위로 튈 수 있고, 같은 봉은 다시 판정하지 않아 되돌릴 수 없다.
@@ -597,6 +649,9 @@ class SignalEngine:
             # 세션 VWAP 이 봉 한두 개로 만들어진 구간. '기준선 위' 가 자기 봉 typical price 와의
             # 비교가 되어 강봉 필터와 다를 게 없다. 정점 계산과 같은 개장 구간을 뺀다.
             return
+        if snap["since_open"] >= ENTRY_MAX_MIN_FROM_OPEN:
+            # 오후 돌파는 당일에도 다음날에도 손실이었다 (3개월 재생). 보유 중 판단은 위에서 계속된다.
+            return
         if self.hours.near_close(market):
             # 마감 CLOSE_WARN_MIN 분 안의 진입은 곧바로 '마감 전 정리' 를 받는 자기모순이다.
             return
@@ -640,6 +695,12 @@ class SignalEngine:
         if rvol_breakout and ENTRY_SKIP_BEAR_EMA and align == "역배열":
             log.debug("%s 돌파했으나 EMA 역배열 — 보류", ticker)
             rvol_breakout = False
+        # 추격 배제: 이미 많이 오른 자리(갭·전일 대비·전일 등락·5세션·20세션 평균)의 돌파는 내지 않는다.
+        chase = self._chase_reason(ticker, price, snap.get("session_open") or 0) if rvol_breakout else ""
+        if chase:
+            self.bump(ticker, "chase")
+            log.info("%s 돌파했으나 추격 자리 — 보류: %s", ticker, chase)
+            rvol_breakout = False
 
         if direction_ok and rvol_breakout and pos_close == "above":
             self.bump(ticker, "all")
@@ -647,8 +708,8 @@ class SignalEngine:
             rsi_prev, rsi_now = compute_rsi(snap["candles"])
             # 요건을 채웠어도 확인 항목이 모자라면 '대기' 다. 대기 신호는 자동매매로 가지 않고,
             # 진입대기 동안 확인 항목이 채워지면 _upgrade_entry 가 '매수하세요' 로 올린다.
-            checks = self._entry_confirmations(snap, align, rsi_prev, rsi_now)
-            strong = sum(ok for _, ok in checks) >= ENTRY_CONFIRM_MIN
+            checks = self._entry_confirmations(snap, align)
+            strong = self._confirmed(checks)
             now = datetime.now(timezone.utc)
             if strong:
                 # 확정 신호는 곧바로 신호 포지션이다 — 다음 알림은 '대기' 가 아니라 추가매수·익절·손절이다
@@ -676,14 +737,19 @@ class SignalEngine:
                 })
 
     @staticmethod
-    def _entry_confirmations(snap: dict, align: str, rsi_prev: float, rsi_now: float) -> list:
-        """매수 확신도 확인 항목 [(이름, 충족)]. 요건(방향·돌파·기준선·강봉)과 별개로 '지금 사도 되는가' 를 가른다."""
-        items = [("EMA 정배열", align == "정배열"), ("RSI 상승", rsi_now > rsi_prev),
-                 (f"거래량 {ENTRY_STRONG_RVOL:g}배↑", snap["rvol"] >= ENTRY_STRONG_RVOL)]
+    def _entry_confirmations(snap: dict, align: str) -> list:
+        """매수 확신도 확인 항목 [(이름, 충족)]. 요건(방향·돌파·기준선·강봉)과 별개로 '지금 사도 되는가' 를 가른다.
+        'RSI 상승'·'거래량 3배↑' 는 3개월 재생에서 변별력이 없어(RSI) 또는 거꾸로여서(거래량) 뺐다 — 남은 건 추세 정렬과 선행 모멘텀."""
+        items = [("EMA 정배열", align == "정배열")]
         mom = snap.get("momentum")
         if snap["cfg"].get("leaders") and mom is not None:
             items.append(("선행 모멘텀", mom <= 0 if snap["cfg"].get("inverse") else mom >= 0))
         return items
+
+    @staticmethod
+    def _confirmed(checks: list) -> bool:
+        """확인 항목이 ENTRY_CONFIRM_MIN 개 이상(항목 수가 그보다 적으면 전부) 채워졌는가."""
+        return sum(ok for _, ok in checks) >= min(ENTRY_CONFIRM_MIN, len(checks))
 
     @staticmethod
     def _ema_note(align: str, sep: str = " |") -> str:
@@ -702,8 +768,8 @@ class SignalEngine:
             return False
         align = ema_alignment(snap["candles"])
         rsi_prev, rsi_now = compute_rsi(snap["candles"])
-        checks = self._entry_confirmations(snap, align, rsi_prev, rsi_now)
-        if sum(ok for _, ok in checks) < ENTRY_CONFIRM_MIN:
+        checks = self._entry_confirmations(snap, align)
+        if not self._confirmed(checks):
             return False
         self._open_signal(ticker, snap["price"], snap["bar_key"], datetime.now(timezone.utc))
         market = snap["market"]
@@ -955,6 +1021,19 @@ class SignalEngine:
             self._emit("SELL" if sig else "STOP", "🔴 손절하세요", label, ticker,
                              ref + f"손절 한도 {STOP_LOSS_PCT}% 도달 — 최후 안전망", account=mine)
             self._end_signal(ticker, held, price, "손절")
+        elif pnl >= EXIT_TARGET_PCT:
+            # 목표가 익절. 매도선 이탈만 기다리면 당일 +1.4~1.6% 까지 갔던 자리를 다 반납하고 승률 13% 로 털렸다 (3개월 재생).
+            # 판단 기준은 신호가(가상 평단) 대비 현재가. 확정 청산이라 자동매매로 간다.
+            self.exit_at[ticker] = datetime.now(timezone.utc)
+            self.entry_at.pop(ticker, None)
+            self.state[ticker] = "청산대기"
+            self.pending[ticker] = self._exit_pending("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} 익절하세요",
+                                                      f"목표 +{EXIT_TARGET_PCT:g}% 도달")
+            self._emit("EXIT_FULL", f"🟢 {EXIT_PORTION_STRONG} 익절하세요", label, ticker,
+                             ref + f"목표 +{EXIT_TARGET_PCT:g}% 도달 (현재가 {price_text(price, market)})\n"
+                             f"돌파 뒤 첫 이익 구간에서 챙긴다 — 더 가면 다음 신호로 다시 탄다",
+                             account=mine + (f" · 보유 {qty:g}주" if held else ""))
+            self._end_signal(ticker, held, price, "익절")
         elif broke:
             # 위치 기반(크로스 아님)이라 선 아래 머무는 동안 반복되지만,
             # 손절 성격의 알림은 반복돼야 한다. 쿨다운이 빈도를 제한한다.
@@ -978,11 +1057,10 @@ class SignalEngine:
             if sure:
                 self._end_signal(ticker, held, price, "매도")
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
-              and faded <= FADE_STRONG_RATIO):
-            # 발동 조건은 순수 시장 기준(거래량 소진)이다. 손익은 표시용이고
-            # 판단에 쓰지 않는다. 다만 손실 중인데 '익절'이라 부르면 어색하므로
-            # 문구만 상황에 맞춘다.
-            verb = "익절하세요" if pnl > 0 else "정리하세요"
+              and faded <= FADE_STRONG_RATIO and pnl > 0):
+            # 발동 조건은 거래량 소진이지만 수익 중일 때만 낸다. 손실 중의 '정리하세요' 는 3개월 재생 75건이 전부 손실이었다 —
+            # 손실 포지션은 매도선 이탈·손절 한도가 맡는다.
+            verb = "익절하세요"
             # 확신도: 가격이 기준선 아래로 내려섰으면 확정, 중립대면 대기 (기준선 위였다면 holding_up 으로 애초에 안 온다)
             sure = pos_now == "below"
             strong_level = f"🟢 {EXIT_PORTION_STRONG} {verb}"
@@ -999,7 +1077,7 @@ class SignalEngine:
                              + ("" if sure else "\n가격은 아직 기준선 중립대 — 아래로 내려서면 익절 신호로 올린다"),
                              account=mine + (f" · 보유 {qty:g}주" if held else ""))
             if sure:
-                self._end_signal(ticker, held, price, "익절" if pnl > 0 else "정리")
+                self._end_signal(ticker, held, price, "익절")
         elif (ENABLE_ADD_ON and pos_now == "above" and rvol_breakout
               and pnl >= ADDON_MIN_PROFIT_PCT
               and not (sig and snap.get("bar_key") == sig.get("bar_key"))
@@ -1018,8 +1096,8 @@ class SignalEngine:
                              f"⚠ 물량 늘리면 손절 시 손실도 같은 배로 커짐",
                              account=mine)
         elif (ENABLE_EXIT_SIGNAL and faded is not None and not holding_up
-              and faded <= FADE_WEAK_RATIO):
-            verb = "익절" if pnl > 0 else "정리"
+              and faded <= FADE_WEAK_RATIO and pnl > 0):
+            verb = "익절"
             self._emit("EXIT_HALF", f"🟡 {EXIT_PORTION_HALF} {verb} 검토", label, ticker,
                              ref + f"거래량이 오늘 정점 {rvol_peak}배 → 최근 {FADE_BARS}봉 평균 {rvol_recent}배 "
                              f"({round(faded * 100)}% 수준)\n"
@@ -1288,6 +1366,7 @@ class SignalEngine:
             leaders = sorted({s for t in watch for s in (self.watchlist[t].get("leaders") or [])})
             try:
                 self.refresh_volume_profile(watch)
+                self.refresh_daily(active)          # 추격 배제용 일봉 (세션당 한 번)
                 # 프리마켓 등락률 계산에 종목 자신의 전일 종가도 필요하다.
                 # 선행 종목은 감시 종목과 같은 시장으로 본다.
                 need = {t: self.watchlist[t]["market"] for t in pre}

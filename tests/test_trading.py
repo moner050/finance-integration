@@ -416,11 +416,14 @@ def test_engine_repeat_entry_does_not_reorder(monkeypatch, tmp_path):
     DBM.seed_watchlist(store2, {"AAA": {**CFG, "name": "테스트"}})
     weak = sc.scenario_candles()
     weak[-1] = bar(datetime.fromisoformat(weak[-1]["timestamp"]), 100.8, 2500, high=100.85, low=100.3)
+    ema = {"align": "혼조"}                                                  # 확인 항목(EMA 정배열)이 모자란 상태
+    monkeypatch.setattr(E, "ema_alignment", lambda candles: ema["align"])
     client2, rec2 = sc.FakeClient(weak), Recorder("engine")
     eng2 = E.SignalEngine(client2, Dispatcher([rec2]), DBM.load_watchlist(store2), store2,
                           X.Executor(store2, SlowBroker(), "dry", Dispatcher([Recorder("telegram")])))
     eng2.evaluate("AAA", {"AAA": 100.8}, {})
     assert rec2.got[-1].kind == "ENTRY_WATCH" and DBM.recent_orders(store2) == []
+    ema["align"] = "정배열"
     client2.candles = weak + [bar(datetime.fromisoformat(weak[-1]["timestamp"]) + timedelta(minutes=1), 100.9, 4000,
                                   high=100.95, low=100.8)]
     eng2.evaluate("AAA", {"AAA": 100.9}, {})
