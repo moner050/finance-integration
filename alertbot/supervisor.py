@@ -1,4 +1,4 @@
-"""관리 프로세스 — python run.py 하나로 엔진·Binance 워커·백오피스를 띄우고 지킨다.
+"""관리 프로세스 — python run.py 하나로 엔진·Binance 워커·매크로 수집·백오피스를 띄우고 지킨다.
 
 - 자식은 각자의 run_*.py 를 그대로 실행한다. 새 프로세스 그룹(Windows)·세션(POSIX)이라 콘솔 Ctrl+C 는 여기만 받는다
   — 주문을 내는 도중의 워커에 KeyboardInterrupt 가 떨어지지 않는다.
@@ -28,10 +28,10 @@ from .models import Signal
 
 log = logging.getLogger("supervisor")
 
-SERVICES = {"engine": "run_engine.py", "binance": "run_binance.py", "backoffice": "run_backoffice.py"}
+SERVICES = {"engine": "run_engine.py", "binance": "run_binance.py", "macro": "run_macro.py", "backoffice": "run_backoffice.py"}
 ACTIONS = ("start", "stop", "restart")
-GRACE_SEC = {"engine": 120, "binance": 60, "backoffice": 15}   # 멈춤 요청 뒤 kill 까지 — 주문 도중 끊기지 않게 한 사이클보다 넉넉히
-STALE_SEC = {"engine": 900, "binance": 600}                    # heartbeat 가 이만큼 끊기면 멈춘 것으로 본다 (백오피스는 보지 않는다)
+GRACE_SEC = {"engine": 120, "binance": 60, "macro": 60, "backoffice": 15}   # 멈춤 요청 뒤 kill 까지 — 주문 도중 끊기지 않게 한 사이클보다 넉넉히
+STALE_SEC = {"engine": 900, "binance": 600, "macro": 900}                 # heartbeat 가 이만큼 끊기면 멈춘 것으로 본다 (백오피스는 보지 않는다)
 BACKOFF_SEC = (5, 30, 120, 300)
 HEALTHY_SEC = 300          # 이만큼 돌다 죽었으면 연속 실패를 처음부터 센다
 TICK_SEC = 1
@@ -43,7 +43,7 @@ ALERT_LINES = 5
 QUEUE_MAX = 2000
 USAGE = "사용법: python run.py                 전부 실행\n" \
         "        python run.py status          상태\n" \
-        "        python run.py start|stop|restart engine|binance|backoffice"
+        "        python run.py start|stop|restart engine|binance|macro|backoffice"
 
 
 def iso(t: datetime) -> str:
@@ -153,7 +153,7 @@ class Supervisor:
     # -- 기동·종료 ----------------------------------------------------------------
     def boot(self, now: datetime):
         db.ensure_services(self.store, [*SERVICES, "supervisor"])
-        for name in SERVICES:                       # 꺼져 있던 동안 쌓인 요청은 버린다 — run.py 는 늘 셋 다 켠다
+        for name in SERVICES:                       # 꺼져 있던 동안 쌓인 요청은 버린다 — run.py 는 늘 전부 켠다
             db.update_service(self.store, name, state="stopped", pid=None, request=None, restarts=0)
         db.update_service(self.store, "supervisor", state="running", pid=self.pid, host=self.host, started_at=iso(now),
                           heartbeat_at=iso(now), request=None)

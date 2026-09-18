@@ -147,6 +147,7 @@ RVOL_WINDOW = 20               # 프로파일이 없을 때 쓰는 이동평균 
 RVOL_TRIGGER = 2.0
 VWAP_BAND_PCT = 0.15           # VWAP 밴드 하한 (%). 실제는 변동성에 맞춰 커진다
 ATR_BAND_MULT = 0.5            # 밴드 = 최근 20봉 평균진폭 × 이 배수 (하한 이상)
+ATR_BAND_MULT_KR = 1.0         # 한국 종목의 배수. 2026-09-17 3개월 재생에서 한국만 밴드 2배가 표본 안팎 모두 개선 (미국은 악화)
 STRONG_BAR_MIN = 0.5           # 매수 신호봉 종가가 봉 범위의 이 비율 이상 위치해야 함
 LEADER_GAP_PCT = 1.0           # 선행 바스켓 평균 등락률 트리거 (%)
 # 선행 바스켓의 최근 N분 변화율. 전일 종가 대비 등락률만 보면 갭업 뒤 흘러내리는
@@ -158,18 +159,31 @@ STOP_LOSS_PCT = -5.0           # 고정 손절 한도
 # 익절은 평단이 아니라 거래량 소진으로 판단한다.
 # 평단은 진입가가 아닐 수 있고(물타기·장기분 혼합), 시장은 내 평단을 모른다.
 # 거래량이 정점 대비 얼마나 줄었는지가 추세의 실제 연료 상태를 보여준다.
-FADE_STRONG_RATIO = 0.4        # 세션 정점 대비 이 아래면 연료 소진 — 익절 신호
-FADE_WEAK_RATIO = 0.6          # 이 아래면 둔화 시작 — 일부 익절 검토
+FADE_STRONG_RATIO = 0.4        # 세션 정점 대비 이 아래면 연료 소진 — 익절 신호 (수익 중일 때만. 손실 중 '정리' 는 75건 전부 손실이라 뺐다)
+FADE_WEAK_RATIO = 0.6          # 이 아래면 둔화 시작 — 일부 익절 검토 (수익 중일 때만)
 FADE_MIN_PEAK = 2.5            # 정점이 이 배수는 넘어야 '터졌다'고 본다
 OPEN_EXCLUDE_MIN = 10          # 개장 후 이 분 동안의 봉은 정점 계산에서 제외하고 매수 신호도 내지 않는다 (VWAP 이 아직 봉 한두 개)
 FADE_BARS = 3                  # 거래량 소진 판정에 쓰는 최근 완성봉 수. 1분봉 하나는 조용한 1분에 '전량 정리' 를 만든다
 TRAIL_MIN_PROFIT_PCT = 1.0     # 이 수익률 이상이면 매도선을 기준봉 저점과 밴드 하단 중 높은 쪽으로 (수익 반납 축소)
 ENTRY_SKIP_BEAR_EMA = True     # EMA 역배열(9<20<50)에서는 매수 신호를 내지 않는다. 추적 7건 중 역배열·혼조 진입이 모두 음수 — 표본이 쌓이면 재검토
-# 신호 확신도. 요건(방향·돌파·기준선 위·강봉)을 다 채운 매수 신호도 확인 항목 — EMA 정배열 · RSI 상승 · 거래량 ENTRY_STRONG_RVOL 배 이상 ·
-# (선행 바스켓이 있으면) 선행 모멘텀이 방향과 같음 — 이 ENTRY_CONFIRM_MIN 개 이상이어야 '매수하세요' 다. 모자라면 '매수 대기하세요'
+# 신호 확신도. 요건(방향·돌파·기준선 위·강봉)을 다 채운 매수 신호도 확인 항목 — EMA 정배열 · (선행 바스켓이 있으면) 선행 모멘텀이
+# 방향과 같음 — 이 ENTRY_CONFIRM_MIN 개(항목 수가 더 적으면 전부) 이상이어야 '매수하세요' 다. 모자라면 '매수 대기하세요'
 # (ENTRY_WATCH, 자동매매 대상 아님)로 내고, 대기 중 확인 항목이 채워지면 그때 '매수하세요' 로 승격한다.
-ENTRY_STRONG_RVOL = 3.0
+# 2026-09-17 3개월 재생: 'RSI 상승' 은 확정 신호의 99% 가 채워 변별력이 없고, '거래량 3배↑' 는 미충족 신호가 오히려 나아 둘 다 뺐다.
 ENTRY_CONFIRM_MIN = 3
+# 추격 진입 배제 — 같은 재생에서 두 시장·표본 안팎 모두 방향이 같았던 유일한 축. 이미 많이 오른 자리의 돌파는 다음날까지 −1~−8% 였다.
+# 오늘 갭(시가/전일 종가), 현재가/전일 종가, 전일 등락(종가/시가), 5세션 수익률, 20세션 평균 대비 — 하나라도 넘으면 매수 신호를 내지 않는다.
+# 일봉 이력이 모자라면 그 항목은 건너뛴다 (막지 않는다).
+ENTRY_MAX_GAP_PCT = 1.0
+ENTRY_MAX_VS_PREV_PCT = 3.0
+ENTRY_MAX_PREV_DAY_PCT = 2.0
+ENTRY_MAX_RET5_PCT = 8.0
+ENTRY_MAX_MA20_PCT = 10.0
+DAILY_COUNT = 30               # 일봉 국면용으로 세션당 한 번 받는 일봉 수 (20세션 평균 + 여유)
+ENTRY_MAX_MIN_FROM_OPEN = 240  # 개장 뒤 이 분이 지나면 새 매수 신호를 내지 않는다 (오후 진입은 당일·다음날 모두 손실)
+# 목표가 익절: 신호가(가상 평단) 대비 이 % 에 닿으면 확정 익절. 당일 최대 이익 중앙값이 +1.4~1.6% 인데 매도선 이탈만으로 청산하면
+# 승률 13% 로 털렸다. 종가 기준 매도선 + 목표 +1% 가 재생한 청산 변형 중 최선 (승률 33~39%)
+EXIT_TARGET_PCT = 1.0
 # 매도 확신도: 종가가 매도선을 밴드 폭보다 깊이 뚫었거나 거래량이 RVOL_TRIGGER 배 이상이면 '매도하세요', 아니면 '매도 대기하세요'
 # (EXIT_WATCH). 거래량 소진은 가격이 기준선 아래로 내려서야 '익절하세요', 중립대면 대기. 손절 한도(-5%)는 항상 확정이다.
 
@@ -296,7 +310,8 @@ FOLLOW_SPECS = [
     {"name": "급등 추종", "side": "long", "interval": "1d", "label": "일봉", "symbols": SURGE_1D_SYMBOLS,
      "lookback": 20, "atr_mult": 4.0, "rsi": 70.0, "base_bars": 90, "reentry_bars": 10, "hold_bars": 20, "stop": ("pct", 10.0),
      "regime": "bull", "kinds": ("SURGE_WATCH_1D", "SURGE_ENTRY_1D")},
-    # 일봉 급락 추종 숏: 20봉 고점 대비 ≥ 기준ATR×4 (ETC 약 -27%), 첫 반등 뒤 EMA9 재이탈, 약세 국면만, 손절 진입 +25% (반등 고점은 8건 중 6건에서 5~7% 더 뚫린다)
+    # 일봉 급락 추종 숏: 20봉 고점 대비 ≥ 기준ATR×4 (ETC 약 -27%), 첫 반등 뒤 EMA9 재이탈, 약세 국면만, 손절 진입 +25%
+    # (반등 고점은 8건 중 6건에서 5~7% 더 뚫린다). 이 값은 공용 기준(격리 3배)이고, 배율이 높은 계정은 청산선 안으로 자동으로 당겨진다 — stop_for_leverage()
     {"name": "급락 추종", "side": "short", "interval": "1d", "label": "일봉", "symbols": CRASHFOLLOW_1D_SYMBOLS,
      "lookback": 20, "atr_mult": 4.0, "rsi": 30.0, "base_bars": 90, "reentry_bars": 10, "hold_bars": 20, "stop": ("pct", 25.0),
      "regime": "bear", "kinds": ("CRASH_WATCH_1D", "CRASH_SHORT_1D")},
@@ -314,7 +329,8 @@ SCAN_BASE_ATR_BARS = 720       # 기준 ATR = 직전 30일 ATR14% 중앙값. 7�
 SCAN_ATR_MULT = 10.3           # 급변 문턱 (기준 ATR 배수) — 4개월 하루 알림 중앙값 10건
 SCAN_KLINES = 1000             # 코인당 받는 1시간봉 (기준 ATR 30일 + 여유, weight 5)
 SCAN_MAX_LINES = 10            # 한 알림에 싣는 코인 수. 나머지는 '외 N종목'
-# 급등 소진 숏 SCAN_FADE — 공용 가상 장부 전용, 실제 주문 없음 (BINANCE_LIVE_STRATEGIES 에 없다).
+# 급등 소진 숏 SCAN_FADE — 공용 가상 장부와 계정 live 둘 다 (2026-09-18 live 추가). 대상 코인이 감지 때마다 달라져,
+# 진입할 때 그 심볼의 필터·격리·배율을 그 자리에서 건다. 크기가 작아(자본의 1/8) 자본이 작으면 주문 최소 단위에 걸려 보류된다.
 # 2026-09-17 4개월 분석(보고서 「급등 코인 소진 숏」): 급등 감지 코인은 72시간 중앙 −11.6% 흘러내렸지만 감지 직후 24시간 안에 중앙 +15% 더 올라
 # 곧바로 숏은 손절에 걸렸다. 1시간 종가가 EMA50 아래로 꺾인 뒤의 숏이 설정 주변(EMA20·50, 대기 24·48h, 손절 15~20%, 보유 48~72h)에서 고르게 이익 —
 # 최종안 405건 건당 +1.68% (수수료·펀딩 뒤)·승률 59.5%·최대 낙폭 −14.7%. 설정 선택에 전 기간을 봐서, 전진 검증 기대치는 건당 +0.66~1.15% 다.
@@ -333,13 +349,36 @@ SCAN_FADE_MAX_OPEN = 8         # 이 전략 동시 보유 상한 (같은 코인�
 BINANCE_TRADE_MODE = (_CFG.get("ALERT_BINANCE_TRADE_MODE") or "off").strip().lower()
 if BINANCE_TRADE_MODE not in ("off", "dry", "live"):
     raise SystemExit(f"ALERT_BINANCE_TRADE_MODE 는 off|dry|live 중 하나: {BINANCE_TRADE_MODE}")
-BINANCE_TRADE_EXCHANGE_LEV = 3         # live 심볼 배율 (격리·헤지 모드). 청산 거리 33% — 가장 넓은 손절(일봉 숏 +25%)보다 밖
+# 공용 가상 장부의 격리 배율 — 공용 채널 알림(손절 참고선)의 기준이다. 3배의 청산 거리는 약 32.8% 라 위 손절(−3/−6/−10/+25%)이 전부 그 안에 든다.
+# 계정 live 는 이 값이 아니라 **계정별 배율**(alert_accounts.binance_leverage, 백오피스 자동매매 화면)을 쓴다.
+# 어느 쪽이든 진입 크기는 BINANCE_TRADE_LEVERAGE 가 정한다 — 격리 배율은 증거금과 청산 거리만 바꾼다.
+BINANCE_TRADE_EXCHANGE_LEV = 3
+# 백오피스에서 넣을 수 있는 계정 배율. 상한 5배 — 7배면 손절 상한이 8.8% 로 내려가 일봉 롱(−10%)까지 잘린다.
+# 5배(상한 14.5%)는 일봉 롱·숏·급락 매수는 온전하고 급등 소진 숏(+20%)만 잘리는 마지막 지점이다. 소진 숏까지 온전하려면 3배.
+BINANCE_LEVERAGE_RANGE = (1, 5)
+BINANCE_MAINT_MARGIN_PCT = 0.5           # 유지증거금 가정 (BTC 0.40 · ETC 0.50 — 큰 쪽으로 잡는다). 청산 거리 = 100/배율 − 이 값
+# 손절은 청산선에서 이만큼(%p) 안쪽에 둔다. 넘는 손절은 여기까지 당긴다. 손절은 마크 가격 트리거라 보통 먼저 체결되지만,
+# 갭·플래시 크래시에서는 트리거와 시장가 체결 사이가 벌어진다 (레버리지 분석: 최종가 꼬리가 마크보다 최대 20~28%).
+# 2.0 → 5.0 (2026-09-18): 7배에서 일봉 롱 −10% 가 여유 3.8%p 로 청산선에 너무 붙어 있었다. 5.0 이면 7배 손절 상한이 8.8% —
+# 그 전략에서 이긴 거래의 최대 역행 8.2% 보다 아직 밖이라 승자를 털어내지는 않는다 (여유는 0.6%p 뿐이다).
+BINANCE_STOP_LIQ_MARGIN_PCT = 5.0
+
+
+def liq_distance_pct(leverage: float) -> float:
+    """격리 마진의 청산 거리(%). 진입가에서 이만큼 역행하면 청산이다."""
+    return 100.0 / float(leverage) - BINANCE_MAINT_MARGIN_PCT
+
+
+def max_stop_pct(leverage: float) -> float:
+    """그 배율에서 허용되는 손절 폭(%) — 청산선에서 BINANCE_STOP_LIQ_MARGIN_PCT 안쪽."""
+    return max(0.1, liq_distance_pct(leverage) - BINANCE_STOP_LIQ_MARGIN_PCT)
 BINANCE_TRADE_CAPITAL = float(_CFG.get("ALERT_BINANCE_TRADE_CAPITAL") or 1000)   # 가상 장부의 전략별 배분 자본 (USDT). live 는 계정별 자본
 # 전략(진입 신호 종류)별 유효 배율 = 명목가 ÷ 배분 자본. 레버리지 분석의 시작값 — 최대는 3 / 1.5 / 2 / 1.
 # SCAN_FADE 는 포지션당 1/8 (동시 SCAN_FADE_MAX_OPEN 개를 다 열면 자본 1배)
 BINANCE_TRADE_LEVERAGE = {"CRASH_BUY": 2.0, "SURGE_ENTRY": 1.0, "SURGE_ENTRY_1D": 1.5, "CRASH_SHORT_1D": 0.5, "SCAN_FADE": 0.125}
-# 계정 live 로 실제 주문을 내는 전략. 나머지(SCAN_FADE)는 공용 가상 장부에서만 돌고, live 한도(자본 합)에도 넣지 않는다
-BINANCE_LIVE_STRATEGIES = ("CRASH_BUY", "SURGE_ENTRY", "SURGE_ENTRY_1D", "CRASH_SHORT_1D")
+# 계정 live 로 실제 주문을 내는 전략. 여기 없는 전략은 공용 가상 장부에서만 돌고 live 한도(자본 합)에도 넣지 않는다.
+# SCAN_FADE 는 대상 코인이 그때그때 정해져(거래대금 상위 30) 진입할 때마다 그 심볼의 필터·격리·배율을 건다 (binance_broker.ensure).
+BINANCE_LIVE_STRATEGIES = ("CRASH_BUY", "SURGE_ENTRY", "SURGE_ENTRY_1D", "CRASH_SHORT_1D", "SCAN_FADE")
 BINANCE_TRADE_MAX_OPEN = {"SCAN_FADE": SCAN_FADE_MAX_OPEN}    # 전략별 동시 보유 상한 (없는 전략은 심볼마다 하나)
 BINANCE_TRADE_FEE = 0.0005                                    # 테이커 편도
 BINANCE_TRADE_SLIP = {"ETCUSDT": 0.0005, "BTCUSDT": 0.0002}   # dry 체결 슬리피지 편도 (없는 심볼은 0.0005)

@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
@@ -23,8 +23,15 @@ from .. import accounts, binance_scan, config, db, supervisor
 from ..config import (ADMIN_EMAIL, AUTOTRADE_HARD_MAX_AMOUNT_KRW, AUTOTRADE_HARD_MAX_AMOUNT_USD, AUTOTRADE_MODE,
                       CLIENT_ID, CLIENT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_HOURS,
                       TG_PUBLIC_CHATS, TG_PUBLIC_TOKEN)
-from ..config import BINANCE_SIGNAL_TRADE_FILE, BINANCE_TRADE_MODE, DATA_DIR, SCAN_EXCLUDE, SCAN_TOP_N, SIGNAL_TRADE_FILE
+from .. import binance_trade
+from ..config import (BINANCE_LEVERAGE_RANGE, BINANCE_LIVE_STRATEGIES, BINANCE_SIGNAL_TRADE_FILE, BINANCE_SYMBOLS,
+                      BINANCE_TRADE_EXCHANGE_LEV, BINANCE_TRADE_LEVERAGE, BINANCE_TRADE_MODE, CRASH_STOP_PCT, DATA_DIR,
+                      FOLLOW_SPECS, SCAN_EXCLUDE, SCAN_FADE_STOP_PCT, SCAN_TOP_N, SIGNAL_TRADE_FILE,
+                      liq_distance_pct, max_stop_pct)
 from ..crypto import CryptoError
+from ..macro import sources as macro_sources
+from ..macro import store as macro_store
+from ..macro import view as macro_view
 from ..models import Signal
 from ..notify import build_channels
 from ..notify.dispatcher import Dispatcher
@@ -211,7 +218,7 @@ def status_context() -> dict:
             "watch_count": len(rows), "enabled_count": sum(1 for r in rows if r["enabled"])}
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/status", response_class=HTMLResponse)
 def status_page(request: Request, limit: int = 16):
     """상태 탭 = 지금 지표(30초 갱신) + 시황 시계열. 둘 다 '시장이 어디까지 왔나' 라 한 화면이다."""
     return render(request, "status.html", **(summary_context(min(max(limit, 2), 96)) | status_context()))
@@ -220,6 +227,101 @@ def status_page(request: Request, limit: int = 16):
 @app.get("/partials/status", response_class=HTMLResponse)
 def status_partial(request: Request):
     return render(request, "_status.html", **status_context())
+
+
+# -- 홈 (SOXX 매크로) --------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse)
+def home_page(request: Request):
+    """홈 = SOXX 연말 시나리오 + 미국·일본 금리·환율 + 이벤트 캘린더. 데이터는 run_macro.py 가 채운다."""
+    with get_db() as d:
+        ctx = macro_view.home_context(d)
+    return render(request, "home.html", **ctx)
+
+
+@app.get("/partials/home-market", response_class=HTMLResponse)
+def home_market_partial(request: Request):
+    today = macro_view.kst_today()
+    with get_db() as d:
+        market = macro_view.market_context(d, today)
+    return render(request, "_home_market.html", market=market, today=today)
+
+
+@app.get("/partials/home-calendar", response_class=HTMLResponse)
+def home_calendar_partial(request: Request, view: str = "list", ym: str = ""):
+    today = macro_view.kst_today()
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", ym or ""):
+        ym = today.strftime("%Y-%m")
+    with get_db() as d:
+        if view == "month":
+            ctx = {"cal_view": "month", "month": macro_view.calendar_month(d, ym, today)}
+        else:
+            ctx = {"cal_view": "list", "calendar": macro_view.calendar_upcoming(d, today)}
+    return render(request, "_home_calendar.html", today=today, **ctx)
+
+
+def macro_manage_context(message: str = None, error: str = None) -> dict:
+    """수집 현황 조회 + 시나리오 기본값 편집. 지표·이벤트는 매크로 워커가 받아 오므로 입력 폼이 없다."""
+    today = macro_view.kst_today()
+    with get_db() as d:
+        indicators = macro_store.load_series(d, macro_view.AUTO_KEYS, (today - timedelta(days=400)).isoformat())
+        events = [macro_view.decorate_event(e, today) for e in
+                  macro_store.list_events(d, (today - timedelta(days=30)).isoformat(), (today + timedelta(days=400)).isoformat())]
+        ctx = {"scenarios": macro_store.list_scenarios(d), "stats": macro_store.series_stats(d),
+               "jobs": macro_view.jobs_summary(macro_store.load_jobs(d), datetime.now(timezone.utc))}
+    latest = []
+    for key, (label, source, unit) in macro_view.AUTO_KEYS.items():
+        pts = indicators.get(key) or []
+        last = pts[-1] if pts else None
+        text = "-"
+        if last is not None:
+            if key in macro_view.DIR_TEXT:
+                text = macro_view.DIR_TEXT[key].get(int(last["v"]), last["v"])
+            elif key.endswith("_pct"):
+                text = f"{last['v']:+.1f}{unit}"
+            else:
+                text = f"{last['v']:,.2f}{unit}" if unit in ("%", "$") else f"{last['v']:,.3f}"
+        latest.append({"key": key, "label": label, "source": source, "value": text,
+                       "as_of": last["d"] if last else None, "src": last["source"] if last else None})
+    return {**ctx, "indicators": latest, "events": events, "today": today, "message": message, "error": error,
+            "fred_on": bool(macro_sources.FRED_API_KEY)}
+
+
+@app.get("/macro/manage", response_class=HTMLResponse, dependencies=[Depends(admin_only)])
+def macro_manage_page(request: Request, message: str = None):
+    return render(request, "macro_manage.html", **macro_manage_context(message=message))
+
+
+def _manage_error(request: Request, error: str):
+    return render(request, "macro_manage.html", status_code=400, **macro_manage_context(error=error))
+
+
+@app.post("/macro/manage/scenarios")
+async def macro_scenarios_save(request: Request, me=Depends(admin_only)):
+    form = await request.form()
+    with get_db() as d:
+        current = macro_store.list_scenarios(d)
+    rows = []
+    try:
+        for sc in current:
+            c = sc["code"]
+            row = {"code": c, "sort": sc["sort"], "name": str(form.get(f"{c}_name", "")).strip()[:40],
+                   "trigger_text": str(form.get(f"{c}_trigger", "")).strip()[:255],
+                   "soxx_low": float(form.get(f"{c}_low")), "soxx_high": float(form.get(f"{c}_high")),
+                   "base_prob": float(form.get(f"{c}_prob"))}
+            if not row["name"] or row["soxx_low"] >= row["soxx_high"] or not 0 < row["base_prob"] < 100:
+                raise ValueError(f"{c}: 이름·범위(하단 < 상단)·확률(0~100)")
+            rows.append(row)
+    except (TypeError, ValueError) as e:
+        return _manage_error(request, f"시나리오 값 오류 — {e}")
+    total = sum(r["base_prob"] for r in rows)
+    if abs(total - 100) > 0.5:
+        return _manage_error(request, f"기본 확률 합이 100 이 아니다 ({total:g})")
+    with get_db() as d:
+        for r in rows:
+            macro_store.save_scenario(d, r)
+    log.info("백오피스: %s 가 시나리오 기본값 수정 %s", me["email"], {r["code"]: r["base_prob"] for r in rows})
+    return RedirectResponse("/macro/manage?message=시나리오를 저장했다 — 이벤트 반영 기준일이 오늘로 바뀐다", status_code=303)
 
 
 # -- 종목 ----------------------------------------------------------------------
@@ -410,7 +512,7 @@ def summary_context(limit: int) -> dict:
 @app.get("/summary")
 def summary_page(limit: int = 16):
     """옛 주소 — 시황 시계열은 상태 탭으로 합쳤다."""
-    return RedirectResponse(f"/?limit={limit}", status_code=303)
+    return RedirectResponse(f"/status?limit={limit}", status_code=303)
 
 
 # -- 매매 결과 -------------------------------------------------------------------
@@ -475,6 +577,78 @@ def results_page(request: Request, account: int = None, me=Depends(require_sessi
 
 # -- 자동매매 ------------------------------------------------------------------
 
+STRATEGY_SYMBOLS = {"CRASH_BUY": tuple(BINANCE_SYMBOLS)}
+for _spec in FOLLOW_SPECS:
+    STRATEGY_SYMBOLS[_spec["kinds"][1]] = tuple(_spec["symbols"])
+
+
+def scan_universe(store) -> list:
+    """급변 감시가 마지막으로 고른 상위 코인 목록 (워커가 alert_settings 에 적어 둔다). 없으면 빈 목록."""
+    try:
+        snap = json.loads(db.get_settings(store).get("binance_scan_universe") or "{}")
+    except (ValueError, TypeError):
+        return []
+    return list(snap.get("symbols") or [])
+
+
+def live_plan(store, me: dict) -> dict:
+    """내 설정으로 지금 실제 주문이 나가는지 — 전략마다 명목·증거금·주문 최소 단위, 그리고 잔고와 견줘 본 결과.
+
+    '구조적으로 불가능한 것'(자본이 작아 주문 단위에 못 미친다 / 증거금 합이 잔고를 넘는다)을 화면에서 먼저 보이게 하려는 표다.
+    최소 단위는 공개 API 로 보고(캐시), 잔고는 내 Binance 키로 읽는다. 어느 쪽이든 실패하면 그 칸만 '확인 불가' 가 된다."""
+    cap_usdt, lev = float(me["binance_capital"]), int(me["binance_leverage"])
+    info = leverage_info(lev)
+    floors = binance_trade.symbol_floors()
+    universe = scan_universe(store)
+
+    balance, balance_error = None, None
+    try:
+        keys = accounts.load_keys(store, me["id"], "binance")
+        if keys:
+            b = binance_trade.BinanceFutures(keys["api_key"], keys["api_secret"])
+            b.sync_time()
+            balance = b.balance()
+    except Exception as e:                       # 키가 없거나 조회 실패 — 표는 그대로 보여 주고 잔고 칸만 비운다
+        balance_error = str(e)[:120]
+
+    rows, margin_total = [], 0.0
+    for r in info["rows"]:
+        kind = r["kind"]
+        eff = BINANCE_TRADE_LEVERAGE[kind]
+        notional, margin = cap_usdt * eff, cap_usdt * eff / lev
+        margin_total += margin
+        syms = STRATEGY_SYMBOLS.get(kind) or universe
+        known = [floors[s] for s in syms if s in floors]
+        # 대상이 여럿이면(급등 소진 숏) 몇 개나 살 수 있는지로 말한다
+        ok_n = sum(1 for f in known if notional >= f)
+        need = min(known) / eff if known else None
+        rows.append({**r, "symbols": syms, "notional": notional, "margin": margin,
+                     "known": len(known), "ok_n": ok_n, "need": need,
+                     "blocked": bool(known) and ok_n == 0})
+    return {**info, "capital": cap_usdt, "balance": balance, "balance_error": balance_error,
+            "margin_total": margin_total, "rows": rows,
+            "short_margin": balance is not None and margin_total > balance}
+
+
+def leverage_info(leverage: int) -> dict:
+    """격리 배율 하나의 요약 — 청산 거리, 손절 상한, 전략별 손절이 그 안에 드는지.
+
+    공용 채널(가상 장부)은 .env 기준 배율로, 계정 알림은 그 계정 배율로 이 표를 만든다. 손절이 상한을 넘으면
+    진입할 때 상한까지 당겨지고, 그 사실이 그 장부의 알림에 적힌다 (binance_trade.stop_for_leverage)."""
+    cap = max_stop_pct(leverage)
+    base = {"CRASH_BUY": ("급락 매수 롱 · 5분봉", CRASH_STOP_PCT),
+            "SCAN_FADE": ("급등 소진 숏 · 상위 30 코인", SCAN_FADE_STOP_PCT)}
+    for spec in FOLLOW_SPECS:
+        base[spec["kinds"][1]] = (f"{spec['name']} {'롱' if spec['side'] == 'long' else '숏'} · {spec['label']}",
+                                  spec["stop"][1] if spec["stop"][0] == "pct" else None)
+    rows = []
+    for kind in BINANCE_LIVE_STRATEGIES:
+        name, pct = base.get(kind, (kind, None))
+        rows.append({"kind": kind, "name": name, "base": pct,
+                     "applied": None if pct is None else min(pct, cap), "tightened": pct is not None and pct > cap})
+    return {"lev": int(leverage), "liq": liq_distance_pct(leverage), "cap": cap, "rows": rows}
+
+
 def trading_context(me: dict, message: str = None) -> dict:
     admin = me["role"] == "admin"
     with get_db() as d:
@@ -487,10 +661,14 @@ def trading_context(me: dict, message: str = None) -> dict:
         mine = accounts.get(d, me["id"])
         keys = accounts.key_status(d, me["id"])
         emails = account_emails(d, me)
+        plan = live_plan(d, mine)
     live_orders = [o for o in live_orders if o.get("account_id") is not None]
+    # 배율표: 이 계정 배율에서 각 전략의 손절이 어떻게 되는지 (청산선 밖이면 당겨진다). 공용 채널은 .env 기준 배율 그대로다.
     return {"mode": AUTOTRADE_MODE, "bn_mode": BINANCE_TRADE_MODE, "settings": settings, "virtual_orders": virtual_orders,
             "live_orders": live_orders, "auto_rows": [r for r in rows if r.get("auto_trade")], "dry_positions": dry,
             "mine": mine, "keys": keys, "emails": emails, "message": message,
+            "lev_range": BINANCE_LEVERAGE_RANGE,
+            "lev_mine": plan, "lev_public": leverage_info(BINANCE_TRADE_EXCHANGE_LEV),
             "hard_max": {"KRW": AUTOTRADE_HARD_MAX_AMOUNT_KRW, "USD": AUTOTRADE_HARD_MAX_AMOUNT_USD},
             "open_count": sum(1 for o in live_orders if o["status"] in ("sent", "open")), "bn_positions": bn}
 
@@ -502,17 +680,24 @@ def trading_page(request: Request, message: str = None, me=Depends(require_sessi
 
 @app.post("/trading/live")
 def trading_live(request: Request, toss_live: bool = Form(False), binance_live: bool = Form(False),
-                 amount_scale: str = Form("1"), binance_capital: str = Form("0"), me=Depends(require_session)):
-    """내 계정의 live 설정. 켜려면 그 공급자 키와 텔레그램 키가 있어야 한다 (알림 없는 실매매 금지)."""
+                 amount_scale: str = Form("1"), binance_capital: str = Form("0"),
+                 binance_leverage: str = Form(str(BINANCE_TRADE_EXCHANGE_LEV)), me=Depends(require_session)):
+    """내 계정의 live 설정. 켜려면 그 공급자 키와 텔레그램 키가 있어야 한다 (알림 없는 실매매 금지).
+
+    Binance 격리 배율은 계정마다 다르다 — 공용 가상 장부(공용 채널)는 .env 기준값을 그대로 쓰고, 여기서 바꾼 값은 내 live 주문과
+    내 텔레그램 알림에만 적용된다. 배율이 높으면 청산선이 가까워져 손절이 그 안으로 당겨진다."""
     with get_db() as d:
         keys = accounts.key_status(d, me["id"])
+    lo, hi = BINANCE_LEVERAGE_RANGE
     try:
-        scale, capital = float(amount_scale), float(binance_capital)
+        scale, capital, leverage = float(amount_scale), float(binance_capital), int(binance_leverage)
     except ValueError:
-        scale, capital = -1.0, -1.0
+        scale, capital, leverage = -1.0, -1.0, -1
     error = None
     if not 0 < scale <= 10:
         error = "금액 배율은 0 초과 10 이하"
+    elif not lo <= leverage <= hi:
+        error = f"Binance 격리 배율은 {lo}~{hi} 배"
     elif capital < 0:
         error = "Binance 자본은 0 이상"
     elif (toss_live or binance_live) and not keys["telegram"]:
@@ -524,9 +709,10 @@ def trading_live(request: Request, toss_live: bool = Form(False), binance_live: 
     if error:
         return render(request, "trading.html", status_code=400, **trading_context(me, error))
     with get_db() as d:
-        accounts.update_live(d, me["id"], toss_live=toss_live, binance_live=binance_live, amount_scale=scale, binance_capital=capital)
-    log.info("백오피스: %s live 설정 — 토스 %s · Binance %s · 배율 %g · 자본 %g", me["email"],
-             "ON" if toss_live else "OFF", "ON" if binance_live else "OFF", scale, capital)
+        accounts.update_live(d, me["id"], toss_live=toss_live, binance_live=binance_live, amount_scale=scale,
+                             binance_capital=capital, binance_leverage=leverage)
+    log.info("백오피스: %s live 설정 — 토스 %s · Binance %s · 금액 배율 %g · 자본 %g · 격리 %d배", me["email"],
+             "ON" if toss_live else "OFF", "ON" if binance_live else "OFF", scale, capital, leverage)
     return RedirectResponse("/trading", status_code=303)
 
 
@@ -763,7 +949,7 @@ def accounts_live_off(account_id: int, me=Depends(admin_only)):
 
 # -- 운영 (관리자) — run.py 관리 프로세스 ------------------------------------------------
 
-SERVICE_LABELS = {"engine": "주식 엔진", "binance": "코인 워커", "backoffice": "백오피스"}
+SERVICE_LABELS = {"engine": "주식 엔진", "binance": "코인 워커", "macro": "매크로 수집", "backoffice": "백오피스"}
 STATE_LABELS = {"running": "실행 중", "stopping": "끄는 중", "stopped": "꺼짐", "backoff": "재시작 대기"}
 
 

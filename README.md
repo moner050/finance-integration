@@ -12,9 +12,10 @@
 
 | 구성 요소 | 실행 | 역할 |
 |---|---|---|
-| 통합 실행 | `python run.py` | 아래 셋을 자식 프로세스로 띄우고 지킨다 — 비정상 종료·멈춤이면 다시 켜고, 백오피스 '운영' 화면이나 다른 콘솔의 `python run.py status / start / stop / restart <서비스>` 로 제어 (5절) |
+| 통합 실행 | `python run.py` | 아래 워커·백오피스를 자식 프로세스로 띄우고 지킨다 — 비정상 종료·멈춤이면 다시 켜고, 백오피스 '운영' 화면이나 다른 콘솔의 `python run.py status / start / stop / restart <서비스>` 로 제어 (5절) |
 | 엔진 워커 | `run_engine.py` | 30초 폴링 → 지표 → 상태기계 → 텔레그램 알림 → (자동매매) |
-| 백오피스 | `run_backoffice.py` | http://127.0.0.1:8000 — Google 로그인(허용 계정만) 뒤 종목·상태·신호 이력·자동매매·내 API 키·계정·운영 |
+| 백오피스 | `run_backoffice.py` | http://127.0.0.1:8000 — Google 로그인(허용 계정만) 뒤 **홈(SOXX 매크로)**·종목·상태·신호 이력·자동매매·내 API 키·계정·운영 |
+| 매크로 수집 | `run_macro.py` | 미국·일본 금리·환율·국채·SOXX/SPY 시계열, BOJ 기준금리·일본 CPI·DRAM 현물가·반도체 EPS 추정치, 이벤트 캘린더와 결정 결과를 모아 홈 화면을 채운다 (7.1절). 알림 없음 |
 | Binance 워커 | `run_binance.py` | 20초 폴링 → 5분봉 ETC 급락 매수 후보 · 4시간봉/일봉 BTC 급등 추종 · 일봉 ETC 급락 추종 숏 · **거래대금 상위 30 코인 급변 감시**(급등은 가상 장부 소진 숏) → 텔레그램 (토스 엔진과 독립, 3.5절 · 자동매매 dry/live 는 3.6절) |
 | MySQL | 이미 쓰는 서버 | `alert_*` 테이블. 프로세스들이 공유하는 유일한 통로 (계정·세션·암호화된 키·서비스 상태 포함) |
 
@@ -34,12 +35,14 @@
 - **지표**는 완성된 봉만 쓴다. 진행 중인 마지막 봉은 거래량이 부분값이라 뺀다.
 - **RVOL(상대 거래량)**: 같은 현지 시각의 과거 8세션 중앙값 대비 배수. 표본이 없으면 직전 정규장 20봉 평균 대비.
 - **VWAP·세션 정점 RVOL**: 당일 정규장 봉을 누적해서 계산한다(120봉 창이 아니다).
-- **매수 신호(🔵)**: 선행 바스켓 방향 OK + RVOL 2.0 돌파 + 신호봉 종가가 VWAP 밴드 위 + 강봉(종가가 봉 상단 절반). 정규장 봉에서만.
-- **보유 중**: 손절(-5%) > 신호봉 저점/밴드 이탈 매도 > 거래량 소진 익절 > 불타기 > 일부 익절 검토 > 판단 애매 > 마감 30분 전.
+- **매수 신호(🔵)**: 선행 바스켓 방향 OK + RVOL 2.0 돌파 + 신호봉 종가가 VWAP 밴드 위 + 강봉(종가가 봉 상단 절반). 정규장 봉, 개장 10분 뒤부터 4시간 안에서만.
+  **추격 배제**: 오늘 갭 +1% 이상, 전일 종가 대비 +3% 이상, 전일 +2% 이상, 5세션 +8% 이상, 20세션 평균 위 +10% 이상인 자리의 돌파는 신호를 내지 않는다
+  (2026-09-17 3개월 재생에서 두 시장 모두 다음날까지 손실이었던 유일하게 일관된 필터). 일봉은 세션당 한 번 받고, 없으면 그 항목은 건너뛴다.
+- **보유 중**: 손절(-5%) > 목표 +1% 익절 > 신호봉 저점/밴드 이탈 매도 > 거래량 소진 익절(수익 중일 때만) > 불타기 > 일부 익절 검토 > 판단 애매 > 마감 30분 전.
 - **엔진이 보는 보유는 공용 가상 장부뿐이다.** 실계좌는 읽지 않는다. 가상 장부는 확정 매수 신호마다 가상 매수하고(한도 없음), 청산 신호에 전량 가상 매도한다.
   그래서 '내 보유' 로 돌던 기능 — 평단 기준 손절 한도, 🎉✅ 청산 완료, 📈 오늘 가상매매 성적, 시황의 '가상 보유', 미청산 반복, 페어 차단 — 은 전부 가상 장부 기준이다.
   보유 중에만 감시하는 종목(SOXL·SOXS 등)은 가상으로 사지 않으므로 감시되지 않는다.
-- **신호 포지션**: '매수하세요'(확인 항목 3개 이상)가 나가면 가상 장부에 보유가 없어도 그 종목은 곧바로 **보유**로 관리한다 — 다음 알림은
+- **신호 포지션**: '매수하세요'(확인 항목 — EMA 정배열·선행 모멘텀 — 을 다 채운 신호)가 나가면 가상 장부에 보유가 없어도 그 종목은 곧바로 **보유**로 관리한다 — 다음 알림은
   매수 대기·취소·만료가 아니라 추가매수·익절·손절이다. 손익과 손절 한도(-5%)의 기준은 **신호가**이고(본문 첫 줄 `신호가 X 대비 ±y%`), 가상 평단
   손익은 장부 줄에 붙는다(미보유면 `가상 미보유 — 신호가 기준`). 확정 청산 신호(손절·매도·전량 익절·마감 정리)가 나가면 신호 포지션은 끝난다
   — 가상 보유가 남아 있으면 가상 매도가 체결될 때까지 청산대기(반복), 없으면 곧바로 관망. '매수 대기하세요' 는 확인 항목이 모자란 신호에만 쓰고, 채워지면 '매수하세요' 로
@@ -99,8 +102,11 @@ check_binance_dry.py   과거 신호봉으로 dry 진입·종료를 실제 경�
   lifecycle.py       워커 수명 — 관리 프로세스의 멈춤 요청(stdin 닫힘)을 사이클 사이에서 받고 heartbeat 를 남긴다
   trading/           자동매매: broker(TossOrderClient·DryRunBroker) · policy(리스크 정책) · executor(실행기, 장부 하나) · live(계정별 실행기 묶음) · models
   backoffice/        FastAPI + Jinja2 + HTMX 화면, auth.py (Google OAuth)
+  macro/             SOXX 매크로 홈 — sources(FRED·MOF·Yahoo·BIS·통계국·DRAM) · calendar_sources(FOMC·BOJ·CPI 일정·실적일)
+                     store(alert_macro_*) · scoring(등급·시나리오 보정) · view · worker · calendar_seed(시나리오 기본값)
 run.py               통합 실행 (관리 프로세스)
 run_engine.py        엔진 진입점          run_backoffice.py   백오피스 진입점      run_binance.py   Binance 워커 진입점
+run_macro.py         매크로 수집 워커 진입점
 Dockerfile           docker-compose.yml   우분투 배포          tests/   pytest
 ```
 
@@ -120,6 +126,7 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `ALERT_ADMIN_EMAIL` | 백오피스 ✔ | 첫 관리자 구글 이메일. 나머지 허용 계정은 관리자가 '계정' 화면에서 추가한다. 이 계정은 중지·강등되지 않는다 | |
 | `ALERT_MASTER_KEY` | 백오피스·live ✔ | 계정별 API 키 암호화 마스터 키(base64url 32바이트). `python -m alertbot.crypto genkey` 로 만든다. **DB 와 따로 보관** — 잃으면 저장된 키를 풀 수 없어 다시 입력해야 한다 | |
 | `ALERT_BACKOFFICE_HOST` / `ALERT_BACKOFFICE_PORT` | | 백오피스 바인드 주소·포트 | 127.0.0.1 / 8000 |
+| `ALERT_FRED_API_KEY` (또는 `FRED_API_KEY`) | 매크로 | FRED API 키, `ALERT_` 이 우선 — 미 기준금리·국채 금리·근원 CPI·발표 일정. 없으면 그 작업만 건너뛴다(Yahoo·MOF 는 키 불필요) | 없음 |
 | `ALERT_DATA_DIR` | | 로그·CSV 저장 폴더. Docker 는 `/data` | 프로젝트 루트 |
 | `ALERT_BINANCE_SYMBOLS` | | Binance 5분봉 급락 매수 알림 심볼(쉼표, USDⓈ-M 무기한). 공개 API 라 키 불필요 | ETCUSDT |
 | `ALERT_BINANCE_SURGE_SYMBOLS` | | Binance 4시간봉 급등 추종 롱 알림 심볼(쉼표) | BTCUSDT |
@@ -132,7 +139,7 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 | `AUTOTRADE_BUY_TTL_MIN` | | 매수 지정가가 이 분 안에 안 체결되면 취소 | 3 |
 | `AUTOTRADE_HARD_MAX_AMOUNT_KRW` / `_USD` | | 1회 매수 금액 하드캡. DB 한도보다 우선 | 2,000,000 / 2,000 |
 
-같은 `.env` 를 다른 프로젝트와 공유해도 된다. 이 프로젝트가 읽는 접두어는 `TOSS_ TELEGRAM_ MYSQL_ ALERT_ AUTOTRADE_ OAUTH_GOOGLE_` 뿐이다.
+같은 `.env` 를 다른 프로젝트와 공유해도 된다. 이 프로젝트가 읽는 접두어는 `TOSS_ TELEGRAM_ MYSQL_ ALERT_ AUTOTRADE_ OAUTH_GOOGLE_` 뿐이다 (예외: 다른 프로젝트와 같은 키인 `FRED_API_KEY` 는 `.env` 파일에서만 읽는다).
 공용 Binance 키는 읽지 않는다 — 시세·가상 체결은 공개 API 라 키가 필요 없고, 실제 주문은 계정별 키로 낸다.
 예전의 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`(내 채널)와 `ALERT_BINANCE_API_KEY`/`SECRET` 은 더 이상 읽지 않는다 — 관리자 계정의 '내 API 키' 로 옮긴다.
 환경변수로도 같은 키를 줄 수 있다(Docker `env_file`). `.env` 값이 우선한다.
@@ -143,12 +150,16 @@ Dockerfile           docker-compose.yml   우분투 배포          tests/   pyt
 |---|---|---|
 | `POLL_INTERVAL_SEC` | 30 | 폴링 주기. 매수 판단은 완성봉 기준이라 봉당 1회 |
 | `RVOL_TRIGGER` | 2.0 | 매수 신호 거래량 배수 (직전봉 < 2.0 ≤ 현재봉 돌파) |
-| `VWAP_BAND_PCT` / `ATR_BAND_MULT` | 0.15 / 0.5 | 기준선 밴드 하한 % / 변동성(ATR%) 배수 중 큰 쪽 |
+| `VWAP_BAND_PCT` / `ATR_BAND_MULT` / `ATR_BAND_MULT_KR` | 0.15 / 0.5 / 1.0 | 기준선 밴드 하한 % / 변동성(ATR%) 배수 중 큰 쪽 (한국 종목은 배수 1.0 — 3개월 재생에서 한국만 개선) |
 | `STRONG_BAR_MIN` | 0.5 | 신호봉 종가가 봉 범위의 이 비율 이상 위치 |
+| `ENTRY_CONFIRM_MIN` | 3 | 확인 항목(EMA 정배열 · 선행 모멘텀; 항목 수가 더 적으면 전부) 이만큼 채워야 '매수하세요', 아니면 '매수 대기하세요' |
+| `ENTRY_MAX_GAP_PCT` `ENTRY_MAX_VS_PREV_PCT` `ENTRY_MAX_PREV_DAY_PCT` `ENTRY_MAX_RET5_PCT` `ENTRY_MAX_MA20_PCT` | 1.0 / 3.0 / 2.0 / 8.0 / 10.0 | 추격 배제 — 오늘 갭 · 전일 종가 대비 · 전일 등락 · 5세션 수익률 · 20세션 평균 대비(%). 하나라도 넘으면 매수 신호 없음. 일봉은 `DAILY_COUNT`(30) 개를 세션당 한 번 받는다 |
+| `ENTRY_MAX_MIN_FROM_OPEN` | 240 | 개장 뒤 이 분이 지나면 새 매수 신호 없음 (보유 중 판단은 계속) |
+| `EXIT_TARGET_PCT` | 1.0 | 신호가(가상 평단) 대비 이 % 에 닿으면 🟢 전량 익절 (확정 청산, 자동매매 매도) |
 | `LEADER_GAP_PCT` | 1.0 | 선행 바스켓 평균 등락률 트리거 (%) |
 | `LEADER_MOMENTUM_MIN` / `LEADER_MOMENTUM_GATE` | 5 / False | 선행 최근 5분 변화율 기록(추적 CSV `leader_mom`) / True 면 방향 판정에도 사용 |
 | `STOP_LOSS_PCT` | -5.0 | 평단 대비 고정 손절 한도 |
-| `FADE_STRONG_RATIO` / `FADE_WEAK_RATIO` / `FADE_MIN_PEAK` | 0.4 / 0.6 / 2.5 | 세션 정점 대비 거래량 소진 비율(전량 익절 / 절반 검토), 정점 최소 배수 |
+| `FADE_STRONG_RATIO` / `FADE_WEAK_RATIO` / `FADE_MIN_PEAK` | 0.4 / 0.6 / 2.5 | 세션 정점 대비 거래량 소진 비율(전량 익절 / 절반 검토), 정점 최소 배수. 수익 중일 때만 — 손실 중 '정리' 알림은 없다 |
 | `OPEN_EXCLUDE_MIN` | 10 | 개장 후 이 분 동안의 봉은 정점 계산에서 제외 |
 | `ALERT_COOLDOWN_MIN` / `WEAK_COOLDOWN_MIN` | 15 / 45 | 강한/약한 알림 재발송 간격 |
 | `REENTRY_BLOCK_MIN` / `EXIT_GRACE_MIN` | 60 / 20 | 매도 알림 뒤 매수 차단 / 매수 뒤 익절 알림 유예 |
@@ -239,6 +250,7 @@ ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지는 주식 알림
 일봉 표본은 20건 안팎이라 승률의 소수점은 의미가 없다.
 손절 참고선은 2026-09-15 레버리지 분석에서 정했다: ±8 기준 ATR 브래킷(4시간봉 −12%)은 58건 중 4건만 걸려 손절 역할을 못 했고, 눌림 저점 − 2.5 기준 ATR 이
 평균 +1.5%·켈리 3.0 으로 최고였다. 일봉 롱은 이긴 거래의 최대 역행폭이 8.2% 라 −10%, 일봉 숏은 반등 고점이 8건 중 6건에서 5~7% 더 뚫려 +25% 다.
+이 값은 **공용 기준(격리 3배)** 이고 공용 채널 알림에 그대로 실린다. 격리 배율이 높은 계정은 그 계정 주문·알림에서만 청산선 안으로 당겨진다 (3.6절).
 세 사양 모두 목표를 두면 평균이 내려가 목표 지정가는 없다.
 2026-09-17 최근 4개월 재검증: BTC 4시간봉 진입 후보는 2건뿐이라, 같은 규칙을 거래대금 상위 10 코인 4시간봉에 함께 적용했다(19건, 평균 +2.5% 이지만 뒤 절반 −2.2%).
 배수 6→5, RSI 70→65 로 풀어 늘어나는 후보는 각 3건뿐이라 근거가 되지 못해 그대로 둔다. 일봉 두 사양은 4개월에 표본이 없어 바꾸지 않았다.
@@ -270,18 +282,22 @@ ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지는 주식 알림
   수수료·거래대금 순위별 슬리피지·실제 펀딩·마크 가격 손절까지 넣어 검증했지만, 채택 조건(30건·20일 이상, 하루 단위 t ≥ 2.5, 두 절반 양수, 최대 기여 코인·날을 빼도 양수)을 넘은 조합이 없었다
   (t −1.2~1.1, 보유 중 최대 역행 p90 13~54%). 급등 뒤에는 평균선이 꺾일 때까지 기다리는 숏만 살아남았다(아래).
 
-**급등 소진 숏 (공용 가상 장부 전용, 전략 `SCAN_FADE` — `binance_scan.py` → `binance_trade.py`)**
+**급등 소진 숏 (공용 가상 장부 + 계정 live, 전략 `SCAN_FADE` — `binance_scan.py` → `binance_trade.py`)**
 
 | 항목 | 규칙 | 상수 |
 |---|---|---|
 | 대기 | 🚀 급등 감지된 코인을 48시간 대기 목록에 올린다. 같은 코인이 다시 급등하면 대기를 새로 잡는다. 대기 코인은 상위 30 에서 빠져도 계속 보고, 목록은 `alert_settings.binance_scan_fade_pending` 에 있어 재시작해도 이어진다. 💥 급락 감지는 매매하지 않는다 | `SCAN_FADE_WAIT_HOURS` |
-| 진입 | 대기 중 1시간봉 종가가 EMA50 아래로 마감한 **첫 봉**에서 가상 숏 (그 봉에서 대기를 끝낸다 — 같은 코인 보유 중·동시 보유 상한으로 보류돼도 다시 기다리지 않는다) | `SCAN_FADE_EMA` |
+| 진입 | 대기 중 1시간봉 종가가 EMA50 아래로 마감한 **첫 봉**에서 숏 (그 봉에서 대기를 끝낸다 — 같은 코인 보유 중·동시 보유 상한으로 보류돼도 다시 기다리지 않는다) | `SCAN_FADE_EMA` |
 | 손절 / 목표가 | 그 종가 기준 +20% / −20%, 마크 가격 | `SCAN_FADE_STOP_PCT` / `SCAN_FADE_TP_PCT` |
 | 보유 한도 | 48시간 | `SCAN_FADE_HOLD_HOURS` |
 | 크기·한도 | 포지션당 배분 자본의 1/8, 배율 1. 같은 코인 하나, 전략 전체 동시 8개. 보류는 공용 채널로 알리지 않고 로그에만 남긴다 | `BINANCE_TRADE_LEVERAGE["SCAN_FADE"]`, `SCAN_FADE_MAX_OPEN` |
+| live 심볼 준비 | 대상 코인이 감지 때마다 달라 기동 때 미리 걸 수 없다. 진입 직전에 그 심볼의 필터·격리 마진·배율을 걸고(한 번만), 코인 상한 때문에 배율이 낮게 걸리면 그 값으로 손절을 맞춘다 | `binance_broker.ensure` |
 
-계정 live 는 이 전략을 주문하지 않는다(`BINANCE_LIVE_STRATEGIES` 에 없다). 진입·종료는 다른 가상 장부 전략처럼 공용 채널에 `[DRY]` 📥 진입 / 📤 종료로 오고,
-급등 감지 알림 본문에 규칙이 적힌다. 코인 시황의 급변 감시 줄에 `숏 대기 N종목` 이 붙는다.
+2026-09-18 부터 계정 live 도 이 전략을 주문한다(`BINANCE_LIVE_STRATEGIES`). 공용 가상 장부의 진입·종료는 공용 채널에 `[DRY]` 📥 / 📤 로, 계정 live 의 것은 그 계정 텔레그램에 `[LIVE]` 로 간다.
+급등 감지 알림 본문에 규칙이 적히고, 코인 시황의 급변 감시 줄에 `숏 대기 N종목` 이 붙는다.
+**주의**: 손절 +20% 는 격리 3배(상한 27.8%) 기준이다. 계정 배율이 5배를 넘으면 상한이 20% 아래로 내려가 손절이 당겨지는데, 이 전략은 급등 직후 24시간 안에 중앙 +15% 더 오르는 구간을 견디는 설계라
+좁은 손절에서는 근거가 무너진다. 이 전략을 live 로 쓸 계정은 격리 배율을 3배로 두는 편이 설계에 맞는다.
+크기가 자본의 1/8 이라 전략별 자본이 작으면 주문 최소 단위에 걸린다 — 그때는 주문 실패가 아니라 `⏸ 진입 보류` 로 끝난다(live 스위치를 끄지 않는다).
 
 근거는 2026-09-17 분석(보고서 「급등 코인 소진 숏」, 감지 1,693건·매매 설정 1,464개 시뮬레이션, 15분봉 손절·실제 펀딩·수수료·순위별 슬리피지).
 - **패턴**: 급등 감지 코인은 72시간 중앙 −11.6%(같은 시각 상위 30 다른 코인 −0.7%), 급락 감지 코인은 −10.3% 흘러내렸다(앞·뒤 두 달 모두). 같은 코인을 아무 시각에 잡아도
@@ -311,6 +327,9 @@ ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지는 주식 알림
 | 항목 | 규칙 | 상수 |
 |---|---|---|
 | 크기 | 명목가 = 전략별 배분 자본 × 유효 배율. 급락 매수 2 · 4시간봉 급등 추종 1 · 일봉 급등 추종 1.5 · 일봉 급락 숏 0.5 (분석의 시작값, 최대 3 / 1.5 / 2 / 1) · 급등 소진 숏 포지션당 0.125. 자본은 가상 장부 `ALERT_BINANCE_TRADE_CAPITAL`, live 는 계정별 | `BINANCE_TRADE_LEVERAGE` |
+| 격리 배율 | 진입 크기가 아니라 **청산 거리**를 정한다 (증거금 = 명목 ÷ 배율). 공용 가상 장부는 3배(청산 32.8%), 계정 live 는 **계정마다** 백오피스에서 **1~5배**. 5배가 상한인 이유: 7배면 손절 상한이 8.8% 로 내려가 일봉 롱(−10%)까지 잘린다. 청산 거리 = 100/배율 − 유지증거금 0.5% | `BINANCE_TRADE_EXCHANGE_LEV`, `alert_accounts.binance_leverage`, `BINANCE_LEVERAGE_RANGE` |
+| 자금 부족 | 명목가가 그 코인의 주문 단위·최소 명목에 못 미치거나 거래소가 증거금 부족으로 거절하면 **주문 실패가 아니라 보류**로 끝내고 `⏸ 신호 발생 — 자금 부족으로 미체결` 알림을 보낸다(그 장부 채널로). 실패로 세면 3회에 live 스위치가 꺼져, 돈이 없다는 이유로 나머지 전략까지 멈춘다 | `BN_FUNDS`, `binance_trade.INSUFFICIENT` |
+| 손절 당김 | 신호 손절이 그 장부 배율의 **손절 상한**(청산 거리 − 5%p)을 넘으면 상한까지 당겨서 주문하고, 그 사실을 그 장부 알림에 적는다. 손절이 청산선에 가까우면 마크 트리거와 시장가 체결 사이의 갭에 청산이 먼저 올 수 있고, 청산은 그 포지션 증거금을 전부 잃는다. 3배는 상한 27.8% 라 아무것도 안 잘리고(공용 채널 그대로), 7배는 8.8% 라 일봉 롱(−10%)·일봉 숏(+25%)이 잘린다 | `BINANCE_STOP_LIQ_MARGIN_PCT`, `binance_trade.stop_for_leverage` |
 | 펀딩 게이트 | 진입 시 펀딩이 롱 +3bp/8h 초과, 숏 -3bp 미만이면 크기 절반 | `SURGE_FUNDING_WARN` |
 | 체결 | 진입·종료 모두 마지막 체결가 ± 슬리피지(ETC 0.05%, BTC 0.02%), 수수료 테이커 0.05% 편도 | `BINANCE_TRADE_SLIP`, `BINANCE_TRADE_FEE` |
 | 손절 | 알림의 손절 참고선(3.5절). **마크 가격**이 닿으면 종료 — 실제 STOP_MARKET(MARK_PRICE) 주문과 같은 조건 | |
@@ -326,7 +345,7 @@ ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지는 주식 알림
 **live 동작** — 조건: `.env` `ALERT_BINANCE_TRADE_MODE=live` + 계정의 Binance·텔레그램 키 + 전략별 자본 > 0 + 백오피스 '자동매매' 화면의 **내 Binance live 스위치 ON**.
 
 - 워커는 사이클마다 계정·키·스위치 변경을 확인해 계정 트레이더를 만들거나 치운다(재시작 불필요). 만들 때 그 계정 키로 서버 시각 동기화, 심볼 필터 조회,
-  **헤지 모드 · 격리 마진 · 심볼 배율 3배**(`BINANCE_TRADE_EXCHANGE_LEV`, 청산 거리 33%)를 맞춘다. 실패하면(키 권한·IP 제한·열린 포지션 때문에 모드 변경 거부) 그 계정에만 ⛔ 알림을 보내고 10분 뒤 다시 시도한다.
+  **헤지 모드 · 격리 마진 · 그 계정의 심볼 배율**(`alert_accounts.binance_leverage`, 기본 3배)을 맞춘다. 배율을 바꾸면 키 서명이 달라져 다음 사이클에 트레이더를 다시 만들고 거래소에 새 배율을 건다. 실패하면(키 권한·IP 제한·열린 포지션 때문에 모드 변경 거부) 그 계정에만 ⛔ 알림을 보내고 10분 뒤 다시 시도한다.
   성공하면 그 계정에 가용 USDT 와 자본을 알린다.
 - 진입: 명목가를 수량 단위로 내림해 **시장가**(positionSide LONG/SHORT) → 체결 직후 **STOP_MARKET 알고 주문**(`/fapi/v1/algoOrder`, 마크 가격 트리거,
   closePosition). Binance 는 2025-12-09 부터 조건부 주문을 알고 주문 API 로만 받는다. 손절 주문만 실패하면 포지션은 두고 ⛔ 알림 뒤 사이클마다 다시 건다.
@@ -405,7 +424,8 @@ ETC 라면 대략 -2% 이상의 4시간 낙폭이다. 메시지는 주식 알림
 
 ## 5. 배포 — Windows (생 파이썬)
 
-요구사항: Python 3.12 이상(개발은 3.14), 인터넷, MySQL 접근.
+요구사항: Python 3.12 이상(개발은 3.14), MySQL 접근, 인터넷(토스·텔레그램·Binance 공개 API, 매크로 홈용 FRED·Yahoo Finance·일본 재무성).
+`run.py` 하나가 **엔진·Binance 워커·매크로 수집·백오피스** 네 서비스를 자식 프로세스로 띄우고 지킨다.
 
 ```powershell
 cd C:\workspace\personal\finance-integration
@@ -414,50 +434,70 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-1. `.env` 작성(3.1). 토스 허용 IP 에 이 PC 의 공인 IP 를 등록한다. 백오피스용 마스터 키를 만들어 `ALERT_MASTER_KEY` 에 넣고,
-   `ALERT_ADMIN_EMAIL`(첫 관리자 구글 이메일)을 넣는다. `OAUTH_GOOGLE_REDIRECT_URL`(예: `http://127.0.0.1:8000/auth/callback`)을 넣고 같은 주소를 Google 콘솔 OAuth 클라이언트의 승인된 리디렉션 URI 에 등록한다.
+**1. `.env` 작성 (3.1)**
+
+- 토스 허용 IP 에 이 PC 의 공인 IP 를 등록한다.
+- 백오피스: `ALERT_ADMIN_EMAIL`(첫 관리자 구글 이메일), `OAUTH_GOOGLE_CLIENT_ID`·`SECRET`, `OAUTH_GOOGLE_REDIRECT_URL`(예: `http://127.0.0.1:8000/auth/callback` — Google 콘솔의 승인된 리디렉션 URI 에 같은 주소 등록),
+  `ALERT_MASTER_KEY`(아래 명령으로 생성). 하나라도 없으면 백오피스만 뜨지 않고 재시작 대기에 머문다.
+- 매크로 홈: `ALERT_FRED_API_KEY`(또는 `FRED_API_KEY`). 없으면 미국 금리·CPI·발표 일정만 비고 나머지(DXY·USD/JPY·JGB·SOXX)는 돈다.
 
 ```powershell
 python -m alertbot.crypto genkey
 ```
 
-2. 테이블 생성과 초기 종목 시딩 (엔진이 첫 실행 때 자동으로도 한다):
+**2. 테이블·초기 데이터** — 테이블과 캘린더·시나리오 시드는 기동 때 자동으로도 만들어진다. 백필만은 직접 한 번 한다(3년치, 1~2분).
 
 ```powershell
 python -m alertbot.db init
-python -m alertbot.db seed
+python -m alertbot.db seed                # 초기 종목 (이미 있으면 건너뜀)
+python -m alertbot.macro backfill         # 매크로 홈 — 금리·환율·국채·SOXX/SPY 3년치 + FRED 발표 일정
+python -m alertbot.macro status           # 시리즈별 행 수·최신일, 작업별 성공/실패
 ```
 
-3. 콘솔 하나에서 실행한다. 엔진·Binance 워커·백오피스가 자식 프로세스로 뜨고, 출력 줄 앞에 `[engine]`·`[binance]`·`[backoffice]` 가 붙는다:
+**3. 실행** — 콘솔 하나에서. 출력 줄 앞에 `[engine]`·`[binance]`·`[macro]`·`[backoffice]` 가 붙는다.
 
 ```powershell
 python run.py
 ```
 
-4. 콘솔(또는 `data/*.log`)에 `[engine] 엔진 시작 — …` 과 `[binance] Binance 감시 시작` 이 찍히면 정상 (기동 알림은 공개 텔레그램으로 보내지 않는다). 백오피스 http://localhost:8000 에 관리자 구글 계정으로 로그인하면 '상태' 에 heartbeat 가, '운영' 에 세 서비스가 보인다.
+**4. 확인** — 다음이 찍히면 정상이다(기동 알림은 공개 텔레그램으로 보내지 않는다):
+`[engine] 엔진 시작 — …`, `[binance] Binance 감시 시작`, `[macro] 매크로 수집 시작 — … FRED on`.
+백오피스 http://localhost:8000 에 관리자 구글 계정으로 로그인하면 **홈**에 SOXX 매크로(수집 칩이 "n분 전"), **운영**에 네 서비스가 실행 중으로 보인다.
 
 **제어** — 백오피스 관리자 **운영** 화면, 또는 **다른 콘솔**에서 (실행 창에는 명령을 입력하지 않는다):
 
 ```powershell
 python run.py status
-python run.py restart binance
+python run.py restart macro
 python run.py stop engine
 python run.py start engine
 ```
 
-- 끄기: 실행 창에서 Ctrl+C — 워커가 사이클을 마치고 내려간다(엔진 최대 120초, 한 번 더 누르면 강제). 창을 그냥 닫으면 곧바로 강제 종료된다.
+- 끄기: 실행 창에서 Ctrl+C — 워커가 사이클을 마치고 내려간다(엔진 최대 120초·Binance·매크로 60초, 한 번 더 누르면 강제). 창을 그냥 닫으면 곧바로 강제 종료된다.
 - 죽은 워커는 5·30·120·300초 뒤 다시 켠다. 연속 실패 첫 번째와 네 번째에 `⚪ 시스템` 알림(마지막 출력 5줄)을 로그와 백오피스 신호 이력에 남긴다(공개 채널로는 보내지 않는다). 종료 코드와 마지막 출력 30줄은 운영 화면에 남는다.
-- heartbeat 가 끊긴 채 살아 있는 워커(엔진 15분·Binance 10분)는 멈춘 것으로 보고 다시 켠다. PC 절전에서 깨어난 직후에는 기준을 다시 잡아 오판하지 않는다.
+- heartbeat 가 끊긴 채 살아 있는 워커(엔진·매크로 15분, Binance 10분)는 멈춘 것으로 보고 다시 켠다. PC 절전에서 깨어난 직후에는 기준을 다시 잡아 오판하지 않는다.
 - 워커 출력은 관리 프로세스가 파이프로 받아 찍으므로, 콘솔 창을 클릭해 선택 모드가 돼도 워커는 멈추지 않는다(콘솔이 밀리면 줄만 생략된다).
   2026-09-16 에는 따로 띄운 Binance 워커가 콘솔 쓰기에서 18:18~00:10 KST 동안 멈춰 급등 알림을 하나도 내지 못했다.
-- `run.py` 는 하나만 돈다 — 다른 `run.py` 의 heartbeat 가 30초 안이면 시작을 거부한다. 단, 예전처럼 `run_engine.py`·`run_binance.py`·`run_backoffice.py` 를 따로 켜 둔 채
-  `run.py` 를 실행하면 알림·주문이 두 번 나가니 **옛 콘솔부터 끈다**. 개별 `run_*.py` 는 디버깅용으로 지금처럼 따로 실행할 수 있다.
-- 관리 프로세스 로그는 `supervisor.log`, 워커 로그는 지금처럼 `scalping_signals.log`·`binance_signals.log`.
+- `run.py` 는 하나만 돈다 — 다른 `run.py` 의 heartbeat 가 30초 안이면 시작을 거부한다. 단, `run_*.py` 를 따로 켜 둔 채 `run.py` 를 실행하면
+  알림·주문이 두 번 나가니 **옛 콘솔부터 끈다**. 개별 `run_*.py` 는 디버깅용으로 따로 실행할 수 있다.
+- 로그: 관리 프로세스 `supervisor.log`, 엔진 `scalping_signals.log`, Binance `binance_signals.log`. 매크로·백오피스는 파일 로그 없이 콘솔(과 운영 화면의 마지막 출력)에만 남는다 —
+  매크로 수집 실패는 **매크로 관리** 화면의 '수집 작업' 표와 홈의 빨간 칩에서 본다.
 
 백그라운드 실행은 **작업 스케줄러** 항목 하나("로그온 시 시작", 프로그램 `...\.venv\Scripts\python.exe`, 인수 `run.py`, 시작 위치 프로젝트 폴더)면 된다. 콘솔 인코딩 문제로 이모지가 `?` 로 보여도 파일 로그와 텔레그램은 정상이다.
 
-산출물: `scalping_signals.log`, `signal_tracking.csv`, `trade_log.csv`, `signal_trades.csv`, `binance_signals.log`, `binance_signal_trades.csv` (프로젝트 루트 또는 `ALERT_DATA_DIR`).
-업데이트: `git pull` → `pip install -r requirements.txt` → `run.py` 를 Ctrl+C 로 끄고 다시 실행(워커 코드만 바뀌었으면 운영 화면의 서비스 재시작으로도 된다). 스키마 변경(테이블·컬럼·인덱스 추가)은 기동 시 자동 반영된다.
+산출물: `scalping_signals.log`, `signal_tracking.csv`, `trade_log.csv`, `signal_trades.csv`, `binance_signals.log`, `binance_signal_trades.csv`, `supervisor.log` (프로젝트 루트 또는 `ALERT_DATA_DIR`). 매크로 데이터는 MySQL `alert_macro_*` 에만 있다.
+
+**업데이트**
+
+```powershell
+git pull
+pip install -r requirements.txt
+python run.py            # 실행 중인 run.py 를 Ctrl+C 로 끈 뒤 다시
+```
+
+- 워커 코드만 바뀌었으면 운영 화면의 서비스 재시작으로도 된다. 백오피스 템플릿·라우트가 바뀌었으면 `backoffice` 도 재시작한다.
+- 스키마 변경(테이블·컬럼·인덱스 추가)은 기동 시 자동 반영된다.
+- 매크로 홈을 처음 들이는 업데이트(2026-09-17)면 한 번 `python -m alertbot.macro backfill`. 이후 수집은 워커가 이어 간다(Yahoo 10분·FRED/MOF 60분·발표 일정 12시간).
 
 **가상 장부 전환(2026-09) 1회 작업** — 실계좌가 섞였던 옛 dry 기록을 백업하고 비운다. 엔진·Binance 워커를 **멈춘 뒤**(`python run.py stop engine`, `python run.py stop binance`) 한 번 실행하고 다시 켠다.
 dry 주문·코인 dry 포지션은 `<표>_paper_bak_<시각>` 표로 복사 후 삭제, 엔진 상태의 실계좌 평단(`last_seen`)은 지우고, `trade_log.csv` 는 `trade_log.paper-bak-<시각>.csv` 로 옮긴다.
@@ -471,31 +511,36 @@ python -m alertbot.db reset-paper
 
 ## 6. 배포 — Ubuntu (Docker)
 
-요구사항: Docker Engine + Compose 플러그인, MySQL 접근. 이미지는 `python:3.12-slim` 기반이고, 컨테이너 하나(`alertbot`)에서 `run.py` 가 엔진·Binance 워커·백오피스를 띄운다.
+요구사항: Docker Engine + Compose 플러그인, MySQL 접근, 서버에서 나가는 인터넷(5절과 같은 API). 이미지는 `python:3.12-slim` 기반이고,
+컨테이너 하나(`alertbot`)에서 `run.py` 가 엔진·Binance 워커·매크로 수집·백오피스를 띄운다.
 
 ```bash
 git clone <repo> alertbot && cd alertbot
-cp /path/to/.env .env                 # 3.1 의 키. 파일 권한: chmod 600 .env
+cp /path/to/.env .env                 # 3.1 의 키 (FRED 키 포함). 파일 권한: chmod 600 .env
 mkdir -p data                         # 로그·CSV 볼륨
 docker compose down --remove-orphans  # 예전 3개 서비스(engine·backoffice·binance) 구성에서 넘어올 때 한 번 — 안 하면 옛 컨테이너가 남아 알림·주문이 두 번 나간다
 docker compose up -d --build
-docker compose logs -f alertbot       # [engine] "엔진 시작"·"장 운영 KR/US ... (캘린더)", [binance] "완성봉 1000개 확보"·"Binance 감시 시작" 확인
-docker compose exec alertbot python run.py status
+docker compose logs -f alertbot       # [engine] "엔진 시작"·"장 운영 KR/US ... (캘린더)", [binance] "Binance 감시 시작", [macro] "매크로 수집 시작 — … FRED on"
+docker compose exec alertbot python -m alertbot.macro backfill   # 처음 한 번 — 매크로 홈 3년치
+docker compose exec alertbot python -m alertbot.macro status
+docker compose exec alertbot python run.py status                # 네 서비스 running
 ```
 
 - 토스 허용 IP 에 **서버의 공인 IP** 를 등록해야 한다. 등록 전엔 403 으로 엔진이 종료된다.
 - 백오피스는 `127.0.0.1:8000` 에만 공개되고, 들어가려면 Google 로그인(허용 계정)이 필요하다. 밖에서 보려면 `ssh -L 8000:127.0.0.1:8000 user@server` 로 터널을 열고
   `OAUTH_GOOGLE_REDIRECT_URL` 의 주소(예: http://127.0.0.1:8000)로 접속한다. 도메인·HTTPS 리버스 프록시로 열면 `OAUTH_GOOGLE_REDIRECT_URL=https://…/auth/callback` 으로 바꾸고 Google 콘솔에도 같은 주소를 등록한다.
-  `OAUTH_GOOGLE_CLIENT_ID`·`OAUTH_GOOGLE_CLIENT_SECRET`·`OAUTH_GOOGLE_REDIRECT_URL`·`ALERT_ADMIN_EMAIL`·`ALERT_MASTER_KEY` 중 하나라도 없으면 백오피스는 뜨지 않는다.
+  `OAUTH_GOOGLE_CLIENT_ID`·`OAUTH_GOOGLE_CLIENT_SECRET`·`OAUTH_GOOGLE_REDIRECT_URL`·`ALERT_ADMIN_EMAIL`·`ALERT_MASTER_KEY` 중 하나라도 없으면 백오피스만 재시작 대기에 머문다.
+- FRED 키는 `.env` 파일에 두면 된다. 환경변수로만 줄 때는 `ALERT_FRED_API_KEY` 이름이어야 한다(`FRED_API_KEY` 는 `.env` 파일에서만 읽는다).
+- 매크로 수집은 Yahoo Finance·일본 재무성(mof.go.jp)·FRED 로 나간다. 방화벽이 막으면 해당 작업만 실패로 남고(홈의 빨간 칩·매크로 관리 '수집 작업') 나머지 서비스는 영향이 없다.
 - 가상 장부 전환 1회 작업(5절)은 `docker compose exec alertbot python run.py stop engine`·`… stop binance` 뒤 `docker compose exec alertbot python -m alertbot.db reset-paper`, 끝나면 `… start engine`·`… start binance`.
 - MySQL 이 같은 서버에 있으면 `.env` 의 `MYSQL_HOST` 를 호스트 IP(예: `172.17.0.1`)로 두거나 compose 에 `extra_hosts: ["host.docker.internal:host-gateway"]` 를 추가하고 `host.docker.internal` 을 쓴다.
-- 데이터: `./data/` 에 로그와 CSV 가 남는다. `.env` 는 이미지에 들어가지 않고 `env_file` 로 주입된다.
+- 데이터: `./data/` 에 로그와 CSV 가 남는다(매크로 시계열은 MySQL). `.env` 는 이미지에 들어가지 않고 `env_file` 로 주입된다. 로그는 `docker compose logs` 로도 본다(매크로·백오피스는 여기에만).
 - 운영 명령:
 
 ```bash
-docker compose exec alertbot python run.py restart engine   # 서비스 하나만 재시작 (백오피스 '운영' 화면과 같다)
-docker compose restart alertbot      # .env 변경 반영 (예: AUTOTRADE_MODE) — 셋 다 재시작
-docker compose up -d --build         # 코드 업데이트 후 재빌드
+docker compose exec alertbot python run.py restart macro    # 서비스 하나만 재시작 (백오피스 '운영' 화면과 같다)
+docker compose restart alertbot      # .env 변경 반영 (예: AUTOTRADE_MODE, FRED 키) — 전부 재시작
+docker compose up -d --build         # 코드 업데이트 후 재빌드 (git pull 뒤). 새 run_*.py 는 Dockerfile 의 COPY 에 있어야 한다
 docker compose down                  # 중지 — 워커가 사이클을 마칠 때까지 기다린다 (stop_grace_period 150초)
 ```
 
@@ -510,14 +555,16 @@ docker compose down                  # 중지 — 워커가 사이클을 마칠 
 
 | 화면 | 경로 | 일반 계정 | 관리자 |
 |---|---|---|---|
-| 상태 | `/` | 마지막 사이클 시각(90초 넘으면 "멈췄을 수 있다" 경고), 감시 중·프리마켓 종목, 종목별 상태·현재가·종가·VWAP(밴드)·위치·RVOL·정점·선행·손절선. 30초 자동 갱신. 아래에 **시황 시계열**(주식·코인)과 가상 보유/가상 포지션 카드 | 같음 |
+| 홈 | `/` | **SOXX 매크로** — 가장 유력한 연말 시나리오·확률 분포·가격 눈금자, 판별 지표, 미국·일본 기준금리·DXY·USD/JPY·국채 금리 타일(등급 색), 이벤트 캘린더 (7.1절) | 같음 |
+| 상태 | `/status` | 마지막 사이클 시각(90초 넘으면 "멈췄을 수 있다" 경고), 감시 중·프리마켓 종목, 종목별 상태·현재가·종가·VWAP(밴드)·위치·RVOL·정점·선행·손절선. 30초 자동 갱신. 아래에 **시황 시계열**(주식·코인)과 가상 보유/가상 포지션 카드 | 같음 |
 | 종목 | `/watchlist` | 읽기만 (코인 급변 감시 목록 포함) | 추가/편집/중지/재개/삭제, **심볼 검증**(공용 토스 키로 현재가 조회), 페어 정합성 `!` 경고. 아래 **코인 급변 감시**: 워커가 고른 상위 30(순위·24시간 거래대금·갱신 시각)과 더할·뺄 코인(쉼표, USDT 생략 가능) |
 | 알림 | `/signals` | 공용 신호 + 내 계정 알림. 종목·등급 필터, 채널별 전송 결과 | 모든 계정 알림(계정 배지) + 공용 채널 **테스트 발송** |
-| 자동매매 | `/trading` | **내 live 매매**(토스·Binance 스위치, 금액 배율, Binance 자본), 한도(읽기), 내 live 주문, 공용 가상 장부(모의 보유·가상 주문), 가상 + 내 Binance 포지션 | + 한도 편집, 모든 계정의 live 주문·포지션 |
+| 자동매매 | `/trading` | **내 live 매매**(토스·Binance 스위치, 금액 배율, Binance 자본, **Binance 격리 배율**), **내 live 진단** 표(전략별 명목·증거금·손절이 당겨지는지·주문이 구조적으로 가능한지, 잔고와 견준 증거금 합), 한도(읽기), 내 live 주문, 공용 가상 장부(모의 보유·가상 주문), 가상 + 내 Binance 포지션 | + 한도 편집, 모든 계정의 live 주문·포지션 |
 | 매매 결과 | `/results` | 내 live 체결 결과, 공용 가상 장부 결과, 신호 모의 성적 | + live 결과를 계정별로 선택(`?account=`) |
 | 내 API 키 | `/account` | 토스·Binance·텔레그램 키 저장(쓰기 전용 — 저장한 값은 다시 보여 주지 않는다)·삭제·**연결 확인**(토스 계좌+매수가능금액 / Binance 가용 USDT / 텔레그램 테스트 발송) | 같음 (자기 키만) |
 | 계정 | `/accounts` | — | 허용 이메일 추가(권한 선택), 중지/재개, 관리자↔일반, **live 끄기**(끄기만), 계정별 키 설정 여부·live 스위치 |
-| 운영 | `/ops` | — | `run.py` 가 띄운 주식 엔진·코인 워커·백오피스의 상태(실행 중·끄는 중·꺼짐·재시작 대기)·PID·시작·heartbeat·재시작 횟수·종료 코드·마지막 출력, **켜기/끄기/재시작**(요청을 남기면 관리 프로세스가 5초 안에 처리). 5초 자동 갱신. 백오피스는 재시작만(끄면 이 화면도 사라진다 — 콘솔에서). `run.py` 가 꺼져 있으면 경고 띠와 함께 버튼을 숨긴다 |
+| 매크로 관리 | `/macro/manage` | — | 수집 작업 상태·수집 지표·이벤트·시계열을 보고, **시나리오 기본 확률(합 100)만 편집**한다. 지표·이벤트 입력 폼은 없다(전부 자동 수집) |
+| 운영 | `/ops` | — | `run.py` 가 띄운 주식 엔진·코인 워커·매크로 수집·백오피스의 상태(실행 중·끄는 중·꺼짐·재시작 대기)·PID·시작·heartbeat·재시작 횟수·종료 코드·마지막 출력, **켜기/끄기/재시작**(요청을 남기면 관리 프로세스가 5초 안에 처리). 5초 자동 갱신. 백오피스는 재시작만(끄면 이 화면도 사라진다 — 콘솔에서). `run.py` 가 꺼져 있으면 경고 띠와 함께 버튼을 숨긴다 |
 
 - 키를 지우면 그 공급자의 live 가 꺼지고, 텔레그램 키를 지우면 모든 live 가 꺼진다. live 를 켜려면 해당 키와 텔레그램 키가 있어야 한다(알림 없는 실매매 금지).
 - 자기 자신과 `ALERT_ADMIN_EMAIL` 계정은 중지·강등할 수 없다(기동 때 관리자로 되돌린다).
@@ -527,6 +574,40 @@ docker compose down                  # 중지 — 워커가 사이클을 마칠 
 
 **키 보관** — 계정 키는 공급자 필드 JSON 통째로 AES-256-GCM 으로 암호화해 `alert_account_keys` 에 둔다(계정·공급자를 인증 데이터로 묶어 행을 옮기면 복호화 실패).
 마스터 키는 `.env` `ALERT_MASTER_KEY` 에만 있으니 DB 덤프가 새도 키는 안전하다 — 대신 `.env` 와 DB 백업을 한곳에 두지 않는다. 텔레그램 통신 오류 문구의 봇 토큰은 가려서 이력에 남긴다.
+
+### 7.1 홈 — SOXX 매크로
+
+**데이터** — 전부 자동 수집이다 (`alert_macro_series` 한 날짜 한 값, 같은 날짜면 공식 소스가 시세를 덮는다)
+
+| 항목 | 소스 | 주기 |
+|---|---|---|
+| 미 기준금리 | FRED `DFEDTARL`/`DFEDTARU` (결정 다음 날 갱신 — 그 전엔 FOMC 결과 문구 '→ 3.75~4.00%' 를 쓴다) | 60분 |
+| 미 국채 2/10/30년 · 근원 CPI | FRED `DGS2`/`DGS10`/`DGS30` · `CPILFESL`(전년비 계산) | 60분 |
+| DXY · USD/JPY · SOXX · SPY | Yahoo v8 chart 일봉(오늘 봉 = 장중 값), 실패 시 v7 quote | 10분 |
+| 일본 국채 2/10/30년 | 재무성 `jgbcme.csv` (백필은 `jgbcme_all.csv`) | 60분 |
+| BOJ 기준금리 | BIS 중앙은행 정책금리(일별, 키 불필요) — 며칠 늦게 올라온다 | 3시간 |
+| 일본 CPI 전년비 (종합·근원·근원근원) | 총무성 통계국 전국 요약 페이지 | 3시간 |
+| DRAM 현물가 (DDR4 1Gx8) | capitalandcompute 공개 JSON(TrendForce 집계) → 실패하면 DRAMeXchange 시세표 | 3시간 |
+| 반도체 EPS 추정치 | Yahoo quoteSummary `earningsTrend` — NVDA·AVGO·TSM·MU·AMD 의 +1년 추정치 30일 변화율 중앙값 | 12시간 |
+| 캘린더: FOMC·BOJ 일정 | 연준 FOMC 캘린더(점도표 \* 표시)·BOJ 회의 일정(전망보고서 열) 페이지 | 12시간 |
+| 캘린더: 일본 CPI 발표일 | 통계국 공표 예정표 | 12시간 |
+| 캘린더: 실적 발표일 | Yahoo `calendarEvents` (확정·예상 구분) | 12시간 |
+| 결정 결과 | FOMC 는 그날 성명에서 목표 범위를, BOJ 는 BIS 정책금리 변화에서 인상·인하·동결을 읽는다 | 1시간 |
+
+처음 한 번 `python -m alertbot.macro backfill`(3년치 — 백분위·스파크라인에 필요). 상태는 `python -m alertbot.macro status`.
+**수동 입력은 없다** — 백오피스 '매크로 관리' 에서 손으로 넣을 것은 시나리오 기본 확률뿐이고, 지표와 이벤트는 위 수집기가 채운다.
+한 소스가 막히면 그 작업만 실패로 남고(관리 화면 '수집 작업', 홈의 빨간 칩) 나머지는 그대로 돈다.
+
+**색** — 값의 방향(▲▼)은 중립색이고, 색은 **SOXX 역풍 등급**(안정·주의·경계·위험)에만 쓴다.
+금리·DXY 는 3년 백분위(최대 '경계')·절대 수준·5일 변화 속도 중 큰 등급, USD/JPY 는 엔 급강세(145/142 이하, 5일 −0.5/−1.0/−1.5%)가 위험이다.
+장단기 역전은 정보색(파랑), 역전 해소는 경고색. 미·일 10년 금리차 2.20/1.80/1.50%p 이하는 캐리 여유 주의/경계/위험. 임계는 `alertbot/macro/scoring.py`.
+
+**시나리오 확률** — 기본 확률(관리자)에 판별 지표 신호를 로그 오즈로 더해 기울인다: `p ∝ base · exp(0.30 · Σ w·s·A)`.
+신호는 임계 사이를 잇는 연속값이다(±1 로 튀지 않는다): 미 근원 CPI(2.2 ↔ 2.7%), 일본 근원 CPI(2.0 ↔ 2.5%),
+EPS 추정치 30일 변화(×2, +5% 에서 최대 · ±0.5% 안이면 '상향 중단' 경고), SOXX/SPY 상대강도(50일선·20일 기울기 / 52주 상대 저점),
+DRAM 30일 변화(×2, ±10% 에서 최대), FOMC·BOJ 결과 플래그(시나리오를 저장한 기준일 이후 것만).
+값이 없는 지표는 빠진다(미반영). 하루 한 번 `alert_macro_scenario_log` 에 남긴다.
+분석 프레임이지 예측·자문이 아니다.
 
 ## 8. 텔레그램 설정
 
@@ -565,6 +646,13 @@ python -c "import requests, sys; print(requests.get(f'https://api.telegram.org/b
 | `캘린더 ... 고정 시간으로 판단한다` | 캘린더 API 실패. 고정 시간(KR 09:00~15:30, US 09:30~16:00)으로 동작 |
 | 주문 권한 확인 → `사전 자격 미충족` | 토스 WTS 에서 약관 동의·교육 이수·위험 고지 완료 후 재확인 |
 | ⛔ 자동매매 차단 알림 (계정 텔레그램) | 연속 실패 또는 권한 오류. '자동매매' 표의 사유를 확인하고 내 live 스위치를 다시 켠다 |
+| 홈에 `데이터 없음 — 백필 필요` · 스파크라인·등급이 비어 있다 | 백필을 안 했다. `python -m alertbot.macro backfill` (Docker 는 `docker compose exec alertbot …`) |
+| 홈의 `EPS 추정치` 칩이 빨갛다 · `Invalid Crumb` | Yahoo 크럼이 만료됐다. 다음 주기(12시간)에 새로 받아 다시 시도한다. 계속되면 `python run.py restart macro` |
+| 홈의 `DRAM 현물가` 칩이 빨갛다 | 집계 JSON 과 DRAMeXchange 가 둘 다 막혔다. 다음 주기(3시간)에 다시 시도하며, DRAM 지표만 '수집 대기'로 빠진다 |
+| BOJ 결정 결과가 회의 다음 날에도 비어 있다 | BIS 정책금리가 며칠 늦게 올라온다 — 값이 들어오면 인상·인하·동결이 자동으로 채워진다 |
+| 홈의 `미 금리(FRED)` 칩이 빨갛다 · `FRED_API_KEY 가 없어 건너뜀` | `.env` 에 `ALERT_FRED_API_KEY`(또는 `FRED_API_KEY`)를 넣고 `python run.py restart macro` |
+| 홈의 `시세(Yahoo)`·`JGB(MOF)` 칩이 빨갛다 | 외부 사이트 일시 오류·차단. 칩에 마우스를 올리면 사유, 다음 주기(10분·60분)에 다시 시도한다. 계속되면 서버 방화벽의 나가는 연결 확인 |
+| 홈의 미 기준금리가 FOMC 직후 옛 범위다 | FRED 는 결정 다음 날 반영한다. 매크로 관리에서 그 FOMC 이벤트 결과에 `→ 3.75~4.00%` 처럼 범위를 적으면 바로 반영된다 |
 | 레이트리밋 경고(429) | 자동 대기·재시도. 반복되면 `MIN_CALL_GAP_SEC` 을 늘린다 |
 
 ---

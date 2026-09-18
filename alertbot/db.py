@@ -123,6 +123,7 @@ SCHEMA = {
              binance_live    TINYINT      NOT NULL DEFAULT 0,
              amount_scale    DECIMAL(6,2)  NOT NULL DEFAULT 1,
              binance_capital DECIMAL(18,2) NOT NULL DEFAULT 0,
+             binance_leverage INT          NOT NULL DEFAULT 3,
              created_at      VARCHAR(32)  NOT NULL,
              updated_at      VARCHAR(32)  NOT NULL,
              last_login_at   VARCHAR(32),
@@ -161,6 +162,48 @@ SCHEMA = {
              requested_at VARCHAR(32),
              updated_at   VARCHAR(32) NOT NULL
            ) CHARACTER SET utf8mb4""",
+        # 매크로 홈 (alertbot/macro) — 일별 시계열·이벤트 캘린더·SOXX 시나리오
+        """CREATE TABLE IF NOT EXISTS alert_macro_series (
+             series_key VARCHAR(32) NOT NULL,
+             obs_date   VARCHAR(10) NOT NULL,
+             value      DOUBLE      NOT NULL,
+             source     VARCHAR(16) NOT NULL,
+             fetched_at VARCHAR(32) NOT NULL,
+             note       VARCHAR(255),
+             PRIMARY KEY (series_key, obs_date)
+           ) CHARACTER SET utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS alert_macro_events (
+             id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+             event_date VARCHAR(10)  NOT NULL,
+             time_local VARCHAR(5),
+             country    VARCHAR(6)   NOT NULL,
+             kind       VARCHAR(12)  NOT NULL,
+             title      VARCHAR(120) NOT NULL,
+             importance TINYINT      NOT NULL DEFAULT 2,
+             source     VARCHAR(8)   NOT NULL,
+             note       VARCHAR(255),
+             result     VARCHAR(255),
+             flag       VARCHAR(16),
+             updated_at VARCHAR(32)  NOT NULL,
+             UNIQUE KEY uq_alert_macro_event (kind, country, event_date, title),
+             INDEX idx_alert_macro_event_date (event_date)
+           ) CHARACTER SET utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS alert_macro_scenarios (
+             code         VARCHAR(4)   PRIMARY KEY,
+             name         VARCHAR(40)  NOT NULL,
+             trigger_text VARCHAR(255) NOT NULL,
+             soxx_low     DOUBLE       NOT NULL,
+             soxx_high    DOUBLE       NOT NULL,
+             base_prob    DOUBLE       NOT NULL,
+             sort         INT          NOT NULL,
+             updated_at   VARCHAR(32)  NOT NULL
+           ) CHARACTER SET utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS alert_macro_scenario_log (
+             log_date   VARCHAR(10) PRIMARY KEY,
+             base       TEXT        NOT NULL,
+             adjusted   TEXT        NOT NULL,
+             created_at VARCHAR(32) NOT NULL
+           ) CHARACTER SET utf8mb4""",
     ],
     "sqlite": [
         """CREATE TABLE IF NOT EXISTS alert_watchlist (
@@ -193,7 +236,8 @@ SCHEMA = {
              id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, role TEXT NOT NULL,
              active INTEGER NOT NULL DEFAULT 1, google_sub TEXT, toss_live INTEGER NOT NULL DEFAULT 0,
              binance_live INTEGER NOT NULL DEFAULT 0, amount_scale REAL NOT NULL DEFAULT 1,
-             binance_capital REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_login_at TEXT)""",
+             binance_capital REAL NOT NULL DEFAULT 0, binance_leverage INTEGER NOT NULL DEFAULT 3,
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_login_at TEXT)""",
         """CREATE TABLE IF NOT EXISTS alert_account_keys (
              account_id INTEGER NOT NULL, provider TEXT NOT NULL, secret TEXT NOT NULL, updated_at TEXT NOT NULL,
              PRIMARY KEY (account_id, provider))""",
@@ -204,11 +248,27 @@ SCHEMA = {
              name TEXT PRIMARY KEY, state TEXT NOT NULL, pid INTEGER, host TEXT, started_at TEXT, heartbeat_at TEXT,
              exit_code INTEGER, restarts INTEGER NOT NULL DEFAULT 0, last_output TEXT, request TEXT, requested_by TEXT,
              requested_at TEXT, updated_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS alert_macro_series (
+             series_key TEXT NOT NULL, obs_date TEXT NOT NULL, value REAL NOT NULL, source TEXT NOT NULL,
+             fetched_at TEXT NOT NULL, note TEXT, PRIMARY KEY (series_key, obs_date))""",
+        """CREATE TABLE IF NOT EXISTS alert_macro_events (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, event_date TEXT NOT NULL, time_local TEXT, country TEXT NOT NULL,
+             kind TEXT NOT NULL, title TEXT NOT NULL, importance INTEGER NOT NULL DEFAULT 2, source TEXT NOT NULL,
+             note TEXT, result TEXT, flag TEXT, updated_at TEXT NOT NULL, UNIQUE (kind, country, event_date, title))""",
+        """CREATE TABLE IF NOT EXISTS alert_macro_scenarios (
+             code TEXT PRIMARY KEY, name TEXT NOT NULL, trigger_text TEXT NOT NULL, soxx_low REAL NOT NULL,
+             soxx_high REAL NOT NULL, base_prob REAL NOT NULL, sort INTEGER NOT NULL, updated_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS alert_macro_scenario_log (
+             log_date TEXT PRIMARY KEY, base TEXT NOT NULL, adjusted TEXT NOT NULL, created_at TEXT NOT NULL)""",
     ],
 }
 
 # 기존 테이블에 나중에 추가된 컬럼. init_schema 가 없으면 붙인다.
 EXTRA_COLUMNS = {
+    "alert_accounts": {                              # 계정별 Binance 격리 배율 (공용 가상 장부는 config.BINANCE_TRADE_EXCHANGE_LEV)
+        "mysql": [("binance_leverage", "INT NOT NULL DEFAULT 3")],
+        "sqlite": [("binance_leverage", "INTEGER NOT NULL DEFAULT 3")],
+    },
     "alert_watchlist": {
         "mysql": [("auto_trade", "TINYINT NOT NULL DEFAULT 0"), ("auto_amount", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
                   ("day_trade", "TINYINT NOT NULL DEFAULT 0")],
@@ -255,6 +315,7 @@ SETTING_DEFAULTS = {
     "binance_scan_universe": "{}",       # 워커가 고른 급변 감시 목록 스냅샷 (JSON) — 백오피스 표시용
     "binance_scan_fade_pending": "{}",   # 급등 소진 숏 대기 목록 {심볼: {deadline, after}} (JSON) — 워커가 쓴다, 재시작해도 이어진다
     "binance_scan_last_alert": "{}",     # 급변 감시 코인별 마지막 알림 시각 {심볼: ms} (JSON) — 재시작해도 쿨다운이 이어진다
+    "macro_jobs": "{}",                  # 매크로 수집 작업별 {이름: {at, ok, rows, error}} (JSON) — alertbot/macro/worker.py 가 쓰고 홈·관리 화면이 읽는다
 }
 
 # upsert 는 방언이 다르다. MySQL 은 8.0.19+ 의 행 별칭(AS new) 구문 — VALUES() 는 8.0.20 부터 폐기 예정.

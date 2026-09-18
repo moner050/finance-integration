@@ -6,11 +6,13 @@ TraderGroup 으로 워커들에 넘긴다. 워커는 진입 후보(action) 알�
 
 공통 규칙
   크기   명목가 = 전략 배분 자본 × 전략별 유효 배율(config.BINANCE_TRADE_LEVERAGE). 펀딩 게이트(롱 > 3bp, 숏 < -3bp)면 절반.
-  손절   알림의 손절 참고선, 마크 가격 기준. 종료는 보유 한도(5시간 / 7일 / 20일 / 급등 소진 숏 48시간).
+  손절   알림의 손절 참고선, 마크 가격 기준. 그 장부의 격리 배율에서 청산선 밖이면 안으로 당긴다(stop_for_leverage).
+         종료는 보유 한도(5시간 / 7일 / 20일 / 급등 소진 숏 48시간).
   목표가 진입 후보가 take_profit 을 주면(급등 소진 숏 SCAN_FADE) 마크가 닿을 때 종료. 나머지 전략은 목표 지정가가 없다.
   한도   전략·심볼당 열린 포지션 하나(SCAN_FADE 는 전략 전체 동시 8개까지) · 합산 명목 ≤ 자본 합 × 3 ·
          오늘(KST) 실현손실이 자본 합의 6% 를 넘으면 신규 진입 중단.
-  live 전략 config.BINANCE_LIVE_STRATEGIES 만 계정 live 로 주문한다. SCAN_FADE 는 공용 가상 장부 전용이다.
+  live 전략 config.BINANCE_LIVE_STRATEGIES 만 계정 live 로 주문한다. SCAN_FADE 는 대상 코인이 그때그때 정해져
+         진입할 때 그 심볼을 준비한다(broker.ensure). 크기가 거래소 주문 단위에 못 미치면 '주문 실패' 가 아니라 '보류' 다.
 dry    공개 시세만 쓴다(키 불필요). 체결 = 마지막 체결가 ± 슬리피지, 마크가 손절에 닿으면 종료.
 live   binance_broker.BinanceFutures 로 시장가 진입 → 즉시 STOP_MARKET 알고 주문(마크 트리거, closePosition) 손절.
        계정의 Binance live 스위치가 켜져 있어야 진입한다. 진입 주문이 3회 연속 실패하면 그 계정 스위치를 끈다.
@@ -18,7 +20,8 @@ live   binance_broker.BinanceFutures 로 시장가 진입 → 즉시 STOP_MARKET
        시장가로 닫는다. 손절 주문이 안 걸린 포지션은 사이클마다 다시 건다. 손익·수수료·펀딩은 dry 와 같은 식의 추정값이다.
 상태는 MySQL alert_binance_positions 에만 있어 재시작해도 이어진다(account_id NULL = 가상 장부). 수수료는 테이커 0.05% 편도로 잡는다.
 채널   가상 장부의 포지션 사건은 공용 채널로, 계정 live 의 포지션 사건은 그 계정의 텔레그램으로만 간다 (Signal.account_id).
-       자본도 장부마다 다르다 — 가상은 .env ALERT_BINANCE_TRADE_CAPITAL, 계정은 백오피스의 계정별 자본.
+       자본도 격리 배율도 장부마다 다르다 — 가상은 .env ALERT_BINANCE_TRADE_CAPITAL 과 config.BINANCE_TRADE_EXCHANGE_LEV(3배),
+       계정은 백오피스 자동매매 화면의 계정별 자본·격리 배율. 그래서 같은 신호라도 손절이 장부마다 다를 수 있다.
 """
 
 import logging
@@ -30,9 +33,9 @@ import requests
 from . import accounts, db
 from .binance_broker import BinanceFutures, BrokerError
 from .binance_crash import KST, fmt_price
-from .config import (BINANCE_FAPI, BINANCE_LIVE_STRATEGIES, BINANCE_TRADE_CAPITAL, BINANCE_TRADE_DAILY_LOSS_PCT, BINANCE_TRADE_FEE,
-                     BINANCE_TRADE_LEVERAGE, BINANCE_TRADE_MAX_OPEN, BINANCE_TRADE_MAX_TOTAL_LEV, BINANCE_TRADE_SLIP,
-                     SURGE_FUNDING_WARN)
+from .config import (BINANCE_FAPI, BINANCE_LIVE_STRATEGIES, BINANCE_TRADE_CAPITAL, BINANCE_TRADE_DAILY_LOSS_PCT, BINANCE_TRADE_EXCHANGE_LEV,
+                     BINANCE_TRADE_FEE, BINANCE_TRADE_LEVERAGE, BINANCE_TRADE_MAX_OPEN, BINANCE_TRADE_MAX_TOTAL_LEV, BINANCE_TRADE_SLIP,
+                     SURGE_FUNDING_WARN, liq_distance_pct, max_stop_pct)
 from .models import Signal
 from .notify import account_channels
 from .notify.dispatcher import Dispatcher
@@ -40,9 +43,57 @@ from .notify.dispatcher import Dispatcher
 log = logging.getLogger("binance")
 
 MAX_FAILURES = 3
+# 거래소가 "증거금이 모자란다" 고 답한 코드. 이건 우리 버그가 아니라 잔고 문제라 주문 실패로 세지 않는다
+# (3회면 계정 live 스위치가 꺼진다 — 돈이 없다는 이유로 나머지 전략까지 멈추면 안 된다).
+INSUFFICIENT = {"-2019", "-4131", "-1013"}
 REASON = {"stop": "손절", "tp": "목표가 도달", "time": "보유 한도", "manual": "거래소에서 직접 종료"}
 STRATEGY_NAMES = {"CRASH_BUY": "급락 매수", "SURGE_ENTRY": "4시간 추종", "SURGE_ENTRY_1D": "일봉 추종", "CRASH_SHORT_1D": "일봉 추종",
                   "SCAN_FADE": "급등 소진"}
+
+
+def stop_for_leverage(price: float, side: str, stop: float, leverage: float) -> tuple:
+    """격리 배율의 청산선 안쪽으로 당긴 손절가. (손절가, 원래 손절 폭%) — 당길 필요가 없으면 (그대로, None).
+
+    배율은 진입 크기를 바꾸지 않고 청산 거리만 좁힌다. 손절이 청산선 밖이면 손절이 체결되기 전에 청산돼
+    그 포지션 증거금을 전부 잃으므로, 배율이 높은 장부에서는 손절을 청산선 안으로 당긴다."""
+    cap = max_stop_pct(leverage)
+    sgn = 1 if side == "long" else -1
+    dist = sgn * (price - stop) / price * 100          # 롱은 손절이 아래, 숏은 위 — 어느 쪽이든 역행 폭(%)
+    if dist <= cap:
+        return float(stop), None
+    return price * (1 - sgn * cap / 100), dist
+
+
+_FLOORS = {"at": 0.0, "data": {}}
+
+
+def symbol_floors(ttl_sec: int = 600, session=None) -> dict:
+    """{심볼: 주문 가능한 최소 명목 USDT}. 주문 단위 × 현재가와 거래소 최소 명목 중 큰 쪽이다.
+
+    공개 API 라 키가 필요 없고, 백오피스가 '이 자본으로 주문이 나가는지' 를 보여줄 때 쓴다. 두 번 부를 일이 잦아 ttl_sec 동안 캐시한다.
+    조회에 실패하면 직전 값(없으면 빈 dict)을 준다 — 화면은 모르는 심볼을 '확인 불가' 로 표시한다."""
+    if time.time() - _FLOORS["at"] < ttl_sec and _FLOORS["data"]:
+        return _FLOORS["data"]
+    s = session or requests
+    try:
+        info = s.get(f"{BINANCE_FAPI}/fapi/v1/exchangeInfo", timeout=20).json()
+        price = {r["symbol"]: float(r["price"]) for r in s.get(f"{BINANCE_FAPI}/fapi/v1/ticker/price", timeout=20).json()}
+    except Exception as e:
+        log.warning("주문 최소 단위 조회 실패: %s", e)
+        return _FLOORS["data"]
+    out = {}
+    for spec in info.get("symbols", []):
+        sym = spec["symbol"]
+        if sym not in price:
+            continue
+        f = {x["filterType"]: x for x in spec["filters"]}
+        try:
+            step = float(f["LOT_SIZE"]["stepSize"])
+            out[sym] = max(step * price[sym], float(f.get("MIN_NOTIONAL", {}).get("notional", 0)))
+        except (KeyError, ValueError):
+            continue
+    _FLOORS.update(at=time.time(), data=out)
+    return out
 
 
 def strategy_text(strategy: str, side: str) -> str:
@@ -85,12 +136,17 @@ class Trader:
         self.account_id = account["id"] if account else None
         self.fetch_price, self.fetch_premium, self.fetch_settled = fetch_price, fetch_premium, fetch_settled_funding
         self.capital = float(account["binance_capital"]) if account else BINANCE_TRADE_CAPITAL
+        # 격리 배율은 장부마다 다르다 — 공용 가상 장부는 .env 기준값, 계정 live 는 그 계정이 백오피스에서 정한 값.
+        # 진입 크기는 바뀌지 않고 청산 거리만 달라져, 손절이 청산선 밖이면 on_entry 가 안으로 당긴다.
+        self.exchange_lev = int(account["binance_leverage"]) if account else BINANCE_TRADE_EXCHANGE_LEV
         # 자본 합 = 전략 수 × 배분 자본. live 는 실제로 주문하는 전략만 센다 (가상 전용 전략이 계정 한도를 키우지 않게)
         self.capital_total = self.capital * len(BINANCE_LIVE_STRATEGIES if account else BINANCE_TRADE_LEVERAGE)
         self.failures = 0
         self.tag = "[DRY] " if mode == "dry" else "[LIVE] "
-        log.info("Binance 자동매매 %s%s: 전략별 자본 %.0f USDT · 유효 배율 %s · 합산 명목 한도 %.0f · 일손실 한도 %.0f",
-                 mode, f" ({account['email']})" if account else "", self.capital, BINANCE_TRADE_LEVERAGE,
+        log.info("Binance 자동매매 %s%s: 전략별 자본 %.0f USDT · 격리 %d배(청산 %.1f%% · 손절 상한 %.1f%%) · 유효 배율 %s · "
+                 "합산 명목 한도 %.0f · 일손실 한도 %.0f",
+                 mode, f" ({account['email']})" if account else "", self.capital, self.exchange_lev,
+                 liq_distance_pct(self.exchange_lev), max_stop_pct(self.exchange_lev), BINANCE_TRADE_LEVERAGE,
                  self.capital_total * BINANCE_TRADE_MAX_TOTAL_LEV, self.capital_total * BINANCE_TRADE_DAILY_LOSS_PCT / 100)
 
     # -- 진입 -------------------------------------------------------------------
@@ -107,6 +163,7 @@ class Trader:
         fund = result.get("funding")
         if fund is not None and (fund > SURGE_FUNDING_WARN if side == "long" else fund < -SURGE_FUNDING_WARN):
             notional, note = notional / 2, " · 펀딩으로 크기 절반"
+        short_funds = False                                     # 돈이 모자라 못 산 경우 — 보류와 달리 늘 알린다
         why = self._blocked(strategy, symbol, notional, now)
         if why is None and self.mode == "live" and not self._live_on():
             why = "live 스위치 OFF (백오피스 자동매매 화면의 내 live 매매에서 켠다)"
@@ -115,21 +172,47 @@ class Trader:
                 last, prem = self.fetch_price(symbol), self.fetch_premium(symbol)
             except Exception as e:
                 why = f"시세 조회 실패 {e}"
+        # 배율은 심볼 단위다. 급등 소진 숏처럼 대상 코인이 그때그때 정해지는 전략이면 여기서 그 심볼을 준비하고,
+        # 코인 상한 때문에 낮게 걸렸으면 그 값으로 손절을 맞춘다 (낮은 배율 = 청산이 더 멀다).
+        lev_sym = self.exchange_lev
+        if why is None and self.mode == "live":
+            try:
+                lev_sym = self.broker.ensure([symbol], self.exchange_lev)[symbol]
+            except Exception as e:
+                why = f"{symbol} 준비 실패 (격리·배율) {e}"
+        if why is None and self.mode == "live":
+            # 크기가 거래소 주문 단위·최소 명목에 못 미치면 **보류**로 끝낸다. 주문을 내 봐야 거부될 뿐이고,
+            # 주문 실패로 세면 3회에 그 계정 live 스위치가 꺼진다 — 자본이 작아서 생기는 일로 스위치를 끄면 안 된다.
+            qty = self.broker.round_qty(symbol, notional / last)
+            floor = self.broker.min_notional(symbol)
+            if qty <= 0 or qty * last < floor:
+                need = floor / BINANCE_TRADE_LEVERAGE[strategy]
+                why, short_funds = (f"명목 {notional:,.1f} USDT 로는 주문 최소 단위에 못 미친다 (이 코인은 {floor:,.0f} USDT 부터)\n"
+                                    f"이 전략이 이 코인을 사려면 전략별 자본이 {need:,.0f} USDT 이상이어야 한다"), True
         if why:
-            if notify_skip:
+            # 돈이 모자라 못 산 것은 notify_skip 과 무관하게 알린다 — 신호는 났는데 체결이 안 된 것이라 사람이 알아야 한다.
+            if short_funds:
+                self._emit("BN_FUNDS", "⏸ 신호 발생 — 자금 부족으로 미체결", symbol, f"{strategy_text(strategy, side)}\n{why}")
+            elif notify_skip:
                 self._emit("BN_SKIP", "⏸ 진입 보류", symbol, f"{strategy_text(strategy, side)}: {why}")
             else:
                 log.info("%s%s %s %s 진입 보류: %s", self.tag, strategy, symbol, side.upper(), why)
             return None
         sgn = 1 if side == "long" else -1
         ids = {"entry_order_id": None, "stop_order_id": None}
+        want, tightened = stop_for_leverage(last, side, float(result["stop"]), lev_sym)
         if self.mode == "dry":
             price = last * (1 + sgn * BINANCE_TRADE_SLIP.get(symbol, 0.0005))
-            qty, stop = round(notional / price, 6), float(result["stop"])
+            qty, stop = round(notional / price, 6), want
         else:
             try:
-                price, qty, stop, ids = self._live_open(symbol, side, notional, last, float(result["stop"]))
+                price, qty, stop, ids = self._live_open(symbol, side, notional, last, want)
             except BrokerError as e:
+                if e.code in INSUFFICIENT:      # 거래소가 증거금 부족으로 거절 — 신호는 났는데 못 샀다는 알림만
+                    self._emit("BN_FUNDS", "⏸ 신호 발생 — 자금 부족으로 미체결", symbol,
+                               f"{strategy_text(strategy, side)}\n명목 {notional:,.1f} USDT · 격리 {lev_sym}배라 증거금 "
+                               f"{notional / lev_sym:,.1f} USDT 가 필요한데 거래소가 거절했다 ({e.message or e.code})")
+                    return None
                 self._entry_failed(f"{strategy} {symbol} {side.upper()} 진입 주문 실패: {e}", symbol)
                 return None
         deadline = now + timedelta(hours=hold_hours)
@@ -143,7 +226,9 @@ class Trader:
                    f"{strategy_text(strategy, side)} {fmt_price(price)} · 명목 {row['notional']:,.0f} USDT{note}\n"
                    f"손절 {fmt_price(stop)}{'' if ids['stop_order_id'] or self.mode == 'dry' else ' (주문 실패 — 재시도 중)'}"
                    + (f" · 목표가 {fmt_price(tp)}" if tp is not None else "")
-                   + f" · {deadline.astimezone(KST):%m-%d %H:%M} 까지")
+                   + f" · {deadline.astimezone(KST):%m-%d %H:%M} 까지"
+                   + (f"\n손절은 격리 {lev_sym}배의 청산선 안으로 당겼다 — 신호 {tightened:.1f}% → "
+                      f"{max_stop_pct(lev_sym):.1f}%" if tightened is not None else ""))
         return row
 
     def _live_open(self, symbol, side, notional, last, stop):
@@ -336,10 +421,12 @@ class TraderGroup:
 LIVE_RETRY_SEC = 600
 
 
-def build_live_trader(store, account: dict, symbols: list, leverage: int):
-    """계정 하나의 live 트레이더 — 그 계정 키로 서버 시각·심볼 필터·헤지 모드·격리·배율을 맞춘다. 실패하면 그 계정에 알리고 None."""
+def build_live_trader(store, account: dict, symbols: list):
+    """계정 하나의 live 트레이더 — 그 계정 키로 서버 시각·심볼 필터·헤지 모드·격리를 맞추고, **그 계정의 배율**을 건다.
+    실패하면 그 계정에 알리고 None."""
     notifier = Dispatcher(account_channels(account), record=lambda s, r: db.log_signal(store, s, r))
     broker = BinanceFutures(account["binance"]["api_key"], account["binance"]["api_secret"])
+    leverage = int(account["binance_leverage"])
     try:
         broker.sync_time()
         broker.load_filters(symbols)
@@ -353,7 +440,9 @@ def build_live_trader(store, account: dict, symbols: list, leverage: int):
         return None
     notifier.send(Signal("SYSTEM", "⚪ 시스템", "Binance live 준비",
                          f"[LIVE] {', '.join(symbols)} 격리 {leverage}배 헤지 모드 · 가용 {balance:,.0f} USDT · "
-                         f"전략별 자본 {account['binance_capital']:,.0f} USDT", account_id=account["id"]))
+                         f"전략별 자본 {account['binance_capital']:,.0f} USDT\n"
+                         f"청산 거리 {liq_distance_pct(leverage):.1f}% · 손절은 최대 {max_stop_pct(leverage):.1f}% "
+                         f"(넘는 신호는 여기까지 당긴다)", account_id=account["id"]))
     return Trader(store, notifier, "live", broker, account=account)
 
 
@@ -362,10 +451,13 @@ class AccountTraders:
 
     Binance live 스위치가 켜진 활성 계정(키·텔레그램·자본 필요)에 더해, 스위치를 껐거나 계정이 중지돼도 **열린 live 포지션이 남은 계정**은
     트레이더를 유지한다 — 새 진입은 스위치가 막고(_live_on), 손절 재설정·보유 한도 청산은 끝까지 돈다.
+
+    격리 배율은 계정마다 다르다(alert_accounts.binance_leverage). 배율이 바뀌면 키 서명이 달라져 트레이더를 다시 만들고,
+    그때 거래소에 새 배율을 건다 — 열린 포지션이 있으면 거래소가 변경을 거부할 수 있고, 그건 그대로 ⛔ 알림으로 나간다.
     """
 
-    def __init__(self, store, symbols: list, leverage: int, build=build_live_trader, clock=time.monotonic):
-        self.store, self.symbols, self.leverage, self.build = store, list(symbols), leverage, build
+    def __init__(self, store, symbols: list, build=build_live_trader, clock=time.monotonic):
+        self.store, self.symbols, self.build = store, list(symbols), build
         self.clock = clock
         self.version = None
         self.by_account = {}            # account_id -> (키 서명, Trader)
@@ -396,8 +488,9 @@ class AccountTraders:
             if acc["error"] or not usable:
                 log.warning("계정 %s Binance live 건너뜀: %s", acc["email"], acc["error"] or "키·텔레그램·자본 확인")
                 continue
+            # 배율이 서명에 들어가야 백오피스에서 바꿨을 때 트레이더를 다시 만들어 거래소에 새 배율을 건다
             sign = (acc["binance"]["api_key"], acc["binance"]["api_secret"], (acc["telegram"] or {}).get("bot_token"),
-                    (acc["telegram"] or {}).get("chat_id"), acc["binance_capital"])
+                    (acc["telegram"] or {}).get("chat_id"), acc["binance_capital"], acc["binance_leverage"])
             cur = self.by_account.get(acc["id"])
             if cur and cur[0] == sign:
                 cur[1].account = acc
@@ -405,7 +498,7 @@ class AccountTraders:
                 continue
             if not changed and now - self.failed.get(acc["id"], now - LIVE_RETRY_SEC) < LIVE_RETRY_SEC:
                 continue
-            trader = self.build(self.store, acc, self.symbols, self.leverage)
+            trader = self.build(self.store, acc, self.symbols)
             if trader is None:
                 self.failed[acc["id"]] = now
                 continue

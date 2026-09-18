@@ -14,7 +14,7 @@
 </form>
 <div class="panel">
 <table>
-<tr><th>이메일</th><th>권한</th><th>상태</th><th>마지막 로그인 (KST)</th><th>키 (토스 · Binance · 텔레그램)</th><th>live</th><th>금액 배율 · Binance 자본</th><th></th></tr>
+<tr><th>이메일</th><th>권한</th><th>상태</th><th>마지막 로그인 (KST)</th><th>키 (토스 · Binance · 텔레그램)</th><th>live</th><th>금액 배율 · Binance 자본 · 격리 배율</th><th></th></tr>
 {% for a in rows %}
 {% set keys = key_status.get(a.id, {}) %}
 {% set locked = a.id == me.id or a.email == admin_email %}
@@ -26,7 +26,7 @@
  <td>{% for p in ['toss', 'binance', 'telegram'] %}<span class="{{ 'ok' if keys.get(p) else 'muted' }}">{{ '●' if keys.get(p) else '○' }}</span> {% endfor %}</td>
  <td style="white-space:nowrap">토스 <span class="badge {{ 'action' if a.toss_live else '' }}">{{ 'ON' if a.toss_live else 'OFF' }}</span>
   Binance <span class="badge {{ 'action' if a.binance_live else '' }}">{{ 'ON' if a.binance_live else 'OFF' }}</span></td>
- <td>× {{ '{:g}'.format(a.amount_scale) }} · {{ '{:,.0f}'.format(a.binance_capital) }} USDT</td>
+ <td style="white-space:nowrap">× {{ '{:g}'.format(a.amount_scale) }} · {{ '{:,.0f}'.format(a.binance_capital) }} USDT · 격리 {{ a.binance_leverage }}배</td>
  <td style="white-space:nowrap">
   {% if a.toss_live or a.binance_live %}<form class="inline" method="post" action="/accounts/{{ a.id }}/live-off" onsubmit="return confirm('{{ a.email }} 의 live 매매를 모두 끌까요?')"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">live 끄기</button></form>{% endif %}
   {% if not locked %}

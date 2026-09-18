@@ -12,7 +12,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from . import crypto, db
-from .config import SESSION_HOURS
+from .config import BINANCE_LEVERAGE_RANGE, BINANCE_TRADE_EXCHANGE_LEV, SESSION_HOURS
 
 log = logging.getLogger("scalper")
 
@@ -23,7 +23,7 @@ PROVIDERS = {
     "binance": ("api_key", "api_secret"),
     "telegram": ("bot_token", "chat_id"),
 }
-LIVE_FIELDS = ("toss_live", "binance_live", "amount_scale", "binance_capital")
+LIVE_FIELDS = ("toss_live", "binance_live", "amount_scale", "binance_capital", "binance_leverage")
 
 UPSERT_KEY = {
     "mysql": "INSERT INTO alert_account_keys (account_id, provider, secret, updated_at) VALUES (%s, %s, %s, %s) AS new "
@@ -41,6 +41,9 @@ def _account(row):
         row[k] = float(row[k] or 0)
     for k in ("active", "toss_live", "binance_live"):
         row[k] = bool(row[k])
+    # 허용 범위 밖의 값(상한을 내리기 전에 저장된 것)은 읽을 때 낮은 쪽으로 맞춘다 — 배율이 낮아지는 건 청산이 멀어지는 쪽이다
+    lo, hi = BINANCE_LEVERAGE_RANGE
+    row["binance_leverage"] = max(lo, min(hi, int(row.get("binance_leverage") or BINANCE_TRADE_EXCHANGE_LEV)))
     return row
 
 
@@ -99,13 +102,18 @@ def set_role(store, account_id: int, role: str):
 
 
 def update_live(store, account_id: int, **fields):
-    """live 스위치·금액 배율·Binance 자본. 워커의 자동 차단(연속 실패)도 이걸로 스위치를 끈다."""
+    """live 스위치·금액 배율·Binance 자본·Binance 격리 배율. 워커의 자동 차단(연속 실패)도 이걸로 스위치를 끈다."""
     bad = set(fields) - set(LIVE_FIELDS)
     if bad:
         raise ValueError(f"알 수 없는 live 설정: {sorted(bad)}")
     if not fields:
         return
-    values = {k: (int(bool(v)) if k in ("toss_live", "binance_live") else float(v)) for k, v in fields.items()}
+    if "binance_leverage" in fields:
+        lo, hi = BINANCE_LEVERAGE_RANGE
+        if not lo <= int(fields["binance_leverage"]) <= hi:
+            raise ValueError(f"Binance 격리 배율은 {lo}~{hi} 배")
+    values = {k: (int(bool(v)) if k in ("toss_live", "binance_live")
+                  else int(v) if k == "binance_leverage" else float(v)) for k, v in fields.items()}
     values["updated_at"] = db._now()
     sets = ", ".join(f"{k} = %s" for k in values)
     store.execute(f"UPDATE alert_accounts SET {sets} WHERE id = %s", (*values.values(), int(account_id)))
@@ -185,7 +193,8 @@ def live_accounts(store, include_ids=()) -> list:
     out = []
     for acc in store.fetchall(sql + " ORDER BY id", tuple(ids)):
         acc = _account(acc)
-        item = {k: acc[k] for k in ("id", "email", "active", "toss_live", "binance_live", "amount_scale", "binance_capital")}
+        item = {k: acc[k] for k in ("id", "email", "active", "toss_live", "binance_live", "amount_scale",
+                                    "binance_capital", "binance_leverage")}
         item["error"] = None
         for provider in PROVIDERS:
             try:

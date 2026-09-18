@@ -1,7 +1,8 @@
-# 우분투 배포: run.py 하나가 엔진 + Binance 워커 + 백오피스를 띄우고 지킨다. MySQL 은 이미 쓰는 외부 서버(.env 의 MYSQL_*)를 쓴다.
+# 우분투 배포: run.py 하나가 엔진 + Binance 워커 + 매크로 수집 + 백오피스를 띄우고 지킨다. MySQL 은 이미 쓰는 외부 서버(.env 의 MYSQL_*)를 쓴다.
 #   docker compose down --remove-orphans     (예전 3개 서비스 구성에서 넘어올 때 한 번 — 안 하면 옛 컨테이너가 남아 알림·주문이 두 번 나간다)
 #   docker compose up -d --build
-#   docker compose logs -f alertbot          ([engine] / [binance] / [backoffice] 접두어)
+#   docker compose logs -f alertbot          ([engine] / [binance] / [macro] / [backoffice] 접두어)
+#   docker compose exec alertbot python -m alertbot.macro backfill   (처음 한 번 — 매크로 홈 3년치)
 #   docker compose exec alertbot python run.py status
 #   docker compose exec alertbot python run.py restart binance
 services:

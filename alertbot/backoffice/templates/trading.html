@@ -12,6 +12,7 @@
  <label><span><input type="checkbox" name="binance_live" value="1" {{ 'checked' if mine.binance_live else '' }} {{ '' if keys.binance and keys.telegram else 'disabled' }}> Binance live (선물)</span></label>
  <label>주식 금액 배율 (종목 1회 매수 금액 × 배율) <input type="text" name="amount_scale" value="{{ '{:g}'.format(mine.amount_scale) }}"></label>
  <label>Binance 전략별 자본 (USDT) <input type="text" name="binance_capital" value="{{ '{:g}'.format(mine.binance_capital) }}"></label>
+ <label>Binance 격리 배율 (선물) <input type="text" name="binance_leverage" value="{{ mine.binance_leverage }}"><span class="muted" style="padding:0;font-weight:500">{{ lev_range[0] }}~{{ lev_range[1] }}배 · 내 주문과 내 알림에만 적용 (공용 채널은 {{ lev_public.lev }}배 기준)</span></label>
  <div class="full">
   <button type="submit" class="primary">저장</button>
   <span class="muted">키: 토스 {{ '●' if keys.toss else '○' }} · Binance {{ '●' if keys.binance else '○' }} · 텔레그램 {{ '●' if keys.telegram else '○' }} — <a href="/account">내 API 키</a>. live 를 켜려면 해당 키와 텔레그램 키가 필요하다.</span>
@@ -19,6 +20,46 @@
   {% if bn_mode != 'live' %}<span class="warn">서버 Binance 모드가 {{ bn_mode }} 라 켜도 선물 주문이 나가지 않는다</span>{% endif %}
  </div>
 </form>
+<h3>내 live 진단 <span class="muted" style="font-weight:500">이 설정으로 지금 주문이 나가는지</span></h3>
+<div class="card">
+ <p class="sub" style="margin:0 0 10px">
+  격리 <b>{{ lev_mine.lev }}배</b> · 청산 거리 {{ '%.1f'|format(lev_mine.liq) }}% · 손절 상한 {{ '%.1f'|format(lev_mine.cap) }}% ·
+  전략별 자본 <b>{{ '{:,.0f}'.format(lev_mine.capital) }} USDT</b> ·
+  잔고 {% if lev_mine.balance is not none %}<b>{{ '{:,.2f}'.format(lev_mine.balance) }} USDT</b>{% else %}<span class="muted">확인 불가</span>{% endif %}<br>
+  배율은 진입 크기가 아니라 청산 거리를 정한다. 크기는 <b>전략별 자본 × 전략별 유효 배율</b>이고, 계좌에서 묶이는 돈은 <b>명목 ÷ 배율</b>이다.
+ </p>
+ {% if lev_mine.short_margin %}
+ <p class="warn" style="margin:0 0 10px">다섯 전략이 동시에 열리면 증거금 {{ '{:,.1f}'.format(lev_mine.margin_total) }} USDT 가 필요한데 잔고는 {{ '{:,.2f}'.format(lev_mine.balance) }} USDT 다 — 나중에 뜬 신호부터 미체결된다.</p>
+ {% endif %}
+ <table>
+  <tr><th>전략</th><th>명목</th><th>증거금</th><th>손절 (신호 → 적용)</th><th>주문</th></tr>
+  {% for r in lev_mine.rows %}
+  <tr>
+   <td>{{ r.name }}</td>
+   <td>{{ '{:,.1f}'.format(r.notional) }}</td>
+   <td>{{ '{:,.1f}'.format(r.margin) }}</td>
+   <td>
+    {%- if r.base is none %}<span class="muted">가변 → 상한 {{ '%.1f'|format(lev_mine.cap) }}%</span>
+    {%- elif r.tightened %}{{ '%.1f'|format(r.base) }}% → <span class="warn">{{ '%.1f'|format(r.applied) }}%</span>
+    {%- else %}{{ '%.1f'|format(r.applied) }}%{% endif %}
+   </td>
+   <td>
+    {%- if not r.known %}<span class="muted">확인 불가</span>
+    {%- elif r.blocked %}<span class="danger">불가 — 자본 {{ '{:,.0f}'.format(r.need) }} USDT 이상</span>
+    {%- elif r.known > 1 and r.ok_n < r.known %}<span class="warn">{{ r.ok_n }}/{{ r.known }} 코인</span>
+    {%- else %}<span class="ok">가능</span>{% endif %}
+   </td>
+  </tr>
+  {% endfor %}
+  <tr><td colspan="2"><b>다섯 전략 동시</b></td><td><b>{{ '{:,.1f}'.format(lev_mine.margin_total) }}</b></td><td colspan="2" class="muted">잔고에서 이만큼이 묶인다</td></tr>
+ </table>
+ <p class="sub" style="margin:10px 0 0">
+  <b>불가</b> 는 명목가가 그 코인의 주문 단위(0.001 BTC 처럼)에 못 미쳐 구조적으로 주문이 성립하지 않는 경우다 — 자본을 올리는 것 말고 방법이 없다.
+  이때는 주문을 내지 않고 <b>⏸ 신호 발생 — 자금 부족으로 미체결</b> 알림만 보낸다(주문 실패로 세지 않아 live 스위치는 그대로다).
+  공용 채널은 늘 격리 {{ lev_public.lev }}배 기준이라 이 표의 영향을 받지 않는다. 배율을 바꾸면 워커가 다음 사이클에 거래소에 새 배율을 건다.
+ </p>
+</div>
+
 <dl class="kv">
  <dt>live 주문 조건</dt>
  <dd><span class="muted">서버 모드 live + 내 live 스위치 + (주식) 종목 화면의 live 자동매매 체크와 1회 매수 금액. 한도(아래)는 계정마다 따로 센다. 주문·체결·실패·일일 성적은 내 텔레그램으로만 간다.</span></dd>

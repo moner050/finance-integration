@@ -21,7 +21,7 @@ def client(monkeypatch):
 
 def test_status_without_engine(client):
     c, _ = client
-    r = c.get("/")
+    r = c.get("/status")
     assert r.status_code == 200 and "엔진 상태 기록이 없다" in r.text
 
 
@@ -33,7 +33,7 @@ def test_status_with_engine(client):
     r = c.get("/partials/status")
     assert r.status_code == 200 and "보유" in r.text and "10.5" in r.text
     assert "초 전)" in r.text and "멈췄을 수" not in r.text          # heartbeat 가 방금이라 정상
-    r = c.get("/")
+    r = c.get("/status")
     assert 'hx-get="/partials/status"' in r.text
 
 

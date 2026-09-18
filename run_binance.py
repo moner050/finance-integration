@@ -121,11 +121,12 @@ def main():
     paper = Trader(store, notifier, "dry")          # 공용 가상 장부 — 모드와 무관하게 늘 돈다
     trader = TraderGroup([paper])                   # 워커가 공유한다. live 모드면 사이클마다 계정별 트레이더를 갈아 끼운다
     live = None
-    body.append(f"가상매매: 진입 후보 전부 (전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT)")
+    body.append(f"가상매매: 진입 후보 전부 (전략별 자본 {BINANCE_TRADE_CAPITAL:,.0f} USDT · 격리 {BINANCE_TRADE_EXCHANGE_LEV}배 기준)")
     if BINANCE_TRADE_MODE == "live":
-        live = AccountTraders(store, trade_symbols(), BINANCE_TRADE_EXCHANGE_LEV)
+        live = AccountTraders(store, trade_symbols())
         trader.traders = [paper] + live.refresh()
-        body.append(f"계정별 live: on (격리 {BINANCE_TRADE_EXCHANGE_LEV}배 · 준비된 계정 {len(live.traders)}개)")
+        levs = ", ".join(f"{t.account['email']} {t.exchange_lev}배" for t in live.traders) or "없음"
+        body.append(f"계정별 live: on (계정마다 격리 배율 — {levs})")
     else:
         body.append("계정별 live: off")
     # 진입 후보 뒤의 손절·보유 한도 청산 알림과 모의 성적(자정 KST 성적표). 재시작 전의 신호 포지션도 이어받는다

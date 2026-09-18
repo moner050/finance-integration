@@ -213,7 +213,7 @@ def test_boot_clears_requests_left_while_down():
                        clock=lambda: T0)
     sup.boot(T0)
     rows = DBM.list_services(store)
-    assert rows["binance"]["request"] is None and rows["binance"]["state"] == "running" and len(procs) == 3
+    assert rows["binance"]["request"] is None and rows["binance"]["state"] == "running" and len(procs) == len(S.SERVICES)
 
 
 def test_lease():

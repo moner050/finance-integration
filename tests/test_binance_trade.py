@@ -8,7 +8,7 @@ from alertbot import db
 from alertbot.binance_crash import CrashWorker
 from alertbot.binance_follow import FollowWorker
 from alertbot.binance_trade import Trader
-from alertbot.config import BINANCE_TRADE_FEE, BINANCE_TRADE_LEVERAGE
+from alertbot.config import BINANCE_TRADE_FEE, BINANCE_TRADE_LEVERAGE, max_stop_pct
 
 T = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)
 RES = {"stop": 97.0, "open_time": 1_780_000_000_000, "funding": 0.0001}
@@ -181,3 +181,26 @@ def test_scan_fade_cap_and_quiet_skips(store, monkeypatch):
     assert t.on_entry("SCAN_FADE", "CCCUSDT", "short", res, 48, now=T) is None
     assert rec.sent[-1].kind == "BN_SKIP" and "2개가 다 찼다" in rec.sent[-1].body
     assert t.on_entry("CRASH_BUY", "ETCUSDT", "long", RES, 5, now=T) is not None                      # 다른 전략은 상한과 무관
+
+
+# -- 격리 배율별 손절 (공용 3배 vs 계정별) ----------------------------------------------
+
+def test_stop_for_leverage_tightens_only_outside_liquidation():
+    """배율이 낮으면 신호 손절 그대로, 높으면 청산선 안으로 당긴다. 롱·숏 모두. 상한은 config 가 정한다."""
+    assert BT.stop_for_leverage(100.0, "short", 125.0, 3) == (125.0, None)       # 3배 상한 27.8% — 그대로
+    assert BT.stop_for_leverage(50.0, "long", 45.0, 3) == (45.0, None)           # 가격이 달라도 % 로 본다
+    cap7 = max_stop_pct(7)
+    stop, was = BT.stop_for_leverage(100.0, "short", 125.0, 7)                   # 숏은 위로 당긴다
+    assert was == 25.0 and abs(stop - (100 + cap7)) < 1e-9
+    stop, was = BT.stop_for_leverage(100.0, "long", 90.0, 7)                     # 롱은 아래로
+    assert was == 10.0 and abs(stop - (100 - cap7)) < 1e-9
+    inside = 100 - cap7 * 0.5                                                    # 상한 안쪽 손절은 건드리지 않는다
+    assert BT.stop_for_leverage(100.0, "long", inside, 7) == (inside, None)
+
+
+def test_dry_book_keeps_public_stop(store):
+    """공용 가상 장부는 .env 기준 배율(3배)이라 신호 손절을 그대로 쓴다 — 공용 채널 문구도 그대로."""
+    t, q, rec = make(store)
+    assert t.exchange_lev == 3
+    row = t.on_entry("CRASH_SHORT_1D", "ETCUSDT", "short", {"stop": 125.0, "open_time": 1}, 480, now=T)
+    assert row["stop"] == 125.0 and "당겼다" not in rec.sent[-1].body

@@ -10,6 +10,7 @@ from alertbot import config, crypto, db
 from alertbot.binance_broker import BrokerError
 from alertbot.binance_crash import KST
 from alertbot.binance_trade import AccountTraders, Trader, TraderGroup
+from alertbot.config import BINANCE_LIVE_STRATEGIES, max_stop_pct
 from tests.test_binance_trade import RES, T, Recorder, fixed_capital, store  # noqa: F401  (fixtures)
 
 
@@ -18,6 +19,16 @@ class FakeBroker:
         self.orders, self.stops, self.pos, self.price = [], {}, {}, 100.0
         self.fail_open = self.fail_stop = False
         self._seq = 0
+        self.leverage, self.prepared, self.caps = {}, [], {}
+        self.open_error = "-4061"           # 기본은 자금과 무관한 거부 (포지션 방향 불일치)
+
+    def ensure(self, symbols, leverage):
+        """실제 브로커처럼 처음 보는 심볼만 준비하고 걸린 배율을 돌려준다. caps 에 있는 코인은 상한이 더 낮다."""
+        for s in symbols:
+            if s not in self.leverage:
+                self.prepared.append(s)
+                self.leverage[s] = min(leverage, self.caps.get(s, leverage))
+        return {s: self.leverage[s] for s in symbols}
 
     def round_qty(self, s, q):
         return math.floor(q * 1000) / 1000
@@ -30,7 +41,7 @@ class FakeBroker:
 
     def market_open(self, s, side, qty):
         if self.fail_open:
-            raise BrokerError("-2019", "Margin is insufficient.")
+            raise BrokerError(self.open_error, "주문 거부")
         self.orders.append(("open", s, side, qty))
         self.pos[(s, side)] = qty
         return "o1", self.price, qty
@@ -57,12 +68,13 @@ class FakeBroker:
         return "o2", self.price, qty
 
 
-def make(store, on=True, capital=1000.0, email="me@example.com"):
+def make(store, on=True, capital=1000.0, email="me@example.com", leverage=3):
     q = {"mark": 100.0, "next": 1_000}
     rec, fb = Recorder(), FakeBroker()
     account_id = ACC.add_account(store, email)
-    ACC.update_live(store, account_id, binance_live=on, binance_capital=capital)
-    t = Trader(store, rec, "live", fb, fetch_price=lambda s: fb.price, account={"id": account_id, "email": email, "binance_capital": capital},
+    ACC.update_live(store, account_id, binance_live=on, binance_capital=capital, binance_leverage=leverage)
+    t = Trader(store, rec, "live", fb, fetch_price=lambda s: fb.price,
+               account={"id": account_id, "email": email, "binance_capital": capital, "binance_leverage": leverage},
                fetch_premium=lambda s: {"mark": q["mark"], "next_funding": q["next"]}, fetch_settled_funding=lambda s: (1_000, 0.0))
     return t, fb, rec, q
 
@@ -71,7 +83,7 @@ def test_trader_requires_account_only_for_live(store):
     with pytest.raises(ValueError):
         Trader(store, Recorder(), "live", FakeBroker())
     with pytest.raises(ValueError):
-        Trader(store, Recorder(), "dry", account={"id": 1, "email": "x", "binance_capital": 1.0})
+        Trader(store, Recorder(), "dry", account={"id": 1, "email": "x", "binance_capital": 1.0, "binance_leverage": 3})
 
 
 def test_kill_switch_blocks_live_entry(store):
@@ -135,10 +147,15 @@ def test_stop_failure_is_retried_and_open_failures_disable(store):
     fb.fail_stop = False
     t.poll(T + timedelta(minutes=2))
     assert db.binance_positions(store, status="open")[0]["stop_order_id"] == "1"
-    fb.fail_open = True
+    fb.fail_open, fb.open_error = True, "-2019"                        # 증거금 부족은 실패로 세지 않는다
     for k in range(3):
         assert t.on_entry("SURGE_ENTRY", "BTCUSDT", "long", RES, 168, now=T + timedelta(hours=k)) is None
-    assert ACC.get(store, t.account_id)["binance_live"] is False and "차단" in rec.sent[-1].title   # 그 계정 스위치만 꺼진다
+    assert t.failures == 0 and ACC.get(store, t.account_id)["binance_live"] is True
+    assert rec.sent[-1].kind == "BN_FUNDS" and "자금 부족" in rec.sent[-1].title
+    fb.open_error = "-4061"                                            # 그 밖의 거부는 3회에 그 계정 스위치만 끈다
+    for k in range(3):
+        assert t.on_entry("SURGE_ENTRY", "BTCUSDT", "long", RES, 168, now=T + timedelta(hours=10 + k)) is None
+    assert ACC.get(store, t.account_id)["binance_live"] is False and "차단" in rec.sent[-1].title
     assert len(db.binance_positions(store)) == 1
 
 
@@ -186,22 +203,25 @@ def test_account_traders_follow_switches_and_keep_open_positions(store, monkeypa
         ACC.save_keys(store, a, provider, fields)
     built, fail, clock = [], [True], [0.0]
 
-    def build(st, acc, symbols, lev):
-        built.append(acc["id"])
+    def build(st, acc, symbols):
+        built.append((acc["id"], acc["binance_leverage"]))
         if fail[0]:
             return None
         return Trader(st, Recorder(), "live", FakeBroker(), account=acc)
 
-    live = AccountTraders(store, ["ETCUSDT"], 3, build=build, clock=lambda: clock[0])
+    live = AccountTraders(store, ["ETCUSDT"], build=build, clock=lambda: clock[0])
     assert live.refresh() == [] and built == []                                   # 스위치 OFF
     ACC.update_live(store, a, binance_live=True)
     assert live.refresh() == [] and built == []                                   # 자본 0 → 건너뜀
     ACC.update_live(store, a, binance_capital=500)
-    assert live.refresh() == [] and built == [a]                                  # 준비 실패 (그 계정에만 알림)
-    assert live.refresh() == [] and built == [a]                                  # 재시도 시각 전
+    assert live.refresh() == [] and built == [(a, 3)]                             # 준비 실패 (그 계정에만 알림)
+    assert live.refresh() == [] and built == [(a, 3)]                             # 재시도 시각 전
     fail[0], clock[0] = False, 601.0
     [trader] = live.refresh()                                                     # 10분 뒤 다시 시도
-    assert trader.capital == 500.0 and built == [a, a]
+    assert trader.capital == 500.0 and trader.exchange_lev == 3 and built == [(a, 3), (a, 3)]
+    ACC.update_live(store, a, binance_leverage=5)                                 # 배율을 바꾸면 다시 만들어 거래소에 새 배율을 건다
+    [trader] = live.refresh()
+    assert trader.exchange_lev == 5 and built[-1] == (a, 5)
     db.insert_binance_position(store, dict(mode="live", account_id=a, strategy="CRASH_BUY", symbol="ETCUSDT", side="long", qty=1,
                                            entry_price=100, notional=100, leverage=2, stop=97, deadline=T.isoformat(),
                                            next_funding=1_000, funding=0, status="open", opened_at=T.isoformat()))
@@ -213,9 +233,55 @@ def test_account_traders_follow_switches_and_keep_open_positions(store, monkeypa
     assert live.refresh() == []                                                   # 포지션이 닫히면 치운다
 
 
-def test_live_skips_paper_only_strategies(store):
-    t, fb, rec, q = make(store)
-    assert t.capital_total == 1000.0 * 4                                  # live 한도는 실제로 주문하는 전략만 센다
+def test_live_opens_scan_fade_on_a_new_coin(store):
+    """급등 소진 숏은 대상 코인이 그때그때 정해진다 — 진입할 때 그 심볼의 격리·배율을 걸고 주문한다."""
+    t, fb, rec, q = make(store, leverage=3)
+    assert t.capital_total == 1000.0 * len(BINANCE_LIVE_STRATEGIES)
     res = dict(RES, stop=120.0, take_profit=80.0)
-    assert t.on_entry("SCAN_FADE", "LSKUSDT", "short", res, 48, now=T, notify_skip=False) is None
-    assert fb.orders == [] and rec.sent == [] and db.binance_positions(store) == []
+    p = t.on_entry("SCAN_FADE", "LSKUSDT", "short", res, 48, now=T, notify_skip=False)
+    assert fb.prepared == ["LSKUSDT"] and fb.leverage["LSKUSDT"] == 3     # 처음 보는 코인을 준비했다
+    assert p["stop"] == 120.0 and p["take_profit"] == 80.0                # 3배 상한 27.8% 안이라 손절 그대로
+    assert abs(p["notional"] - 1000.0 * 0.125) < 1 and rec.sent[-1].account_id == t.account_id
+    t.on_entry("SCAN_FADE", "LSKUSDT", "short", res, 48, now=T, notify_skip=False)
+    assert fb.prepared == ["LSKUSDT"]                                     # 두 번째부터는 다시 준비하지 않는다
+
+
+def test_scan_fade_uses_the_coins_own_leverage_cap(store):
+    """코인 배율 상한이 계정 배율보다 낮으면 그 값으로 걸리고, 손절도 그 배율 기준으로 맞춘다."""
+    t, fb, rec, q = make(store, leverage=5, email="cap@example.com")
+    fb.caps["LSKUSDT"] = 3
+    p = t.on_entry("SCAN_FADE", "LSKUSDT", "short", dict(RES, stop=140.0), 48, now=T, notify_skip=False)
+    assert fb.leverage["LSKUSDT"] == 3                                  # 계정은 5배지만 이 코인 상한이 3배
+    cap3 = max_stop_pct(3)                                              # 손절도 계정 배율이 아니라 걸린 3배 기준
+    assert abs(p["stop"] - (100 + cap3)) < 0.01 and "격리 3배" in rec.sent[-1].body
+
+
+# -- 계정별 격리 배율 --------------------------------------------------------------
+
+def test_account_leverage_tightens_stop_and_says_so(store):
+    """배율이 높은 계정은 손절이 청산선 안으로 당겨지고, 거래소 손절 주문도 그 값으로 걸린다. 그 사실은 그 계정 알림에만 적힌다."""
+    t, fb, rec, q = make(store, leverage=5, email="lev5@example.com")
+    assert t.exchange_lev == 5
+    cap = max_stop_pct(5)
+    p = t.on_entry("CRASH_SHORT_1D", "ETCUSDT", "short", dict(RES, stop=125.0), 480, now=T)
+    assert abs(p["stop"] - (100 + cap)) < 0.01 and abs(fb.stops["1"]["px"] - (100 + cap)) < 0.01
+    body = rec.sent[-1].body
+    assert "격리 5배의 청산선 안으로 당겼다" in body and f"25.0% → {cap:.1f}%" in body
+    assert rec.sent[-1].account_id == t.account_id                       # 공용 채널로는 가지 않는다
+
+
+def test_account_leverage_leaves_inside_stops_alone(store):
+    """같은 배율이라도 손절 상한 안에 드는 손절(-3%)은 건드리지 않는다."""
+    t, fb, rec, q = make(store, leverage=5, email="lev5b@example.com")
+    p = t.on_entry("CRASH_BUY", "ETCUSDT", "long", dict(RES, stop=97.0), 5, now=T)
+    assert p["stop"] == 97.0 and "당겼다" not in rec.sent[-1].body
+
+
+def test_too_small_order_is_a_skip_not_a_failure(store):
+    """자본이 작아 주문 단위에 못 미치면 보류로 끝난다 — 주문 실패로 세면 3회에 live 스위치가 꺼진다."""
+    t, fb, rec, q = make(store, capital=10.0, email="small@example.com")     # SCAN_FADE 0.125배 → 명목 1.25 USDT
+    for _ in range(3):
+        assert t.on_entry("SCAN_FADE", "LSKUSDT", "short", dict(RES, stop=120.0), 48, now=T) is None
+    assert fb.orders == [] and t.failures == 0                              # 실패 누적 없음
+    assert "주문 최소 단위에 못 미친다" in rec.sent[-1].body and rec.sent[-1].kind == "BN_FUNDS"
+    assert ACC.get(store, t.account_id)["binance_live"] is True             # 스위치는 그대로

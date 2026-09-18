@@ -5,6 +5,7 @@ from alertbot.binance_follow import FollowWorker, build_signal, evaluate, regime
 from alertbot.config import FOLLOW_SPECS
 
 SPEC_4H, SPEC_1D_LONG, SPEC_1D_SHORT = FOLLOW_SPECS
+SHORT_STOP_MULT = 1 + SPEC_1D_SHORT["stop"][1] / 100      # 일봉 숏 손절 배수 — 설정(FOLLOW_SPECS)을 바꿔도 따라간다
 T0 = 1_780_000_000_000
 H4 = 4 * 3_600_000
 DAY = 24 * 3_600_000
@@ -101,12 +102,12 @@ def test_daily_short_reexit_after_bounce():
     assert all(evaluate(bars[:k], SPEC_1D_SHORT) is None for k in (len(bars) - 2, len(bars) - 1))   # 반등 중 무신호
     r = evaluate(bars, SPEC_1D_SHORT, funding=-0.0005)
     assert r["stage"] == "entry" and r["side"] == "short" and r["ago"] == 3 and r["pull"] == 17.0
-    assert r["bull"] is False and abs(r["stop"] - r["close"] * 1.25) < 1e-9      # 재이탈 봉의 RSI 는 조건이 아니다 (급락 봉이 조건)
+    assert r["bull"] is False and abs(r["stop"] - r["close"] * SHORT_STOP_MULT) < 1e-9      # 재이탈 봉의 RSI 는 조건이 아니다 (급락 봉이 조건)
     s = build_signal("ETCUSDT", r, SPEC_1D_SHORT)
     assert s.kind == "CRASH_SHORT_1D" and s.severity == "action"
     body = s.text()
     assert s.title == "🔴 추종 숏 후보" and "반등 고점" in body and "재이탈" in body and "약세" in body and "펀딩 과밀" in body
-    assert "(+25%) · 20일 보유" in body
+    assert f"(+{SPEC_1D_SHORT['stop'][1]:g}%) · 20일 보유" in body
     watch = [k for k in range(400, 410) if (x := evaluate(bars[:k + 1], SPEC_1D_SHORT)) and x["stage"] == "watch"]
     assert len(watch) == 1 and build_signal("ETCUSDT", evaluate(bars[:watch[0] + 1], SPEC_1D_SHORT), SPEC_1D_SHORT).kind == "CRASH_WATCH_1D"
 

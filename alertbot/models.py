@@ -50,6 +50,8 @@ KINDS = {
     "BN_ENTRY": ("action", "none"),
     "BN_EXIT": ("action", "none"),
     "BN_SKIP": ("review", "none"),
+    # 신호는 났는데 자금(주문 최소 단위·증거금)이 모자라 못 산 경우. 보류와 달리 늘 보낸다 — 같은 코인 반복은 weak 쿨다운으로 묶는다
+    "BN_FUNDS": ("review", "weak"),
     "BN_FAIL": ("action", "none"),        # live 주문 실패·손절 주문 실패·자동 차단
 }
 

@@ -1,4 +1,4 @@
-"""Binance 무기한 선물 급변 감시 — 거래대금 상위 코인의 급등·급락 감지 알림과 급등 소진 숏(공용 가상 장부 전용).
+"""Binance 무기한 선물 급변 감시 — 거래대금 상위 코인의 급등·급락 감지 알림과 급등 소진 숏(공용 가상 장부 + 계정 live).
 
 2026-09-16 LSK·SYN·BR·BULLA 같은 알트 급등을 ETC·BTC 만 보던 워커가 하나도 알리지 못해 추가했다. run_binance.py 가 다른 워커와 같은 프로세스에서 돌린다.
 
@@ -14,7 +14,8 @@
           - 감지 뒤 곧바로 추종·반전·페이드하는 진입 8개 조합은 수수료·펀딩 뒤 우위가 검증되지 않았다.
 소진 숏    2026-09-17 4개월 분석(보고서 「급등 코인 소진 숏」): 급등 감지 코인은 72시간 중앙 −11.6% 흘러내렸지만 감지 직후 더 오르는 일이 많아,
           감지 뒤 SCAN_FADE_WAIT_HOURS 안에 1시간봉 종가가 EMA(SCAN_FADE_EMA) 아래로 마감하는 첫 봉에서 숏을 연다 (전략 SCAN_FADE).
-          손절·목표가는 그 종가 기준 ±SCAN_FADE_STOP_PCT / SCAN_FADE_TP_PCT % (마크), 보유 SCAN_FADE_HOLD_HOURS 시간. 공용 가상 장부만 — 계정 live 는 주문하지 않는다.
+          손절·목표가는 그 종가 기준 ±SCAN_FADE_STOP_PCT / SCAN_FADE_TP_PCT % (마크), 보유 SCAN_FADE_HOLD_HOURS 시간.
+          공용 가상 장부와 계정 live 둘 다 체결한다 — 계정은 그 코인의 격리·배율을 진입할 때 걸고, 배율이 높으면 손절이 청산선 안으로 당겨진다.
           대기 목록은 alert_settings binance_scan_fade_pending 에 두어 재시작해도 이어지고, 대기 코인은 상위 30 에서 빠져도 계속 본다.
           급락 감지는 매매하지 않는다 (급락 뒤 숏·롱 모두 표본 밖에서 우위가 없었다).
 """
@@ -188,7 +189,7 @@ def build_signal(side: str, rows: list, ranks: dict, fade: bool = False) -> Sign
                      + (f"거래대금 {rank}위" if rank else "추가 코인"))
     if len(rows) > SCAN_MAX_LINES:
         lines.append(f"외 {len(rows) - SCAN_MAX_LINES}종목")
-    lines.append(f"{SCAN_FADE_WAIT_HOURS}시간 안에 1시간 종가가 EMA{SCAN_FADE_EMA} 아래면 가상 숏 (실제 주문 없음)" if up and fade
+    lines.append(f"{SCAN_FADE_WAIT_HOURS}시간 안에 1시간 종가가 EMA{SCAN_FADE_EMA} 아래면 숏 진입 (공용은 가상)" if up and fade
                  else "관찰 알림 — 매매 신호 아님")
     label = rows[0][0] if single else f"코인 {len(rows)}종목"
     return Signal("SCAN_SURGE" if up else "SCAN_CRASH", "🚀 급등 감지" if up else "💥 급락 감지", label, "\n".join(lines),

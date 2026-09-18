@@ -5,6 +5,7 @@ import alertbot.backoffice.app as A
 from alertbot import db as DBM
 from alertbot import accounts as ACC
 from alertbot import config, crypto
+from alertbot.config import max_stop_pct
 from tests.backoffice_login import logged_in
 
 
@@ -144,5 +145,24 @@ def test_results_page_shows_live_then_dry_series(client, monkeypatch, tmp_path):
     assert r.text.index("실전 매매 (live)") < r.text.index("모의 매매 (공용 가상 장부)") < r.text.index("신호 모의 성적")
     assert "닫힌 신호가 없다" in r.text and "-3.00%" in r.text
     # 합친 탭: 옛 주소는 새 탭으로 간다
-    assert c.get("/summary", follow_redirects=False).status_code == 303 and "시황 시계열" in c.get("/").text
+    assert c.get("/summary", follow_redirects=False).status_code == 303 and "시황 시계열" in c.get("/status").text
     assert c.get("/channels", follow_redirects=False).headers["location"] == "/signals" and "테스트 발송" in c.get("/signals").text
+
+
+def test_account_binance_leverage(client, monkeypatch):
+    """Binance 격리 배율은 계정마다 따로 저장하고, 화면은 공용 배율과 내 배율의 손절을 나란히 보여 준다."""
+    c, store = client
+    monkeypatch.setattr(config, "MASTER_KEY", crypto.generate_key())
+    me = ACC.get_by_email(store, "admin@example.com")["id"]
+    assert ACC.get(store, me)["binance_leverage"] == 3                       # 기본값 = 공용 기준
+    r = c.post("/trading/live", data={"amount_scale": "1", "binance_capital": "0", "binance_leverage": "5"},
+               follow_redirects=False)
+    assert r.status_code == 303 and ACC.get(store, me)["binance_leverage"] == 5
+    for bad in ("0", "6", "x"):
+        r = c.post("/trading/live", data={"amount_scale": "1", "binance_capital": "0", "binance_leverage": bad})
+        assert r.status_code == 400 and "격리 배율" in r.text
+    assert ACC.get(store, me)["binance_leverage"] == 5                       # 거절된 값은 저장되지 않는다
+    body = c.get("/trading").text
+    cap = max_stop_pct(5)
+    assert "격리 <b>5배</b>" in body and f"{cap:.1f}%" in body                 # 손절 상한이 표에 보인다
+    assert "25.0% →" in body and "다섯 전략 동시" in body                       # 일봉 숏은 상한으로 당겨진다고 표기

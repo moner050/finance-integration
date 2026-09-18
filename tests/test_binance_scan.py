@@ -228,7 +228,7 @@ def test_surge_queues_fade_and_shorts_on_first_close_below_ema():
     sent = w.poll_once(at(bars["AAAUSDT"]))
     pump = bars["AAAUSDT"][-1]["open_time"]
     wait = {"AAAUSDT": {"deadline": pump + H1 + 48 * H1, "after": pump}}
-    assert [s.kind for s in sent] == ["SCAN_SURGE"] and "48시간 안에 1시간 종가가 EMA50 아래면 가상 숏" in sent[0].body
+    assert [s.kind for s in sent] == ["SCAN_SURGE"] and "48시간 안에 1시간 종가가 EMA50 아래면 숏 진입" in sent[0].body
     assert w.pending == wait and json.loads(DBM.get_settings(store)[SC.FADE_KEY]) == wait
     assert SC.ScanWorker(StoreUniverse(["AAAUSDT"], store), rec, trader=spy).pending == wait           # 재시작해도 이어진다
     bars["AAAUSDT"] = path(bars["AAAUSDT"], [11.0], step=H1)                  # EMA50(약 10) 위 — 계속 기다린다

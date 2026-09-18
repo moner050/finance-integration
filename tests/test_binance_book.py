@@ -6,7 +6,7 @@ from alertbot.binance_book import SignalBook, hold_text
 from alertbot.binance_crash import CrashWorker
 from alertbot.binance_follow import FollowWorker
 from tests.test_binance_crash import STEP, Recorder, make_bars, make_h4
-from tests.test_binance_follow import SPEC_1D_SHORT, daily_short
+from tests.test_binance_follow import SHORT_STOP_MULT, SPEC_1D_SHORT, daily_short
 
 T = datetime(2026, 9, 16, 3, 0, tzinfo=timezone.utc)      # 12:00 KST
 
@@ -109,11 +109,12 @@ def test_follow_worker_registers_short_entry():
     ws = FollowWorker(SPEC_1D_SHORT, rec, fetch_bars=lambda s, iv, n: bars, fetch_fund=lambda s: None, book=book)
     assert [s.kind for s in ws.poll_once(T)] == ["CRASH_SHORT_1D"]
     pos = book.open["CRASH_SHORT_1D:ETCUSDT"]
-    assert pos["side"] == "short" and pos["price"] == 15.5 and abs(pos["stop"] - 15.5 * 1.25) < 1e-9 and pos["hold_hours"] == 480
+    assert pos["side"] == "short" and pos["price"] == 15.5 and abs(pos["stop"] - 15.5 * SHORT_STOP_MULT) < 1e-9 and pos["hold_hours"] == 480
     assert pos["label"] == "ETCUSDT 일봉" and pos["name"] == "급락 추종 일봉"
     book.poll(T)
     line = ws.status_lines(T)[0]
-    assert line == "급락 추종 일봉 ETCUSDT  🔴 숏 신호 진행 중 — 신호가 15.500 대비 +3.23%, 손절 19.375"
+    assert line == ("급락 추종 일봉 ETCUSDT  🔴 숏 신호 진행 중 — 신호가 15.500 대비 +3.23%, "
+                    f"손절 {15.5 * SHORT_STOP_MULT:.3f}")
     # 관찰(watch) 단계는 장부에 올리지 않는다
     from alertbot.binance_follow import evaluate
     watch_i = next(k for k in range(400, 410) if (x := evaluate(bars[:k + 1], SPEC_1D_SHORT)) and x["stage"] == "watch")

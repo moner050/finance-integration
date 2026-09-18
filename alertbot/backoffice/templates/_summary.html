@@ -16,7 +16,7 @@
 </style>
 <div class="page-head" style="margin-top:28px">
  <div><h3 style="margin:0">시황 시계열</h3><p>30분마다 저장된 시황을 종목 × 시각으로 펼친다. 칸은 매수 조건 충족 개수(예: 2/3), 마우스를 올리면 부족 항목과 수치. 왼쪽이 과거, 오른쪽이 최신.</p></div>
- <form class="toolbar" method="get" action="/" style="margin:0">
+ <form class="toolbar" method="get" action="/status" style="margin:0">
   <label>표시 개수
    <select name="limit" onchange="this.form.submit()">
     {% for n in [8, 16, 32, 64, 96] %}<option value="{{ n }}" {{ 'selected' if limit == n else '' }}>{{ n }}회 (약 {{ n // 2 }}시간)</option>{% endfor %}

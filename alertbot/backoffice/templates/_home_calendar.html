@@ -1,0 +1,45 @@
+{% if cal_view == "month" %}
+<div class="mh-cal">
+ <div class="mh-calnav">
+  <button hx-get="/partials/home-calendar?view=month&ym={{ month.prev }}" hx-target="#home-cal">‹ 이전</button>
+  <b>{{ month.label }}</b>
+  <button hx-get="/partials/home-calendar?view=month&ym={{ month.next }}" hx-target="#home-cal">다음 ›</button>
+ </div>
+ <div class="mh-grid">
+  {% for w in ["일", "월", "화", "수", "목", "금", "토"] %}<div class="wd">{{ w }}</div>{% endfor %}
+  {% for week in month.weeks %}{% for c in week %}
+  <div class="c {{ '' if c.in_month else 'out' }} {{ 'today' if c.today else '' }}">
+   <span class="n">{{ c.date.day }}</span>
+   {% for e in c.events %}<span class="e i{{ e.importance }}" title="{{ e.country_label }} · {{ e.title }}{% if e.kst_text %} · {{ e.kst_text }} KST{% endif %}{% if e.result %} · {{ e.result }}{% endif %}">{{ e.country }} {{ e.title }}</span>{% endfor %}
+  </div>
+  {% endfor %}{% endfor %}
+ </div>
+</div>
+{% else %}
+<div class="mh-cal">
+ {% if not calendar.count %}<div class="mh-empty">일정이 없다 — 매크로 워커가 시드·FRED 일정을 채운다</div>{% endif %}
+ {% set shown = [] %}
+ {% for m in calendar.months %}
+  <div class="mh-month">{{ m.label }}</div>
+  {% for e in m.events %}
+   {% if e.cluster is not none and e.cluster not in shown %}
+    {% set c = calendar.clusters[e.cluster] %}
+    {% set _ = shown.append(e.cluster) %}
+    <div class="mh-cluster">⚠ {{ c.start[5:]|replace('-', '/') }} ~ {{ c.end[5:]|replace('-', '/') }} 이벤트 클러스터 · {{ c.titles|join(' → ') }}</div>
+   {% endif %}
+   <div class="mh-ev {{ 'past' if e.past else '' }} {{ 'cl' if e.cluster is not none else '' }}">
+    <div class="dt"><b class="num">{{ e.day }}</b><small>{{ e.wd }}</small></div>
+    <div class="mh-dday num {{ 'today' if e.dday == 0 else 'soon' if 0 < e.dday <= 3 else '' }}">{{ '오늘' if e.dday == 0 else ('D-' ~ e.dday if e.dday > 0 else '지남') }}</div>
+    <div>
+     <div class="tt"><span class="cb {{ e.country }}">{{ e.country_label }}</span><span class="kb">{{ e.kind_label }}</span>{{ e.title }}
+      <span class="stars">{% for i in range(3) %}{% if i < e.importance %}★{% else %}<i>★</i>{% endif %}{% endfor %}</span></div>
+     {% if e.note %}<div class="sub">{{ e.note }}</div>{% endif %}
+    </div>
+    <div class="rt num">
+     {% if e.result %}<span class="res">{{ e.result }}</span>{% elif e.kst_text %}{{ e.kst_text }} KST{% else %}<span class="muted">시각 미정</span>{% endif %}
+    </div>
+   </div>
+  {% endfor %}
+ {% endfor %}
+</div>
+{% endif %}

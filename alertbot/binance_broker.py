@@ -44,6 +44,7 @@ class BinanceFutures:
         self.s = session or requests.Session()
         self.offset = 0                 # 서버 시각 - 로컬 시각 (ms)
         self.filters = {}               # symbol -> {"qty_d", "price_d", "min_qty", "min_notional"}
+        self.leverage = {}              # symbol -> 실제로 걸린 배율. 준비를 마친 심볼의 목록이기도 하다
 
     def _req(self, method: str, path: str, signed: bool = True, **params):
         if signed:
@@ -66,6 +67,9 @@ class BinanceFutures:
         self.offset = int(self._req("GET", "/fapi/v1/time", signed=False)["serverTime"]) - int(time.time() * 1000)
 
     def load_filters(self, symbols: list):
+        symbols = [s for s in symbols if s not in self.filters]
+        if not symbols:
+            return
         info = self._req("GET", "/fapi/v1/exchangeInfo", signed=False)
         for s in info["symbols"]:
             if s["symbol"] in symbols:
@@ -77,7 +81,22 @@ class BinanceFutures:
             raise BrokerError("unknown-symbol", ", ".join(missing))
 
     def setup(self, symbols: list, leverage: int):
-        """헤지 모드 · 심볼별 격리 마진 · 배율. 포지션이 열려 있으면 모드 변경이 거부된다 — 그건 그대로 오류로 올린다."""
+        """기동 때 부르는 준비 — 헤지 모드 · 심볼별 격리 마진 · 배율. 원한 배율이 안 걸리면 오류로 올린다
+        (포지션이 열려 있으면 모드 변경이 거부된다)."""
+        self._prepare(symbols, leverage, strict=True)
+
+    def ensure(self, symbols: list, leverage: int) -> dict:
+        """아직 준비하지 않은 심볼만 준비하고 {심볼: 실제로 걸린 배율}. 급등 소진 숏처럼 대상 코인이 그때그때 정해지는 전략용이다.
+
+        코인마다 배율 상한이 달라 원한 값이 안 걸릴 수 있다. 낮게 걸리는 건 청산이 더 멀어지는 쪽이라 그대로 받아들이고,
+        높게 걸리는 일은 없다. 부른 쪽은 돌려받은 배율로 손절을 맞춘다."""
+        todo = [s for s in symbols if s not in self.leverage]
+        if todo:
+            self._prepare(todo, leverage, strict=False)
+        return {s: self.leverage[s] for s in symbols}
+
+    def _prepare(self, symbols: list, leverage: int, strict: bool):
+        self.load_filters(symbols)
         for call in ([("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "true"})]
                      + [("POST", "/fapi/v1/marginType", {"symbol": s, "marginType": "ISOLATED"}) for s in symbols]):
             try:
@@ -87,8 +106,13 @@ class BinanceFutures:
                     raise
         for s in symbols:
             got = int(self._req("POST", "/fapi/v1/leverage", symbol=s, leverage=leverage)["leverage"])
-            if got != leverage:
+            if strict and got != leverage:
                 raise BrokerError("leverage", f"{s} 배율이 {got} 로 설정됐다 (원한 값 {leverage})")
+            if got > leverage:                      # 있을 수 없지만, 있으면 청산이 가까워지는 쪽이라 막는다
+                raise BrokerError("leverage", f"{s} 배율이 원한 값보다 높게 걸렸다 ({got} > {leverage})")
+            if got != leverage:
+                log.info("%s 배율이 %d 로 걸렸다 (원한 값 %d — 그 코인의 상한)", s, got, leverage)
+            self.leverage[s] = got
 
     def balance(self) -> float:
         for row in self._req("GET", "/fapi/v2/balance"):

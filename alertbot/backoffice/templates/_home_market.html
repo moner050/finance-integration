@@ -1,0 +1,49 @@
+{% macro tile_card(t) %}
+{% if t.empty %}
+<div class="mh-tile g0"><div class="hd"><span class="k">{{ t.label }}</span></div><div class="row"><div class="v muted">-</div></div><div class="why">데이터 없음 — 백필 필요</div></div>
+{% else %}
+<div class="mh-tile g{{ t.grade }} {{ 'stale' if t.stale else '' }}" title="{{ t.reasons|join(' · ') }}">
+ <div class="hd"><span class="k">{{ t.label }}</span><span class="gb">{{ '지연' if t.stale else t.grade_label }}</span></div>
+ <div class="row">
+  <div class="v num">{{ t.value_text }}<small>{{ t.unit }}</small></div>
+  {% if t.spark %}<svg viewBox="0 0 120 34" preserveAspectRatio="none"><polyline points="{{ t.spark }}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>{% endif %}
+ </div>
+ <div class="chg num">
+  {% if t.d1 %}<i>1일</i>{{ '▲' if t.d1.sign > 0 else '▼' if t.d1.sign < 0 else '–' }} {{ t.d1.text }}{% endif %}
+  {% if t.d5 %}&nbsp;·&nbsp;<i>5일</i>{{ '▲' if t.d5.sign > 0 else '▼' if t.d5.sign < 0 else '–' }} {{ t.d5.text }}{% endif %}
+ </div>
+ <div class="why">{{ t.reasons|join(' · ') if t.reasons else '특이 없음' }} · {{ t.as_of[5:] }}</div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro country(code, name, bank, block) %}
+<div class="mh-country">
+ <div class="top">
+  <div class="who"><span class="mh-flag">{{ code }}</span><div><b>{{ name }}</b><small>{{ bank }} 기준금리</small></div></div>
+  <div class="mh-rate">
+   <div class="v num">{{ block.policy.rate_text }}</div>
+   <div class="l">
+    {% if block.policy.last %}직전 {{ block.policy.last.event_date[5:]|replace('-', '/') }} {{ block.policy.last.result }}{% else %}직전 결정 기록 없음{% endif %}
+    {% if block.policy.pending_fred %}<span class="muted" title="FRED 는 다음 날 갱신">(성명 기준)</span>{% endif %}
+   </div>
+   {% if block.policy.next %}
+   <span class="mh-next {{ 'soon' if block.policy.next_dday is not none and block.policy.next_dday <= 3 else '' }}">
+    다음 {{ bank }} {{ block.policy.next.event_date[5:]|replace('-', '/') }} · {{ '오늘' if block.policy.next_dday == 0 else 'D-' ~ block.policy.next_dday }}{% if '전망' in block.policy.next.title %} · 전망보고서{% elif '점도표' in block.policy.next.title %} · 점도표{% endif %}
+   </span>
+   {% endif %}
+  </div>
+ </div>
+ <div class="mh-tiles">{% for t in block.tiles %}{{ tile_card(t) }}{% endfor %}</div>
+</div>
+{% endmacro %}
+
+<div class="mh-countries">
+ {{ country("US", "미국", "FOMC", market.us) }}
+ {{ country("JP", "일본", "BOJ", market.jp) }}
+</div>
+<div class="mh-spreads">
+ {% for c in market.spreads %}
+ <div class="mh-spread"><div class="k">{{ c.label }}</div><div class="v num">{{ c.text }}</div><div class="s tone-{{ c.tone }}">{{ c.state }}</div></div>
+ {% endfor %}
+</div>
