@@ -170,6 +170,20 @@ def scenario_history(db: DB, limit: int = 120) -> list:
 
 # -- 수집 작업 상태 ---------------------------------------------------------------------
 
+def load_bands(db: DB) -> dict:
+    """연말 시나리오 구간 스냅샷. 비어 있으면 {} — 워커가 다음 사이클에 새로 자른다."""
+    row = db.fetchone("SELECT v FROM alert_settings WHERE k = 'macro_bands'")
+    try:
+        return json.loads(row["v"]) if row and row["v"] else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def save_bands(db: DB, bands: dict):
+    from ..db import set_setting
+    set_setting(db, "macro_bands", json.dumps(bands, ensure_ascii=False))
+
+
 def load_jobs(db: DB) -> dict:
     row = db.fetchone("SELECT v FROM alert_settings WHERE k = 'macro_jobs'")
     try:

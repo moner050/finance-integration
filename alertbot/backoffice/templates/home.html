@@ -190,7 +190,7 @@
     <div class="prob num">{{ '%.0f'|format(top.prob) }}<small>%</small></div>
     <div>
      <div class="name"><span class="mh-code" style="background:{{ colors[top.code] }}">{{ top.code }}</span>{{ top.name }}</div>
-     <div class="meta num">기본 {{ '%.0f'|format(top.base) }}% → 보정 <b>{{ '%.1f'|format(top.prob) }}%</b>
+     <div class="meta num">분포 {{ '%.1f'|format(top.base) }}% → 보정 <b>{{ '%.1f'|format(top.prob) }}%</b>
       {% if top.delta %}<span class="{{ 'up-t' if top.delta > 0 else 'dn-t' }}">({{ '%+.1f'|format(top.delta) }}%p)</span>{% endif %}</div>
      <div class="meta num">SOXX <b>{{ '%.0f'|format(top.soxx_low) }} ~ {{ '%.0f'|format(top.soxx_high) }}</b>
       {% if top.vs_now is not none %}· 중간값 현재 대비 {{ '%+.1f'|format(top.vs_now) }}%{% endif %}</div>
@@ -219,7 +219,7 @@
     {% for c in res.contributions[:3] %}<span class="mh-chip">{{ c.label }} → {{ c.scenario }} <b class="{{ 'up-t' if c.delta > 0 else 'dn-t' }}">{{ '%+.1f'|format(c.delta) }}%p</b></span>{% else %}<span class="mh-chip">보정 없음 — 판별 지표가 모두 중립이거나 미반영</span>{% endfor %}
     {% if scen.missing %}<span class="mh-chip" title="{{ scen.missing|join(', ') }}">미반영 {{ scen.missing|length }}개</span>{% endif %}
    </div>
-   <div class="mh-disclaimer">기본 확률 {{ scen.base_date }} · 분석 프레임이며 예측·컨센서스·투자 자문이 아님</div>
+   <div class="mh-disclaimer">구간 {{ scen.base_date }} 기준 · SOXX 수익률 분포에서 자른 구간에 지표 보정 · 예측·컨센서스·투자 자문이 아님</div>
   </div>
  </section>
 

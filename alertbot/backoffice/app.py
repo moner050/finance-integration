@@ -261,13 +261,14 @@ def home_calendar_partial(request: Request, view: str = "list", ym: str = ""):
 
 
 def macro_manage_context(message: str = None, error: str = None) -> dict:
-    """수집 현황 조회 + 시나리오 기본값 편집. 지표·이벤트는 매크로 워커가 받아 오므로 입력 폼이 없다."""
+    """수집 현황 조회 전용. 지표·이벤트·시나리오 구간까지 전부 매크로 워커가 만들어서 입력 폼이 하나도 없다."""
     today = macro_view.kst_today()
     with get_db() as d:
         indicators = macro_store.load_series(d, macro_view.AUTO_KEYS, (today - timedelta(days=400)).isoformat())
         events = [macro_view.decorate_event(e, today) for e in
                   macro_store.list_events(d, (today - timedelta(days=30)).isoformat(), (today + timedelta(days=400)).isoformat())]
         ctx = {"scenarios": macro_store.list_scenarios(d), "stats": macro_store.series_stats(d),
+               "bands": macro_store.load_bands(d),
                "jobs": macro_view.jobs_summary(macro_store.load_jobs(d), datetime.now(timezone.utc))}
     latest = []
     for key, (label, source, unit) in macro_view.AUTO_KEYS.items():
@@ -290,38 +291,6 @@ def macro_manage_context(message: str = None, error: str = None) -> dict:
 @app.get("/macro/manage", response_class=HTMLResponse, dependencies=[Depends(admin_only)])
 def macro_manage_page(request: Request, message: str = None):
     return render(request, "macro_manage.html", **macro_manage_context(message=message))
-
-
-def _manage_error(request: Request, error: str):
-    return render(request, "macro_manage.html", status_code=400, **macro_manage_context(error=error))
-
-
-@app.post("/macro/manage/scenarios")
-async def macro_scenarios_save(request: Request, me=Depends(admin_only)):
-    form = await request.form()
-    with get_db() as d:
-        current = macro_store.list_scenarios(d)
-    rows = []
-    try:
-        for sc in current:
-            c = sc["code"]
-            row = {"code": c, "sort": sc["sort"], "name": str(form.get(f"{c}_name", "")).strip()[:40],
-                   "trigger_text": str(form.get(f"{c}_trigger", "")).strip()[:255],
-                   "soxx_low": float(form.get(f"{c}_low")), "soxx_high": float(form.get(f"{c}_high")),
-                   "base_prob": float(form.get(f"{c}_prob"))}
-            if not row["name"] or row["soxx_low"] >= row["soxx_high"] or not 0 < row["base_prob"] < 100:
-                raise ValueError(f"{c}: 이름·범위(하단 < 상단)·확률(0~100)")
-            rows.append(row)
-    except (TypeError, ValueError) as e:
-        return _manage_error(request, f"시나리오 값 오류 — {e}")
-    total = sum(r["base_prob"] for r in rows)
-    if abs(total - 100) > 0.5:
-        return _manage_error(request, f"기본 확률 합이 100 이 아니다 ({total:g})")
-    with get_db() as d:
-        for r in rows:
-            macro_store.save_scenario(d, r)
-    log.info("백오피스: %s 가 시나리오 기본값 수정 %s", me["email"], {r["code"]: r["base_prob"] for r in rows})
-    return RedirectResponse("/macro/manage?message=시나리오를 저장했다 — 이벤트 반영 기준일이 오늘로 바뀐다", status_code=303)
 
 
 # -- 종목 ----------------------------------------------------------------------

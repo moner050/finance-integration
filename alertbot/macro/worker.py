@@ -12,13 +12,13 @@ import logging
 import statistics
 from datetime import date, datetime, timedelta, timezone
 
-from . import calendar_seed, calendar_sources, sources, store
+from . import calendar_seed, calendar_sources, scoring, sources, store
 from .view import compute_scenarios
 
 log = logging.getLogger("macro")
 
 INTERVAL_MIN = {"yahoo": 10, "fred": 60, "mof": 60, "bis": 180, "jp_cpi": 180, "dram": 180,
-                "eps": 720, "calendar": 720, "fred_calendar": 720, "results": 60, "scenario_log": 60}
+                "eps": 720, "calendar": 720, "fred_calendar": 720, "results": 60, "bands": 60, "scenario_log": 60}
 BACKFILL_YEARS = 3
 
 
@@ -27,8 +27,9 @@ def _iso(t: datetime) -> str:
 
 
 def seed(db) -> dict:
-    """시나리오 기본값만 시드한다 — 캘린더·지표는 전부 수집기가 채운다."""
-    return {"scenarios": store.seed_scenarios(db, calendar_seed.SCENARIOS)}
+    """시나리오의 이름·발동 조건만 시드한다 — 가격대·기본 확률은 job_bands 가, 캘린더·지표는 수집기가 채운다."""
+    rows = [{**r, "soxx_low": 0.0, "soxx_high": 0.0, "base_prob": 0.0} for r in calendar_seed.SCENARIOS]
+    return {"scenarios": store.seed_scenarios(db, rows)}
 
 
 class MacroWorker:
@@ -198,6 +199,43 @@ class MacroWorker:
         diff = (cur - prev) * 100
         return {"result": f"{abs(diff):.0f}bp {'인상' if diff > 0 else '인하'} → {cur:.2f}%", "flag": "hike" if diff > 0 else "cut"}
 
+    def job_bands(self) -> int:
+        """연말 구간과 기본 확률 — SOXX 분포에서 자동으로. 사람이 넣는 값은 없다.
+
+        구간은 처음 한 번(그리고 가격이 구간 밖으로 나가거나 해가 바뀔 때) 등확률 4분할로 자르고,
+        그 뒤에는 남겨 둔 경계에 대고 확률만 다시 센다 — 매일 다시 자르면 늘 25% 로 돌아가 아무것도 말해 주지 않는다."""
+        today = self.today()
+        scen = store.list_scenarios(self.db)
+        if not scen:
+            return 0
+        codes = [s["code"] for s in sorted(scen, key=lambda r: r["sort"])]        # 가격 높은 구간부터
+        since = (today - timedelta(days=365 * 3)).isoformat()
+        closes = [p["v"] for p in store.load_series(self.db, ["soxx"], since)["soxx"]]
+        horizon = scoring.horizon_days(today, scoring.year_end(today))
+        if len(closes) < scoring.BAND_MIN_DAYS or horizon <= 0:
+            raise ValueError(f"SOXX {len(closes)}일 · 남은 {horizon} 거래일 — 구간을 자를 표본이 모자란다")
+        bands = store.load_bands(self.db)
+        price = closes[-1]
+        outside = bands and not (bands["ranges"][codes[-1]][0] <= price <= bands["ranges"][codes[0]][1])
+        if not bands or outside or bands.get("year") != scoring.year_end(today).year or bands.get("codes") != codes:
+            fresh = scoring.make_bands(closes, horizon, codes)
+            if not fresh:
+                raise ValueError("구간을 자르지 못했다")
+            bands = {**fresh, "year": scoring.year_end(today).year, "codes": codes,
+                     "at": today.isoformat(), "anchor": round(price, 2), "horizon": horizon}
+            store.save_bands(self.db, bands)
+            log.info("연말 구간을 다시 잡았다 (%s 기준 %.1f · 남은 %d 거래일): %s",
+                     today, price, horizon, {c: bands["ranges"][c] for c in codes})
+        stats = scoring.band_stats(closes, horizon, bands["edges"], codes)
+        if not stats:
+            raise ValueError("기본 확률을 구하지 못했다")
+        # 구간 자체는 그대로 두고, 확률과 구간별 평균 가격만 매번 새로 센다 (기대값이 이 평균을 쓴다)
+        store.save_bands(self.db, {**bands, "mids": stats["mids"], "priced_at": today.isoformat(), "price": round(price, 2)})
+        for s in scen:
+            low, high = bands["ranges"][s["code"]]
+            store.save_scenario(self.db, {**s, "soxx_low": low, "soxx_high": high, "base_prob": stats["probs"][s["code"]]})
+        return len(scen)
+
     def job_scenario_log(self) -> int:
         today = self.today()
         res = compute_scenarios(self.db, today)
@@ -236,7 +274,7 @@ class MacroWorker:
         self.run_job("yahoo", jobs, now, range_=f"{int(years)}y")
         self.run_job("fred", jobs, now, years=years)
         self.run_job("mof", jobs, now, years=years)
-        for name in ("bis", "jp_cpi", "dram", "eps", "calendar", "fred_calendar", "results", "scenario_log"):
+        for name in ("bis", "jp_cpi", "dram", "eps", "calendar", "fred_calendar", "results", "bands", "scenario_log"):
             self.run_job(name, jobs, now)
         store.save_jobs(self.db, jobs)
         return jobs

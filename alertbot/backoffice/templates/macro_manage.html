@@ -35,27 +35,37 @@
  {% endfor %}
 </div>
 
-<h3>시나리오 기본값</h3>
-<p class="sub">기본 확률 합은 100. 저장하면 '기준일'이 오늘이 되어, 그 뒤에 수집된 FOMC·BOJ 결과만 보정에 들어간다.</p>
-<form method="post" action="/macro/manage/scenarios" class="panel mm-scen">
- <input type="hidden" name="csrf" value="{{ csrf }}">
+<h3>연말 시나리오 <span class="muted" style="font-weight:500">SOXX 분포에서 자동으로 — 넣을 값이 없다</span></h3>
+<p class="sub">
+ 이름과 발동 조건만 코드에 있고, <b>가격 구간과 기본 확률은 SOXX 자신의 수익률 분포</b>에서 나온다.
+ 최근 3년 일수익률을 연말까지 남은 거래일만큼 복원추출해 연말 가격 분포를 만들고, 그걸 넷으로 등분해 구간을 잡는다.
+ 구간은 처음 자를 때만 네 경로가 25% 씩이고, 그 뒤에는 <b>가격이 움직이는 만큼 확률만 바뀐다</b> —
+ 매일 다시 자르면 늘 25% 로 돌아가 아무것도 말해 주지 않기 때문이다. 가격이 구간 밖으로 나가거나 해가 바뀌면 다시 잡는다.
+</p>
+<div class="panel mm-scen">
  <table>
-  <thead><tr><th>코드</th><th>이름</th><th>조건</th><th>SOXX 하단</th><th>상단</th><th>기본 확률 %</th></tr></thead>
+  <thead><tr><th>코드</th><th>이름</th><th>조건</th><th>SOXX 구간</th><th>기본 확률</th></tr></thead>
   <tbody>
   {% for s in scenarios %}
    <tr><td><strong>{{ s.code }}</strong></td>
-    <td><input type="text" name="{{ s.code }}_name" value="{{ s.name }}" maxlength="40"></td>
-    <td><input type="text" name="{{ s.code }}_trigger" value="{{ s.trigger_text }}" maxlength="255"></td>
-    <td><input type="number" class="n" step="1" name="{{ s.code }}_low" value="{{ '%g'|format(s.soxx_low) }}"></td>
-    <td><input type="number" class="n" step="1" name="{{ s.code }}_high" value="{{ '%g'|format(s.soxx_high) }}"></td>
-    <td><input type="number" class="n" step="0.5" name="{{ s.code }}_prob" value="{{ '%g'|format(s.base_prob) }}"></td></tr>
+    <td>{{ s.name }}</td>
+    <td class="muted">{{ s.trigger_text }}</td>
+    <td>{% if s.soxx_high > 0 %}{{ '%g'|format(s.soxx_low) }} ~ {{ '%g'|format(s.soxx_high) }}{% else %}<span class="muted">아직</span>{% endif %}</td>
+    <td>{% if s.base_prob > 0 %}{{ '%.1f'|format(s.base_prob) }}%{% else %}<span class="muted">아직</span>{% endif %}</td></tr>
   {% else %}
-   <tr><td colspan="6" class="muted">시나리오가 없다 — 매크로 워커가 기동하면 시드한다</td></tr>
+   <tr><td colspan="5" class="muted">시나리오가 없다 — 매크로 워커가 기동하면 시드한다</td></tr>
   {% endfor %}
   </tbody>
  </table>
- {% if scenarios %}<div style="padding:12px 14px;border-top:1px solid var(--line)"><button class="primary">시나리오 저장</button> <span class="muted" style="font-size:12px">기준일 {{ scenarios|map(attribute='updated_at')|max|truncate(10, True, '') }}</span></div>{% endif %}
-</form>
+ <div style="padding:12px 14px;border-top:1px solid var(--line)" class="muted">
+  {% if bands %}
+  구간을 잡은 날 {{ bands.at }} · 그때 SOXX {{ '%g'|format(bands.anchor) }} · 남은 {{ bands.horizon }} 거래일 · {{ bands.year }}년 말 기준.
+  이벤트 결과(FOMC·BOJ)는 이 날짜 뒤의 것만 보정에 들어간다.
+  {% else %}
+  아직 구간을 잡지 않았다 — 매크로 워커의 '연말 구간' 작업이 한 번 돌면 채워진다 (SOXX 일봉 1년치가 필요하다).
+  {% endif %}
+ </div>
+</div>
 
 <div class="mm-grid" style="margin-top:24px">
  <div>

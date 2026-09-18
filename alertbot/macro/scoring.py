@@ -14,6 +14,7 @@
 """
 
 import math
+import random
 from datetime import date
 
 GRADE_LABEL = ("안정", "주의", "경계", "위험")
@@ -237,6 +238,91 @@ def latest_flag(events: list, kind: str, since: str, today: str):
     """기준일(since) 이후 ~ 오늘까지 난 kind 이벤트 중 플래그가 있는 마지막 것."""
     hits = [e for e in events if e["kind"] == kind and e.get("flag") and since < e["event_date"] <= today]
     return hits[-1] if hits else None
+
+
+# -- 연말 구간·기본 확률 (자동) ---------------------------------------------------------
+# 시나리오의 가격대와 기본 확률은 사람이 넣지 않는다. SOXX 자신의 일수익률 분포로 연말 가격을 시뮬레이션해
+# 등확률 4분할로 구간을 자르고(자를 때는 네 시나리오가 25% 씩), 그 뒤로는 가격이 움직이는 만큼 확률만 달라진다.
+# 구간을 매일 다시 자르면 확률이 늘 25% 로 돌아가 아무 정보가 없다 — 가격이 구간 밖으로 나갈 때만 다시 잡는다.
+BAND_PATHS = 20_000
+BAND_SEED = 20260918          # 같은 입력이면 같은 구간이 나오게 고정한다 (다시 그릴 때마다 경계가 흔들리면 못 읽는다)
+BAND_MIN_DAYS = 250           # 부트스트랩에 필요한 최소 표본 (1년)
+BAND_TAIL = 0.02              # 맨 위·맨 아래 구간의 표시용 경계 (2% · 98% 분위)
+TRADING_DAYS = 252
+
+
+def horizon_days(today: date, target: date) -> int:
+    """오늘부터 목표일까지의 거래일 수 (달력일 × 252/365). 목표일이 지났으면 0."""
+    return max(0, round((target - today).days * TRADING_DAYS / 365))
+
+
+def year_end(today: date) -> date:
+    """이 화면이 보는 '연말'. 12월 31일을 지났으면 다음 해를 본다."""
+    return date(today.year if today < date(today.year, 12, 31) else today.year + 1, 12, 31)
+
+
+def terminal_prices(closes: list, horizon: int, paths: int = BAND_PATHS, seed: int = BAND_SEED) -> list:
+    """일수익률을 복원추출해 horizon 거래일 뒤 가격 분포를 만든다 (IID 부트스트랩), 오름차순.
+
+    로그정규 가정보다 꼬리가 두껍다 — 반도체 지수는 하루 ±5% 가 드물지 않아 정규분포로 자르면 구간이 너무 좁다.
+    대신 변동성 군집(급변이 며칠 이어지는 성질)은 담지 못해 양 끝 구간은 여전히 과소평가다.
+    추세는 넣지 않는다 (수익률을 그대로 섞는다) — 과거 상승률을 미래 추세로 옮기면 위쪽으로 기울어진다."""
+    rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes)) if closes[i - 1] > 0]
+    if len(rets) < BAND_MIN_DAYS or horizon <= 0 or not closes:
+        return []
+    mean = sum(rets) / len(rets)
+    rets = [r - mean for r in rets]                 # 추세 제거 — 흩어짐만 남긴다
+    rng = random.Random(seed)
+    last, n = closes[-1], len(rets)
+    out = []
+    for _ in range(paths):
+        px = last
+        for _ in range(horizon):
+            px *= 1 + rets[rng.randrange(n)]
+        out.append(px)
+    out.sort()
+    return out
+
+
+def _quantile(sorted_values: list, q: float) -> float:
+    if not sorted_values:
+        return 0.0
+    i = min(len(sorted_values) - 1, max(0, int(round(q * (len(sorted_values) - 1)))))
+    return sorted_values[i]
+
+
+def make_bands(closes: list, horizon: int, codes: list, seed: int = BAND_SEED) -> dict:
+    """codes 는 가격이 높은 구간부터. {'edges': 내부 경계, 'ranges': {code: [low, high]}} — 못 만들면 빈 dict."""
+    prices = terminal_prices(closes, horizon, seed=seed)
+    if not prices or len(codes) < 2:
+        return {}
+    n = len(codes)
+    edges = [_quantile(prices, i / n) for i in range(1, n)]          # 오름차순 내부 경계 (등확률)
+    bounds = [_quantile(prices, BAND_TAIL)] + edges + [_quantile(prices, 1 - BAND_TAIL)]
+    ranges = {}
+    for i, code in enumerate(reversed(codes)):                        # reversed → 낮은 구간부터 경계와 맞춘다
+        ranges[code] = [round(bounds[i], 1), round(bounds[i + 1], 1)]
+    return {"edges": [round(e, 4) for e in edges], "ranges": ranges}
+
+
+def band_stats(closes: list, horizon: int, edges: list, codes: list, seed: int = BAND_SEED) -> dict:
+    """지금 가격·남은 기간으로 {'probs': {code: %}, 'mids': {code: 그 구간의 평균 가격}}. codes 는 가격이 높은 구간부터.
+
+    mids 는 구간 표시 범위의 한가운데가 아니라 **그 구간 안의 조건부 평균**이다. 맨 위 구간은 오른쪽 꼬리가 길어
+    한가운데를 쓰면 기대값이 위로 부풀고, 추세를 뺀 분포인데도 '오를 것 같다' 처럼 보인다."""
+    prices = terminal_prices(closes, horizon, seed=seed + 1)          # 구간을 자를 때와 다른 표본
+    if not prices or len(codes) != len(edges) + 1:
+        return {}
+    counts, sums = [0] * len(codes), [0.0] * len(codes)
+    low_first = list(reversed(codes))
+    for px in prices:
+        i = 0
+        while i < len(edges) and px > edges[i]:
+            i += 1
+        counts[i] += 1
+        sums[i] += px
+    return {"probs": {code: round(counts[i] / len(prices) * 100, 1) for i, code in enumerate(low_first)},
+            "mids": {code: round(sums[i] / counts[i], 1) if counts[i] else None for i, code in enumerate(low_first)}}
 
 
 def softmax_probs(base: dict, terms: dict) -> dict:

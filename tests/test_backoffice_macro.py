@@ -45,7 +45,7 @@ def test_home_shows_collected_indicators_and_calendar(store):
     assert r.status_code == 200
     for text in ("가장 유력한 연말 경로", "박스권", "판별 지표", "FOMC 기준금리", "BOJ 기준금리", "미 국채 10년", "5.03",
                  "상향 (30일 +22.3%)", "강세 (30일 +7.7%)", "1.7%", "이벤트 캘린더", "엔비디아 실적",
-                 "분석 프레임이며 예측·컨센서스·투자 자문이 아님"):
+                 "예측·컨센서스·투자 자문이 아님"):
         assert text in r.text, text
     assert "수집 대기" not in r.text.split("판별 지표")[1].split("미국 · 일본")[0]        # 지표 표에 빈칸이 없다
     assert c.get("/partials/home-market").status_code == 200
@@ -68,19 +68,15 @@ def test_manage_is_admin_only_and_read_only(store):
     assert admin.post("/macro/manage/event", data={"event_date": "2026-09-17"}).status_code == 404
 
 
-def test_scenarios_must_sum_to_100(store):
+def test_scenario_editing_is_gone(store):
+    """시나리오도 자동이다 — 편집 폼과 저장 주소가 없고, 값은 워커가 채운 그대로 읽기만 한다."""
     seed(store)
     admin = logged_in(A, store)
-    form = {}
-    for s in MS.list_scenarios(store):
-        form.update({f"{s['code']}_name": s["name"], f"{s['code']}_trigger": s["trigger_text"],
-                     f"{s['code']}_low": s["soxx_low"], f"{s['code']}_high": s["soxx_high"], f"{s['code']}_prob": s["base_prob"]})
-    r = admin.post("/macro/manage/scenarios", data={**form, "S1_prob": 40})
-    assert r.status_code == 400 and "합이 100" in r.text
-    assert admin.post("/macro/manage/scenarios", data={**form, "S1_prob": 30, "S2_prob": 30},
-                      follow_redirects=False).status_code == 303
-    assert {s["code"]: s["base_prob"] for s in MS.list_scenarios(store)}["S1"] == 30
-    assert admin.post("/macro/manage/scenarios", data={**form, "S4_low": 400, "S4_high": 300}).status_code == 400
+    r = admin.get("/macro/manage")
+    assert "연말 시나리오" in r.text and "SOXX 분포에서 자동으로" in r.text
+    assert "/macro/manage/scenarios" not in r.text and "시나리오 저장" not in r.text
+    assert admin.post("/macro/manage/scenarios", data={"S1_prob": 40}).status_code == 404
+    assert "아직 구간을 잡지 않았다" in r.text                       # 시드 직후에는 구간이 없다
 
 
 def test_status_moved_and_summary_redirect(store):

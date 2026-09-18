@@ -315,7 +315,8 @@ SETTING_DEFAULTS = {
     "binance_scan_universe": "{}",       # 워커가 고른 급변 감시 목록 스냅샷 (JSON) — 백오피스 표시용
     "binance_scan_fade_pending": "{}",   # 급등 소진 숏 대기 목록 {심볼: {deadline, after}} (JSON) — 워커가 쓴다, 재시작해도 이어진다
     "binance_scan_last_alert": "{}",     # 급변 감시 코인별 마지막 알림 시각 {심볼: ms} (JSON) — 재시작해도 쿨다운이 이어진다
-    "macro_jobs": "{}",                  # 매크로 수집 작업별 {이름: {at, ok, rows, error}} (JSON) — alertbot/macro/worker.py 가 쓰고 홈·관리 화면이 읽는다
+    "macro_jobs": "{}",
+    "macro_bands": "{}",              # 연말 시나리오 구간 (SOXX 분포에서 자동으로 자른다 — 가격이 구간 밖으로 나갈 때만 다시 잡는다)                  # 매크로 수집 작업별 {이름: {at, ok, rows, error}} (JSON) — alertbot/macro/worker.py 가 쓰고 홈·관리 화면이 읽는다
 }
 
 # upsert 는 방언이 다르다. MySQL 은 8.0.19+ 의 행 별칭(AS new) 구문 — VALUES() 는 8.0.20 부터 폐기 예정.

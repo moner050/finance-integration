@@ -229,3 +229,64 @@ def test_calendar_month_grid_starts_sunday():
     assert m["prev"] == "2026-09" and m["next"] == "2026-11"
     oct28 = next(c for wk in m["weeks"] for c in wk if c["date"] == date(2026, 10, 28))
     assert any(e["kind"] == "FOMC" for e in oct28["events"])
+
+
+def _soxx(d, n: int = 700, last: float = None):
+    """추세 없이 흩어지기만 하는 가짜 SOXX 일봉을 넣는다. last 를 주면 마지막 날 종가를 그 값으로."""
+    closes, px = [100.0], 100.0
+    for i in range(n):
+        px *= 1 + 0.02 * (1 if i % 2 else -1) * (1 + (i % 7) / 10)
+        closes.append(px)
+    if last is not None:
+        closes[-1] = last
+    day = date(2026, 1, 2)
+    store.upsert_series(d, [("soxx", (day + timedelta(days=i)).isoformat(), v) for i, v in enumerate(closes)], "yahoo")
+    return closes
+
+
+def _worker(d):
+    return MacroWorker(d, clock=lambda: datetime(2026, 9, 18, tzinfo=timezone.utc))
+
+
+def test_job_bands_cuts_once_and_then_only_reprices():
+    """구간은 한 번만 자르고, 그 뒤 사이클은 같은 경계에 대고 확률만 다시 센다."""
+    d = mk()
+    seed(d)
+    _soxx(d)
+    w = _worker(d)
+
+    assert w.job_bands() == 4
+    bands = store.load_bands(d)
+    scen = {s["code"]: s for s in store.list_scenarios(d)}
+    assert bands["year"] == 2026 and bands["codes"] == ["S1", "S2", "S3", "S4"]
+    assert abs(sum(s["base_prob"] for s in scen.values()) - 100) < 0.5
+    assert scen["S1"]["soxx_low"] > scen["S4"]["soxx_high"]                  # 위 구간이 아래 구간보다 높다
+    assert scen["S2"]["trigger_text"]                                        # 이름·조건은 시드 그대로
+
+    w.job_bands()
+    assert store.load_bands(d)["edges"] == bands["edges"]                    # 다시 자르지 않는다
+
+
+def test_job_bands_recuts_when_price_leaves_the_range():
+    d = mk()
+    seed(d)
+    _soxx(d)
+    w = _worker(d)
+    w.job_bands()
+    first = store.load_bands(d)
+
+    _soxx(d, last=first["ranges"]["S1"][1] * 1.3)                            # 가격이 맨 위 구간 밖으로
+    w.job_bands()
+    assert store.load_bands(d)["edges"] != first["edges"]
+
+
+def test_job_bands_needs_history():
+    d = mk()
+    seed(d)
+    _soxx(d, n=60)                                                           # 1년치가 안 된다
+    try:
+        _worker(d).job_bands()
+        assert False, "표본이 모자라면 올라와야 한다"
+    except ValueError as e:
+        assert "모자란다" in str(e)
+    assert store.load_bands(d) == {} and store.list_scenarios(d)[0]["base_prob"] == 0

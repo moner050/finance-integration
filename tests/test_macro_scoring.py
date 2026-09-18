@@ -1,4 +1,6 @@
 """매크로 점수 — 등급 임계·곡선·시나리오 보정."""
+from datetime import date
+
 import pytest
 
 from alertbot.macro import scoring as SC
@@ -93,3 +95,53 @@ def test_soxx_spy_relative_low():
     up = [{"d": f"d{i:04d}", "v": 50.0 + i * 0.01} for i in range(300)]
     assert SC.soxx_spy_state(up, spy)["signal"] == 1
     assert SC.soxx_spy_state(soxx[:10], spy)["signal"] is None
+
+
+# -- 연말 구간·기본 확률 (자동) ----------------------------------------------------------
+
+def _walk(n: int, step: float = 0.02, start: float = 100.0) -> list:
+    """부호가 번갈아 커졌다 작아지는 가짜 일봉 — 추세 없이 흩어짐만 있는 계열."""
+    out, px = [start], start
+    for i in range(n):
+        px *= 1 + step * (1 if i % 2 else -1) * (1 + (i % 7) / 10)
+        out.append(px)
+    return out
+
+
+def test_horizon_and_year_end():
+    assert SC.year_end(date(2026, 9, 18)) == date(2026, 12, 31)
+    assert SC.year_end(date(2026, 12, 31)) == date(2027, 12, 31)       # 연말 당일이면 다음 해를 본다
+    assert SC.horizon_days(date(2026, 12, 31), date(2026, 12, 31)) == 0
+    assert 60 <= SC.horizon_days(date(2026, 9, 18), date(2026, 12, 31)) <= 80
+
+
+def test_bands_are_equal_probability_when_cut():
+    """자를 때는 네 구간이 25% 씩 — 사람이 넣은 사전 확률이 없다."""
+    closes = _walk(600)
+    codes = ["S1", "S2", "S3", "S4"]
+    b = SC.make_bands(closes, 60, codes)
+    assert [b["ranges"][c][0] for c in codes] == sorted([b["ranges"][c][0] for c in codes], reverse=True)
+    assert b["ranges"]["S4"][1] == b["ranges"]["S3"][0] and b["ranges"]["S2"][1] == b["ranges"]["S1"][0]
+    st = SC.band_stats(closes, 60, b["edges"], codes)
+    assert abs(sum(st["probs"].values()) - 100) < 0.5
+    assert all(20 <= p <= 30 for p in st["probs"].values())
+    # 구간별 평균은 그 구간 안에 있고 위에서 아래로 내려간다
+    assert all(b["ranges"][c][0] <= st["mids"][c] <= b["ranges"][c][1] for c in codes)
+    # 기대값(확률 × 구간 평균)은 추세를 뺐으니 현재가 근처여야 한다 — 표시 범위의 한가운데를 쓰면 위로 부푼다
+    ev = sum(st["probs"][c] / 100 * st["mids"][c] for c in codes)
+    assert abs(ev / closes[-1] - 1) < 0.03
+
+
+def test_probs_follow_the_price_against_fixed_bands():
+    """구간을 고정한 채 가격만 움직이면 확률이 그쪽으로 쏠린다 — 매일 다시 자르면 늘 25% 라 이게 핵심이다."""
+    closes = _walk(600)
+    codes = ["S1", "S2", "S3", "S4"]
+    b = SC.make_bands(closes, 60, codes)
+    up = SC.band_stats(closes[:-1] + [closes[-1] * 1.25], 60, b["edges"], codes)["probs"]
+    down = SC.band_stats(closes[:-1] + [closes[-1] * 0.75], 60, b["edges"], codes)["probs"]
+    assert up["S1"] > 40 > up["S4"] and down["S4"] > 40 > down["S1"]
+
+
+def test_bands_need_enough_history():
+    assert SC.make_bands(_walk(50), 60, ["S1", "S2"]) == {}            # 표본 부족
+    assert SC.terminal_prices(_walk(600), 0) == []                     # 남은 기간 없음

@@ -48,7 +48,7 @@ STALE_DAYS = 5
 WEEKDAYS = ("월", "화", "수", "목", "금", "토", "일")
 JOB_LABEL = {"yahoo": "시세(Yahoo)", "fred": "미 금리(FRED)", "mof": "JGB(MOF)", "bis": "BOJ 금리(BIS)", "jp_cpi": "일본 CPI(통계국)",
              "dram": "DRAM 현물가", "eps": "EPS 추정치", "calendar": "FOMC·BOJ 일정", "fred_calendar": "미 발표 일정",
-             "results": "결정 결과", "scenario_log": "시나리오 기록"}
+             "results": "결정 결과", "bands": "연말 구간·기본 확률", "scenario_log": "시나리오 기록"}
 RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[~–-]\s*(\d+(?:\.\d+)?)\s*%")
 
 
@@ -216,11 +216,12 @@ def compute_scenarios(db, today: date) -> dict:
         rows.append({"key": key, "label": meta["label"], "value": values[key][0], "as_of": values[key][1], "bull": meta["bull"],
                      "bear": meta["bear"], "signal": sig, "tone": tone, "direction": direction, "weight": meta["w"]})
     cur = s["soxx"][-1]["v"] if s["soxx"] else None
+    mids = store.load_bands(db).get("mids") or {}      # 구간별 조건부 평균 — 없으면 표시 범위의 한가운데
     for sc in scenarios:
         sc["prob"] = result["adjusted"].get(sc["code"])
         sc["base"] = result["base"].get(sc["code"])
         sc["delta"] = round(sc["prob"] - sc["base"], 1) if sc["prob"] is not None else None
-        sc["mid"] = (sc["soxx_low"] + sc["soxx_high"]) / 2
+        sc["mid"] = mids.get(sc["code"]) or (sc["soxx_low"] + sc["soxx_high"]) / 2
         sc["vs_now"] = (sc["mid"] / cur - 1) * 100 if cur else None
     return {"scenarios": scenarios, "result": result, "indicators": rows, "base_date": base_date, "soxx": cur,
             "missing": [r["label"] for r in rows if r["signal"] is None]}
@@ -232,6 +233,8 @@ def price_ruler(scenarios: list, cur: float, ev: float) -> dict:
         return {}
     lo = min([s["soxx_low"] for s in scenarios] + ([cur] if cur else []))
     hi = max([s["soxx_high"] for s in scenarios] + ([cur] if cur else []))
+    if hi <= lo:
+        return {}                       # 아직 구간을 자르지 않았다 (worker.job_bands 가 한 번 돌기 전)
     lo, hi = lo - (hi - lo) * 0.04, hi + (hi - lo) * 0.04
     pos = lambda v: round((v - lo) / (hi - lo) * 100, 2)
     return {"bands": [{"code": s["code"], "left": pos(s["soxx_low"]), "width": pos(s["soxx_high"]) - pos(s["soxx_low"])} for s in scenarios],
