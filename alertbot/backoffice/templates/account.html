@@ -26,6 +26,11 @@
   <span id="test-{{ p.name }}"></span>
   <span class="muted">{{ p.note }}</span>
  </div>
+ {% if p.detail %}
+ <dl class="kv full" style="margin:6px 0 0">
+  {% for term, text in p.detail %}<dt>{{ term }}</dt><dd><span class="muted">{{ text }}</span></dd>{% endfor %}
+ </dl>
+ {% endif %}
 </form>
 {% endfor %}
 {% endblock %}
